@@ -13,6 +13,7 @@ publish = false
 # certs; both are confined here, the kernel stays sync — a per-transport runtime bridges the sync
 # `Recorder` to the async send stream over a channel.
 [dependencies]
+async-trait = { workspace = true }
 warden-core = { path = "../warden-core" }
 warden-record = { path = "../warden-record" }
 serde = { version = "1", features = ["derive"] }

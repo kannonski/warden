@@ -11,6 +11,9 @@ publish = false
 # tiny HTTP server hands out the xterm.js page. Each session opens a warden pty capability, so the
 # terminal's I/O is recorded + DLP-masked + killable exactly like any other governed capability.
 [dependencies]
+async-trait = { workspace = true }
+futures = { workspace = true }
+tokio-stream = "0.1"
 warden-core = { path = "../warden-core" }
 warden-host = { path = "../warden-host" }
 warden-caps = { path = "../warden-caps" }

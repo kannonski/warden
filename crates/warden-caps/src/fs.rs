@@ -1,5 +1,6 @@
 //! `fs.read` — read one file, nothing else.
 
+use async_trait::async_trait;
 use warden_core::{Broker, CapKind, CapRequest, Capability, OpSpec, Result, WardenError};
 
 pub const FS_READ: CapKind = CapKind("fs.read");
@@ -13,6 +14,7 @@ const OPS: &[OpSpec] = &[OpSpec {
 pub struct FsReadCap {
     path: std::path::PathBuf,
 }
+#[async_trait]
 impl Capability for FsReadCap {
     fn kind(&self) -> CapKind {
         FS_READ
@@ -20,12 +22,13 @@ impl Capability for FsReadCap {
     fn ops(&self) -> &'static [OpSpec] {
         OPS
     }
-    fn perform(&self, op: &str, _input: &[u8]) -> Result<Vec<u8>> {
+    async fn perform(&self, op: &str, _input: &[u8]) -> Result<Vec<u8>> {
         // kernel validates first; this defends the cap in isolation too (see `no_such_op`)
         if op != "read" {
             return Err(warden_core::no_such_op(FS_READ, op));
         }
-        std::fs::read(&self.path)
+        tokio::fs::read(&self.path)
+            .await
             .map_err(|e| WardenError::Cap(format!("read {}: {e}", self.path.display())))
     }
     fn revoke(&self) {
@@ -34,11 +37,12 @@ impl Capability for FsReadCap {
 }
 
 pub struct FsReadBroker;
+#[async_trait]
 impl Broker for FsReadBroker {
     fn handles(&self, req: &CapRequest) -> bool {
         req.kind == FS_READ
     }
-    fn grant(&self, req: &CapRequest) -> Result<Box<dyn Capability>> {
+    async fn grant(&self, req: &CapRequest) -> Result<Box<dyn Capability>> {
         Ok(Box::new(FsReadCap {
             path: req.arg.clone().into(),
         }))

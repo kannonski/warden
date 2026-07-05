@@ -13,6 +13,8 @@ publish = false
 # in-process demo runtime uses. wasmtime is isolated to this crate — the kernel stays dep-free, and
 # swapping engines (or adding a native runtime) is just another crate implementing `Runtime`.
 [dependencies]
+async-trait = { workspace = true }
+futures = { workspace = true }
 warden-core = { path = "../warden-core" }
 wasmtime = "27"
 wasmtime-wasi = "27"

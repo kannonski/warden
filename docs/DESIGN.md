@@ -778,7 +778,6 @@ contributions and their shared state. That's the case the two-phase trait exists
 | `warden-wasm` | The WASM runtimes (core-module + component model). |
 | `warden-transport` | QUIC transport (TLS 1.3, one session = one bidi stream). |
 | `warden-gateway` | The remote axis: dial-out, register-by-name, splice. |
-| `warden-web` | A minimal browser console (xterm.js over HTTP+SSE). |
 | `warden` | Composition root + demo binary (the ten demos). |
 | `kedi` | The governed web terminal — the worked example (§9). |
 

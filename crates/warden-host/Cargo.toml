@@ -11,4 +11,9 @@ publish = false
 # turns "impl a trait + edit the composition root" into "drop in a plugin". Depends only on the
 # kernel — no IO, no external deps.
 [dependencies]
+async-trait = { workspace = true }
 warden-core = { path = "../warden-core" }
+
+[dev-dependencies]
+futures = { workspace = true }
+tokio = { workspace = true }

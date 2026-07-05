@@ -11,6 +11,10 @@ publish = false
 # itself: the broker pulls it from a Vault, the capability uses it, no op returns it, revoke
 # zeroizes it. Isolated from the ACTION, not the warden (warden-blind needs TEE/HSM — later tier).
 [dependencies]
+async-trait = { workspace = true }
 warden-core = { path = "../warden-core" }
 hmac = "0.12"
 sha2 = "0.10"
+
+[dev-dependencies]
+tokio = { workspace = true }

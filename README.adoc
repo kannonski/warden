@@ -128,13 +128,9 @@ design; recording is opt-in. Full guide: link:crates/kedi/README.adoc[crates/ked
   for a warden by name; the gateway opens a fresh bidi stream on that warden's connection and
   splices the two. The warden still runs and enforces end-to-end; the gateway only moves bytes.
 
-| `warden-web`
-| A minimal browser console: xterm.js over the same governed session model, via hand-rolled
-  HTTP + SSE. Run and kill from the page; the browser sees exactly the wire client's event stream.
-
 | `warden`
 | Composition root (policy, quorum approver, interceptors, catalog) + demo binary. CLI:
-  `replay` / `serve` / `connect` / `kill` / `web` / `gateway` / `tunnel` / `rconnect`.
+  `replay` / `serve` / `connect` / `kill` / `gateway` / `tunnel` / `rconnect`.
 
 | `kedi`
 | *The governed web terminal.* Browser ↔ kedi is QUIC via WebTransport (HTTP/3); each pane is a

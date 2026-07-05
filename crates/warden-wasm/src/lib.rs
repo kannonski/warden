@@ -18,6 +18,7 @@
 mod component;
 pub use component::ComponentRuntime;
 
+use async_trait::async_trait;
 use warden_core::{Action, ActionSource, Ctx, Result, Runtime, WardenError};
 use wasmtime::{Caller, Engine, Linker, Module, Store};
 
@@ -29,12 +30,13 @@ struct HostState {
 
 pub struct WasmRuntime;
 
+#[async_trait]
 impl Runtime for WasmRuntime {
     fn name(&self) -> &'static str {
         "wasm"
     }
 
-    fn run(&self, action: Action, ctx: &Ctx) -> Result<()> {
+    async fn run(&self, action: Action, ctx: &Ctx) -> Result<()> {
         let bytes = match action.source {
             ActionSource::Wasm(b) => b,
             _ => {
@@ -65,7 +67,13 @@ impl Runtime for WasmRuntime {
                         1 => "write",
                         _ => return -1,
                     };
-                    match ctx.invoke(cap, op_name, Vec::new()) {
+                    // The guest ABI here is synchronous (`invoke(op: i32) -> i32`), so this host
+                    // callback can't `.await`. `ctx.invoke` is async now, so block on it. Honest
+                    // caveat: this blocks the executor thread for the call's duration — fine for the
+                    // minimal demo shim (the real async host is the component runtime, which uses
+                    // wasmtime's async host functions). block_on is safe here because wasmtime is
+                    // driven synchronously (no async wasmtime config on this runtime).
+                    match futures::executor::block_on(ctx.invoke(cap, op_name, Vec::new())) {
                         Ok(out) => out.len() as i32,
                         Err(_) => -1,
                     }

@@ -10,6 +10,10 @@ publish = false
 # Capability-type implementations (fs.read, exec, …) + their brokers. Each capability is one module
 # implementing the two core traits — adding a capability-type never touches the kernel.
 [dependencies]
+async-trait = { workspace = true }
+tokio = { workspace = true }
+tokio-stream = "0.1"
+futures = { workspace = true }
 warden-core = { path = "../warden-core" }
 sha2 = "0.10"                                 # binary hash-pinning for the exec capability
 portable-pty = "0.8"                          # cross-platform PTY for the pty capability

@@ -220,8 +220,9 @@ impl Policy for PolicyChain {
 /// decisive. **Fail-closed:** no approver configured → reject (an escalation with nobody to approve
 /// it must not silently pass).
 struct ApproverChain(Vec<Arc<dyn Approver>>);
+#[async_trait::async_trait]
 impl Approver for ApproverChain {
-    fn decide(&self, req: &ApprovalRequest) -> Verdict {
+    async fn decide(&self, req: &ApprovalRequest) -> Verdict {
         if self.0.is_empty() {
             return Verdict::Rejected {
                 by: "warden".into(),
@@ -230,7 +231,7 @@ impl Approver for ApproverChain {
         }
         let mut merged = Vec::new();
         for a in &self.0 {
-            match a.decide(req) {
+            match a.decide(req).await {
                 Verdict::Approved { by } => merged.extend(by),
                 rejected => return rejected,
             }

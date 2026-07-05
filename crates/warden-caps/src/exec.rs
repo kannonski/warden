@@ -10,6 +10,7 @@
 //! and it flows back through the interceptor chain like any capability result, so the child's
 //! output is DLP-masked and recorded without the child ever knowing.
 
+use async_trait::async_trait;
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 use warden_core::{Broker, CapKind, CapRequest, Capability, OpSpec, Result, WardenError};
@@ -37,6 +38,7 @@ const OPS: &[OpSpec] = &[OpSpec {
     mutates: true,
 }];
 
+#[async_trait]
 impl Capability for ExecCap {
     fn kind(&self) -> CapKind {
         EXEC
@@ -44,7 +46,7 @@ impl Capability for ExecCap {
     fn ops(&self) -> &'static [OpSpec] {
         OPS
     }
-    fn perform(&self, op: &str, input: &[u8]) -> Result<Vec<u8>> {
+    async fn perform(&self, op: &str, input: &[u8]) -> Result<Vec<u8>> {
         // kernel validates first; this defends the cap in isolation too (see `no_such_op`)
         if op != "run" {
             return Err(warden_core::no_such_op(EXEC, op));
@@ -64,9 +66,10 @@ impl Capability for ExecCap {
                 .split(ARG_SEP)
                 .collect(),
         };
-        let out = std::process::Command::new(&self.program)
+        let out = tokio::process::Command::new(&self.program)
             .args(&args)
             .output()
+            .await
             .map_err(|e| WardenError::Cap(format!("spawn {}: {e}", self.program.display())))?;
         if !out.status.success() {
             return Err(WardenError::Cap(format!(
@@ -84,11 +87,12 @@ impl Capability for ExecCap {
 }
 
 pub struct ExecBroker;
+#[async_trait]
 impl Broker for ExecBroker {
     fn handles(&self, req: &CapRequest) -> bool {
         req.kind == EXEC
     }
-    fn grant(&self, req: &CapRequest) -> Result<Box<dyn Capability>> {
+    async fn grant(&self, req: &CapRequest) -> Result<Box<dyn Capability>> {
         let (path, want) = req.arg.split_once("@sha256:").ok_or_else(|| {
             WardenError::Cap(format!(
                 "exec request must be `<path>@sha256:<hex>`, got `{}`",

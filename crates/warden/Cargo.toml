@@ -18,5 +18,7 @@ warden-record = { path = "../warden-record" }
 warden-secret = { path = "../warden-secret" }
 warden-transport = { path = "../warden-transport" }
 warden-wasm = { path = "../warden-wasm" }
-warden-web = { path = "../warden-web" }
 wat = "1"                                     # compile the demo guest's embedded WAT → wasm bytes
+async-trait = { workspace = true }            # boxed async trait methods on the demo's dyn seams
+futures = { workspace = true }                # async streams (interactive pty input) + StreamExt
+tokio = { workspace = true }                  # async runtime: #[tokio::main] / #[tokio::test]

@@ -14,7 +14,6 @@ members = [
     "crates/warden-secret",
     "crates/warden-transport",
     "crates/warden-wasm",
-    "crates/warden-web",
     "crates/warden",
 ]
 
@@ -23,6 +22,13 @@ version = "0.1.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/kannonski/warden"
+
+# shared async deps — the kernel and its impls go async behind dyn seams, so async-trait (boxed
+# futures, dyn-compatible) is the pragmatic choice over native async-fn-in-trait.
+[workspace.dependencies]
+async-trait = "0.1"
+futures = "0.3"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "io-util", "time", "fs", "process"] }
 
 # lean, fast release artifacts (the kedi binary is a download)
 [profile.release]

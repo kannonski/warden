@@ -6,9 +6,14 @@
 //! [`Runtime`], [`Broker`], [`Policy`], [`Approver`], [`Interceptor`], [`Recorder`], [`Transport`],
 //! [`Capability`].
 //!
-//! No IO lives here — concrete impls live in sibling crates. Sync in this spike for clarity; the real
-//! thing is async (streams + IO), which changes the signatures, not the shape.
+//! No IO lives here — concrete impls live in sibling crates. The kernel is **async** (the seam
+//! methods that touch the world — `perform`, `grant`, `run`, `accept`, `intercept`, `decide`, and
+//! `invoke` — are `async`; the cheap/pure ones — `kind`, `ops`, `finished`, `handles`, `Policy`,
+//! `Recorder::record`, `revoke` — stay sync). It still performs no IO and *schedules nothing*: the
+//! output pump is a future the kernel runs concurrently via `futures::join`, not a thread it spawns.
 
+use async_trait::async_trait;
+use futures::StreamExt;
 use std::collections::HashMap;
 use std::fmt;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -203,18 +208,26 @@ pub fn no_such_op(kind: CapKind, op: &str) -> WardenError {
 
 /// A granted, mediated resource — THE extension axis. `perform` is the *raw* op; the kernel wraps
 /// every call through the interceptor chain, so impls never do policy/audit/masking themselves.
+///
+/// Async note: only the methods that touch the world are async. `perform` (does the IO) and `revoke`
+/// (releases the resource) await; `kind`/`ops`/`finished` are cheap and pure, so they stay sync.
+#[async_trait]
 pub trait Capability: Send + Sync {
     fn kind(&self) -> CapKind;
     /// The operations this capability accepts — its published contract (see [`OpSpec`]). The kernel
     /// validates every `perform`'s `op` against this set, so impls no longer hand-roll an
     /// "unknown op" arm. Should be a stable `&'static` slice.
     fn ops(&self) -> &'static [OpSpec];
-    fn perform(&self, op: &str, input: &[u8]) -> Result<Vec<u8>>;
+    async fn perform(&self, op: &str, input: &[u8]) -> Result<Vec<u8>>;
+    /// Release the resource — kill the child, zeroize the key. Kept **sync**: revocation is cheap
+    /// local cleanup (no IO to await), and a sync `revoke` is what lets the failure-path drop guard
+    /// (`GrantGuard`) run it from `Drop`, which cannot be async.
     fn revoke(&self);
     /// An optional *continuous output* stream (e.g. a pty's byte stream). The kernel takes it once,
     /// drains it through the interceptor chain (masking), and records each chunk as `Event::Output`
-    /// — so streamed output is governed exactly like a call's result. Default: no stream.
-    fn output(&self) -> Option<std::sync::mpsc::Receiver<Vec<u8>>> {
+    /// — so streamed output is governed exactly like a call's result. Default: no stream. The getter
+    /// is sync (it just hands over the stream); the *draining* is async (the kernel awaits chunks).
+    fn output(&self) -> Option<OutputStream> {
         None
     }
     /// Whether the capability's underlying resource has ended on its own — e.g. a pty whose shell
@@ -226,33 +239,44 @@ pub trait Capability: Send + Sync {
     }
 }
 
+/// A capability's continuous output as an async stream of byte chunks (e.g. a pty's bytes). The
+/// kernel awaits chunks off it, masks each, and records them as `Event::Output`.
+pub type OutputStream = std::pin::Pin<Box<dyn futures::Stream<Item = Vec<u8>> + Send>>;
+
 /// Turns a [`CapRequest`] into a live [`Capability`] (for secrets: pull a short-lived cred from a
-/// vault and return a handle the action can use but not read).
+/// vault and return a handle the action can use but not read). `grant` is async — it may do IO
+/// (open a pty, fetch from a vault); `handles` is a cheap sync predicate.
+#[async_trait]
 pub trait Broker: Send + Sync {
     fn handles(&self, req: &CapRequest) -> bool;
-    fn grant(&self, req: &CapRequest) -> Result<Box<dyn Capability>>;
+    async fn grant(&self, req: &CapRequest) -> Result<Box<dyn Capability>>;
 }
 
-/// Decisions at session open · each cap request · each call. Pure logic, no IO.
+/// Decisions at session open · each cap request · each call. **Pure logic, no IO — so it stays
+/// sync.** (If a policy ever needs to consult an external system, that's an `Escalate` resolved by
+/// an async [`Approver`], not IO inside the policy.)
 pub trait Policy: Send + Sync {
     fn on_session(&self, s: &SessionCtx) -> Decision;
     fn on_request(&self, s: &SessionCtx, req: &CapRequest) -> Decision;
     fn on_call(&self, s: &SessionCtx, call: &Call) -> Decision;
 }
 
-/// Resolves escalations. The spike blocks synchronously; the product approver is asynchronous —
-/// it parks the operation, pushes the request to humans (gateway UI, chat), and resumes on quorum.
+/// Resolves escalations — **the seam that most wants async.** The real approver parks the operation,
+/// pushes the request to humans (gateway UI, chat), and resumes on quorum; `decide` awaits that.
 /// Multi-party (N-of-M) approval is an impl of this seam, not a kernel feature.
+#[async_trait]
 pub trait Approver: Send + Sync {
-    fn decide(&self, req: &ApprovalRequest) -> Verdict;
+    async fn decide(&self, req: &ApprovalRequest) -> Verdict;
 }
 
 /// A stateful transform over one output stream's chunks (e.g. DLP masking a pty's bytes).
 pub type OutputMasker = Box<dyn FnMut(Vec<u8>) -> Vec<u8> + Send>;
 
 /// The mediation middleware — the chokepoint. Sees every call; may log, mask, meter, or deny.
+/// `intercept` is async (it wraps the async `perform`); `output_masker` is a sync per-chunk fn.
+#[async_trait]
 pub trait Interceptor: Send + Sync {
-    fn intercept(&self, call: Call, next: Next<'_>) -> Result<CallResult>;
+    async fn intercept(&self, call: Call, next: Next<'_>) -> Result<CallResult>;
     /// Build a fresh, STATEFUL masker for one output stream (e.g. a pty). It's per-stream so it can
     /// carry a tail across chunks and still catch a secret split across a read() boundary — the
     /// thing a stateless per-chunk transform cannot. Default: pass-through. The kernel folds every
@@ -262,7 +286,9 @@ pub trait Interceptor: Send + Sync {
     }
 }
 
-/// Append-only structured event sink → replay/rewind. Backend-pluggable.
+/// Append-only structured event sink → replay/rewind. Backend-pluggable. **Stays sync**: `record`
+/// is fire-and-forget (the file recorder already hands off to a background writer), so making it
+/// async would infect every call site — including the hot chokepoint — for no gain.
 pub trait Recorder: Send + Sync {
     fn record(&self, ev: Event);
 }
@@ -274,48 +300,24 @@ pub trait Recorder: Send + Sync {
 // SessionGuard); session-level governance (quotas, idle-timeout, handoff) will attach there when a
 // real user forces the hook's shape. See docs/boundary.md.
 
-/// How the kernel runs a concurrent *unit of work* — currently the output pump that drains a
-/// streaming capability, masks each chunk, and records it while the action runs. The kernel
-/// **describes** the work; the host **schedules** it. That keeps `warden-core` sans-IO: it never
-/// chooses a concurrency mechanism (an OS thread, a tokio task, an inline runner) — the host does,
-/// to match its own runtime. Default: [`ThreadSpawner`] (one std thread per unit), so a host that
-/// doesn't care gets the old behavior for free.
-pub trait Spawner: Send + Sync {
-    /// Run `work` concurrently with the caller; return a handle whose `join` blocks until it finishes.
-    fn spawn(&self, work: Box<dyn FnOnce() + Send>) -> Box<dyn Joiner>;
-}
-
-/// A handle to spawned work, joined once. `Box<Self>` so it's object-safe by-value.
-pub trait Joiner: Send {
-    fn join(self: Box<Self>);
-}
-
-/// The default [`Spawner`]: one OS thread per unit of work (what the kernel used to hardcode). A
-/// host with its own runtime (kedi → tokio) provides its own spawner instead, so the pump runs as a
-/// task on that runtime rather than a blocking thread.
-pub struct ThreadSpawner;
-impl Spawner for ThreadSpawner {
-    fn spawn(&self, work: Box<dyn FnOnce() + Send>) -> Box<dyn Joiner> {
-        Box::new(std::thread::spawn(work))
-    }
-}
-impl Joiner for std::thread::JoinHandle<()> {
-    fn join(self: Box<Self>) {
-        let _ = (*self).join();
-    }
-}
+// NOTE: there was a `Spawner` seam here (a host-provided thread/task scheduler for the output pump).
+// Async retired it: the pump is now a *future* the kernel runs concurrently with the action via
+// `futures::join` — no thread, no runtime choice, nothing to schedule. Async is itself the
+// mechanism-neutral concurrency the Spawner seam was reaching for. See docs/boundary.md.
 
 /// How an action executes. Impls: an in-process demo (here), a WASM component host, a native process.
+#[async_trait]
 pub trait Runtime: Send + Sync {
     fn name(&self) -> &'static str;
-    fn run(&self, action: Action, ctx: &Ctx) -> Result<()>;
+    async fn run(&self, action: Action, ctx: &Ctx) -> Result<()>;
 }
 
-/// How sessions arrive: local loopback, TCP, or a gateway reverse-tunnel. `accept` blocks until a
+/// How sessions arrive: local loopback, TCP, or a gateway reverse-tunnel. `accept` awaits until a
 /// client has delivered a full request, then hands the kernel everything it needs to act on it.
 /// The wire protocol is the transport's business; the kernel never sees bytes.
+#[async_trait]
 pub trait Transport: Send + Sync {
-    fn accept(&self) -> Result<Accepted>;
+    async fn accept(&self) -> Result<Accepted>;
 }
 
 /// What a transport accepted: a session to run, or a control verb.
@@ -339,7 +341,7 @@ pub struct Incoming {
     pub observer: Option<Arc<dyn Recorder>>,
     /// Async client→session input arriving DURING the session (keystrokes/resize for an interactive
     /// pty). The action drains it via [`Ctx::take_input`]. `None` for one-shot sessions.
-    pub input: Option<std::sync::mpsc::Receiver<InputFrame>>,
+    pub input: Option<InputStream>,
     /// Called with the outcome once the session closes (reply + hang up).
     pub done: DoneCallback,
 }
@@ -355,6 +357,11 @@ pub struct InputFrame {
     pub data: Vec<u8>,
 }
 
+/// The mid-session client→session input as an async stream of frames. An interactive action awaits
+/// frames off it and loops them into `invoke` (a pty attach); the stream ends when the client
+/// disconnects. Async, so the attach loop `.await`s a frame instead of polling a blocking recv.
+pub type InputStream = std::pin::Pin<Box<dyn futures::Stream<Item = InputFrame> + Send>>;
+
 // ── session & action ────────────────────────────────────────────────────────────────────────
 
 #[derive(Clone)]
@@ -363,10 +370,35 @@ pub struct SessionCtx {
     pub identity: String,
 }
 
-/// An action = something a [`Runtime`] runs. In the spike it's an in-process closure that uses the
-/// [`Ctx`] to invoke capabilities; the WASM runtime will instead drive a component's WASI imports
-/// into the same `ctx.invoke`.
-pub type ActionFn = Box<dyn Fn(&Ctx) -> Result<()> + Send + Sync>;
+/// An action = something a [`Runtime`] runs. In-process it's an async closure that uses the [`Ctx`]
+/// to invoke capabilities; the WASM runtime drives a component's imports into the same `ctx.invoke`.
+/// The closure borrows the `Ctx` for the lifetime of the future it returns, so it can `.await`
+/// invocations against it. Build one with [`action_fn`].
+pub type ActionFn = Box<
+    dyn for<'a> Fn(
+            &'a Ctx,
+        )
+            -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send + 'a>>
+        + Send
+        + Sync,
+>;
+
+/// Wrap a closure that returns an already-boxed, `ctx`-borrowing future into an [`ActionFn`]. Write
+/// actions as `action_fn(|ctx| Box::pin(async move { … ctx.invoke(…).await? … Ok(()) }))`. The
+/// explicit `Box::pin` is what lets the returned future borrow `ctx` for its own lifetime — a plain
+/// `async fn`-returning closure can't express that higher-ranked borrow through one type parameter.
+pub fn action_fn<F>(f: F) -> ActionFn
+where
+    F: for<'a> Fn(
+            &'a Ctx,
+        )
+            -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send + 'a>>
+        + Send
+        + Sync
+        + 'static,
+{
+    Box::new(f)
+}
 
 /// Where an action's code comes from — runtime-agnostic. Each [`Runtime`] handles the variant(s) it
 /// supports. A *new runtime* over an existing variant needs no core change (that's the swappability);
@@ -396,31 +428,49 @@ pub struct Session {
 
 // ── the interceptor chain (the chokepoint) ────────────────────────────────────────────────────
 
+/// The terminal of the interceptor chain: the raw async op (`capability.perform`). Returns a boxed
+/// future so it's a plain trait object the chain can hold.
+type Terminal<'a> = dyn Fn(Call) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<CallResult>> + Send + 'a>>
+    + Send
+    + Sync
+    + 'a;
+
 /// The continuation handed to each [`Interceptor`]: call the next one, or the terminal (the raw op).
 pub struct Next<'a> {
     rest: &'a [Arc<dyn Interceptor>],
-    terminal: &'a (dyn Fn(Call) -> Result<CallResult> + 'a),
+    terminal: &'a Terminal<'a>,
 }
 impl<'a> Next<'a> {
-    pub fn run(self, call: Call) -> Result<CallResult> {
-        match self.rest.split_first() {
-            Some((head, tail)) => head.intercept(
-                call,
-                Next {
-                    rest: tail,
-                    terminal: self.terminal,
-                },
-            ),
-            None => (self.terminal)(call),
-        }
+    /// Run the rest of the chain. Async and self-recursive (each interceptor awaits the next), so the
+    /// future is boxed — the standard shape for a recursive `async fn`.
+    pub fn run(
+        self,
+        call: Call,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<CallResult>> + Send + 'a>> {
+        Box::pin(async move {
+            match self.rest.split_first() {
+                Some((head, tail)) => {
+                    head.intercept(
+                        call,
+                        Next {
+                            rest: tail,
+                            terminal: self.terminal,
+                        },
+                    )
+                    .await
+                }
+                None => (self.terminal)(call).await,
+            }
+        })
     }
 }
 
 // ── the gate: one path for allow / deny / escalate→approve, wherever a decision is made ─────────
 
 /// Resolve a [`Decision`] into proceed-or-error, recording denials and the full escalation
-/// round-trip. Used at session open, at each grant, and at each call — the verbs are uniform.
-fn gate(
+/// round-trip. Used at session open, at each grant, and at each call — the verbs are uniform. Async
+/// because the escalate path awaits the [`Approver`].
+async fn gate(
     recorder: &dyn Recorder,
     approver: &dyn Approver,
     session: SessionId,
@@ -450,7 +500,7 @@ fn gate(
                 subject: subject.clone(),
                 reason,
             };
-            match approver.decide(&req) {
+            match approver.decide(&req).await {
                 Verdict::Approved { by } => {
                     recorder.record(Event::Approved {
                         session,
@@ -491,7 +541,7 @@ pub struct Ctx {
     recorder: Arc<dyn Recorder>,
     /// Set (to the killer's name) when the session is killed — every later invoke is refused.
     killed: Arc<OnceLock<String>>,
-    input: Mutex<Option<std::sync::mpsc::Receiver<InputFrame>>>,
+    input: Mutex<Option<InputStream>>,
     seq: AtomicU64,
 }
 
@@ -505,7 +555,7 @@ impl Ctx {
     /// The chokepoint. Refuse if killed, policy-gate the call (allow / deny / escalate→approve),
     /// record it, run it through the interceptor chain (which may mask/transform), then record the
     /// result. The action can *only* touch the world here.
-    pub fn invoke(&self, cap: CapId, op: &str, input: Vec<u8>) -> Result<Vec<u8>> {
+    pub async fn invoke(&self, cap: CapId, op: &str, input: Vec<u8>) -> Result<Vec<u8>> {
         // the kill switch bites exactly here: a killed action keeps its CPU, loses the world
         if let Some(by) = self.killed.get() {
             let why = format!("session killed by {by}");
@@ -548,7 +598,8 @@ impl Ctx {
             &self.session.identity,
             format!("call `{op}` on {}", call.kind.0),
             self.policy.on_call(&self.session, &call),
-        )?;
+        )
+        .await?;
         self.recorder.record(Event::Call {
             session: self.session.id,
             seq,
@@ -558,10 +609,14 @@ impl Ctx {
         });
 
         let cap_ref: &dyn Capability = cap_obj.as_ref();
-        let terminal = move |c: Call| -> Result<CallResult> {
-            Ok(CallResult {
-                output: cap_ref.perform(&c.op, &c.input)?,
+        let terminal = move |c: Call| {
+            let cap_ref = cap_ref;
+            Box::pin(async move {
+                Ok(CallResult {
+                    output: cap_ref.perform(&c.op, &c.input).await?,
+                })
             })
+                as std::pin::Pin<Box<dyn std::future::Future<Output = Result<CallResult>> + Send>>
         };
         let next = Next {
             rest: self.interceptors.as_slice(),
@@ -569,7 +624,7 @@ impl Ctx {
         };
         // every recorded Call gets a recorded outcome — a refused/failed op must not leave a
         // dangling call in the trail
-        let res = match next.run(call) {
+        let res = match next.run(call).await {
             Ok(r) => r,
             Err(e) => {
                 self.recorder.record(Event::Failed {
@@ -603,7 +658,7 @@ impl Ctx {
     /// Take the session's client→session input stream (keystrokes/resize), once. An interactive
     /// action loops it into `invoke` (e.g. a pty attach: `frame → invoke(pty, &frame.op, data)`);
     /// the loop ends when the client disconnects (stream closes).
-    pub fn take_input(&self) -> Option<std::sync::mpsc::Receiver<InputFrame>> {
+    pub fn take_input(&self) -> Option<InputStream> {
         self.input.lock().unwrap().take()
     }
 
@@ -669,7 +724,6 @@ pub struct Warden {
     brokers: Vec<Arc<dyn Broker>>,
     runtimes: HashMap<&'static str, Arc<dyn Runtime>>,
     recorder: Arc<dyn Recorder>,
-    spawner: Arc<dyn Spawner>,
     live: Mutex<HashMap<u64, LiveSession>>,
     next_cap: AtomicU64,
 }
@@ -742,18 +796,9 @@ impl Warden {
             brokers,
             runtimes,
             recorder,
-            spawner: Arc::new(ThreadSpawner), // default: one std thread per pump (host may override)
             live: Mutex::new(HashMap::new()),
             next_cap: AtomicU64::new(0),
         }
-    }
-
-    /// Provide the [`Spawner`] the kernel uses to run output pumps concurrently. A host with its own
-    /// runtime (e.g. tokio) supplies one so the kernel never spawns an OS thread itself. Default:
-    /// [`ThreadSpawner`].
-    pub fn with_spawner(mut self, spawner: Arc<dyn Spawner>) -> Self {
-        self.spawner = spawner;
-        self
     }
 
     /// Kill a live session: record the kill in its stream and refuse every later capability call.
@@ -790,34 +835,36 @@ impl Warden {
         v
     }
 
-    pub fn run_session(&self, session: Session, runtime: &str) -> Result<()> {
-        self.run_session_observed(session, runtime, None)
+    pub async fn run_session(&self, session: Session, runtime: &str) -> Result<()> {
+        self.run_session_observed(session, runtime, None).await
     }
 
     /// Run a session with an optional per-session observer (a transport's live client view). The
     /// observer sees exactly what the record sees — post-mask, nothing extra.
-    pub fn run_session_observed(
+    pub async fn run_session_observed(
         &self,
         session: Session,
         runtime: &str,
         observer: Option<Arc<dyn Recorder>>,
     ) -> Result<()> {
-        self.run_full(session, runtime, observer, None)
+        self.run_full(session, runtime, observer, None).await
     }
 
     /// Accept-and-run loop body for a [`Transport`]: run the incoming session (with its client
     /// observer and mid-session input), then tell the client the outcome.
-    pub fn run_incoming(&self, inc: Incoming) {
-        let result = self.run_full(inc.session, &inc.runtime, inc.observer, inc.input);
+    pub async fn run_incoming(&self, inc: Incoming) {
+        let result = self
+            .run_full(inc.session, &inc.runtime, inc.observer, inc.input)
+            .await;
         (inc.done)(&result);
     }
 
-    fn run_full(
+    async fn run_full(
         &self,
         session: Session,
         runtime: &str,
         observer: Option<Arc<dyn Recorder>>,
-        input: Option<std::sync::mpsc::Receiver<InputFrame>>,
+        input: Option<InputStream>,
     ) -> Result<()> {
         let recorder: Arc<dyn Recorder> = match observer {
             Some(obs) => Arc::new(Tee(self.recorder.clone(), obs)),
@@ -855,32 +902,38 @@ impl Warden {
         // exit. Session-level governance (quotas, idle-timeout, handoff) will attach here when a real
         // user forces its shape — the parked SessionHook seam lived here (see docs/boundary.md).
         self.drive(session, runtime, recorder.clone(), killed, input)
+            .await
     }
 
-    fn drive(
+    async fn drive(
         &self,
         session: Session,
         runtime: &str,
         recorder: Arc<dyn Recorder>,
         killed: Arc<OnceLock<String>>,
-        input: Option<std::sync::mpsc::Receiver<InputFrame>>,
+        input: Option<InputStream>,
     ) -> Result<()> {
         let sctx = SessionCtx {
             id: session.id,
             identity: session.identity.clone(),
         };
-        let gate_here = |subject: String, decision: Decision| {
-            gate(
-                recorder.as_ref(),
-                self.approver.as_ref(),
-                session.id,
-                &sctx.identity,
-                subject,
-                decision,
-            )
-        };
+        // a small async helper so the three gate points read uniformly (closures can't be async and
+        // borrow like this cleanly, so it's a plain async block per call)
+        macro_rules! gate_here {
+            ($subject:expr, $decision:expr) => {
+                gate(
+                    recorder.as_ref(),
+                    self.approver.as_ref(),
+                    session.id,
+                    &sctx.identity,
+                    $subject,
+                    $decision,
+                )
+                .await
+            };
+        }
 
-        gate_here("open session".into(), self.policy.on_session(&sctx))?;
+        gate_here!("open session".into(), self.policy.on_session(&sctx))?;
 
         // caps live in the guard until handed to the Ctx: any early return below (a denied/failed
         // grant, a missing runtime) drops it, revoking whatever was already granted.
@@ -891,16 +944,16 @@ impl Warden {
             armed: true,
         };
         for req in &session.requests {
-            gate_here(
+            gate_here!(
                 format!("grant {} {}", req.kind.0, req.arg),
-                self.policy.on_request(&sctx, req),
+                self.policy.on_request(&sctx, req)
             )?;
             let broker = self
                 .brokers
                 .iter()
                 .find(|b| b.handles(req))
                 .ok_or(WardenError::NoBroker(req.kind))?;
-            let cap = broker.grant(req)?;
+            let cap = broker.grant(req).await?;
             let id = CapId(self.next_cap.fetch_add(1, Ordering::Relaxed) + 1);
             recorder.record(Event::CapGranted {
                 session: session.id,
@@ -916,21 +969,23 @@ impl Warden {
             .ok_or_else(|| WardenError::NoRuntime(runtime.to_string()))?
             .clone();
 
-        // An output pump per streaming capability (e.g. a pty): drain raw chunks, mask them through
-        // the interceptor chain, record each as Event::Output → the observer/client. Streamed output
-        // is governed at the same chokepoint as call results. The kernel *describes* this work and
-        // hands it to the host's `Spawner` — it does not choose the concurrency mechanism itself.
-        let mut pumps = Vec::new();
+        // An output pump per streaming capability (e.g. a pty): drain the async chunk stream, mask
+        // each chunk through the interceptors, record it as Event::Output → the observer/client.
+        // Streamed output is governed at the same chokepoint as call results. Each pump is a *future*
+        // the kernel runs concurrently with the action (via `join` below) — no thread, no spawn, no
+        // runtime choice: async is itself the mechanism-neutral concurrency (the old `Spawner` seam,
+        // now retired).
+        let mut pump_futs = futures::stream::FuturesUnordered::new();
         for (id, cap) in &guard.caps {
-            if let Some(rx) = cap.output() {
+            if let Some(mut stream) = cap.output() {
                 let rec = recorder.clone();
                 let interceptors = self.interceptors.clone();
                 let (sid, cid) = (session.id, *id);
-                pumps.push(self.spawner.spawn(Box::new(move || {
+                pump_futs.push(async move {
                     // one stateful masker per interceptor, per stream (carries across chunk bounds)
                     let mut maskers: Vec<OutputMasker> =
                         interceptors.iter().map(|i| i.output_masker()).collect();
-                    for chunk in rx {
+                    while let Some(chunk) = stream.next().await {
                         let masked = maskers.iter_mut().fold(chunk, |b, m| m(b));
                         rec.record(Event::Output {
                             session: sid,
@@ -947,7 +1002,7 @@ impl Warden {
                             bytes: tail,
                         });
                     }
-                })));
+                });
             }
         }
 
@@ -963,16 +1018,18 @@ impl Warden {
             seq: AtomicU64::new(0),
         };
 
-        let result = rt.run(session.action, &ctx);
-        // Revoke FIRST, then join. A streaming capability's pump only ends when its source hits EOF
-        // (e.g. a pty closes) — which for a still-live child happens on revoke. Joining before revoke
-        // would deadlock when the action ends while the child is alive (an operator kill, or a client
-        // disconnect): the pump waits for EOF that only revoke produces. Revoking closes the child,
-        // the reader drains its trailing bytes then EOFs, and the join drains them onto the record.
-        ctx.revoke_all();
-        for p in pumps {
-            p.join();
-        }
+        // Run the action; when it finishes, revoke (which closes streaming children → EOFs their
+        // pumps). The pumps drain CONCURRENTLY the whole time — driven by the join below — so live
+        // output streams to the client while the action runs, yet they only *complete* after revoke.
+        // This preserves the sync version's load-bearing "revoke first, then finish the pumps"
+        // ordering: joining before revoke would deadlock (a pump waits for an EOF only revoke makes).
+        let run_side = async {
+            let result = rt.run(session.action, &ctx).await;
+            ctx.revoke_all();
+            result
+        };
+        let drain_side = async { while pump_futs.next().await.is_some() {} };
+        let (result, ()) = futures::future::join(run_side, drain_side).await;
         result
     }
 }

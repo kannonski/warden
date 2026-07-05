@@ -7,5 +7,9 @@ license.workspace = true
 repository.workspace = true
 publish = false
 
-# The sans-IO kernel: the seam traits + the mediation flow. No IO, no external deps → unit-testable.
+# The sans-IO kernel: the seam traits + the mediation flow. Still IO-free (it performs no reads/
+# writes/network and schedules nothing), but async now, so it carries the minimal async vocabulary:
+# async-trait (dyn-compatible async seam methods) and futures (the Stream type for output()).
 [dependencies]
+async-trait = { workspace = true }
+futures = { workspace = true }

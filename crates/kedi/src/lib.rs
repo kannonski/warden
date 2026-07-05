@@ -57,8 +57,9 @@ impl Policy for TerminalPolicy {
 }
 
 struct AutoApprover;
+#[async_trait::async_trait]
 impl Approver for AutoApprover {
-    fn decide(&self, _: &ApprovalRequest) -> Verdict {
+    async fn decide(&self, _: &ApprovalRequest) -> Verdict {
         Verdict::Approved {
             by: vec!["kedi".into()],
         }
@@ -67,13 +68,14 @@ impl Approver for AutoApprover {
 
 /// Runs an in-process action (the pty "attach" loop) on the calling (blocking) thread.
 struct LocalRuntime;
+#[async_trait::async_trait]
 impl Runtime for LocalRuntime {
     fn name(&self) -> &'static str {
         "local"
     }
-    fn run(&self, action: Action, ctx: &Ctx) -> WResult<()> {
+    async fn run(&self, action: Action, ctx: &Ctx) -> WResult<()> {
         match action.source {
-            ActionSource::InProcess(body) => body(ctx),
+            ActionSource::InProcess(body) => body(ctx).await,
             _ => Err(WardenError::Cap(
                 "kedi runs in-process attach actions".into(),
             )),
@@ -174,34 +176,16 @@ pub fn terminal_warden(
         }),
     ])
     .expect("kedi plugin set loads");
-    // kedi picks the concurrency mechanism for the kernel's output pumps — the kernel no longer
-    // hardcodes it. The pump drains a blocking std mpsc (a pty's bytes), so a thread is the right
-    // home (a tokio task would block a worker); kedi just names it for observability. The point is
-    // that this is now the *host's* choice, made here, not baked into warden-core.
-    let warden = loaded
-        .warden
-        .with_spawner(Arc::new(NamedThreadSpawner("kedi-pump")));
+    // The async kernel runs the pty output pump as a future it drives itself (no host-provided
+    // spawner anymore — that seam was retired when the kernel went async). The pty's blocking read
+    // still lives on its own OS thread inside warden-caps, bridged to the kernel as an async stream.
     Ok((
-        warden,
+        loaded.warden,
         RecordControl {
             on,
             path: record_path.to_string(),
         },
     ))
-}
-
-/// A [`Spawner`](warden_core::Spawner) that runs each pump on a named OS thread — kedi's explicit
-/// choice for its blocking pty-output pumps (see `terminal_warden`). Named so the threads show up as
-/// `kedi-pump` in a debugger / `top -H`, which the kernel's anonymous default can't do.
-struct NamedThreadSpawner(&'static str);
-impl warden_core::Spawner for NamedThreadSpawner {
-    fn spawn(&self, work: Box<dyn FnOnce() + Send>) -> Box<dyn warden_core::Joiner> {
-        let handle = std::thread::Builder::new()
-            .name(self.0.to_string())
-            .spawn(work)
-            .expect("spawn pump thread");
-        Box::new(handle)
-    }
 }
 
 /// The warden's currently-open sessions as JSON (id, identity, cap kinds) — record-independent, so
@@ -364,7 +348,7 @@ async fn pane_session(
     command: String,
     sid: u64,
 ) {
-    let (in_tx, in_rx) = std::sync::mpsc::channel::<InputFrame>();
+    let (in_tx, in_rx) = unbounded_channel::<InputFrame>();
     let (out_tx, mut out_rx) = unbounded_channel::<Vec<u8>>();
 
     // ── introduction: the first line names the session's (claimed) identity ──────────────────
@@ -399,31 +383,33 @@ async fn pane_session(
         }
     }
 
-    // the warden pty session: attach loop forwards client input until the client disconnects
+    // the warden pty session: attach loop forwards client input until the client disconnects.
+    // Async now — it *awaits* the next input frame (no polling → no typing latency), and a short
+    // ticker rides alongside via `select!` so the loop still tears down promptly when the shell
+    // exits (Ctrl-D) or an operator kills the session, not only on the next keystroke.
     let action = Action {
         name: "attach".into(),
-        source: ActionSource::InProcess(Box::new(|ctx: &Ctx| {
-            let pty = ctx.cap(PTY).ok_or(WardenError::Cap("no pty".into()))?;
-            let input = ctx
-                .take_input()
-                .ok_or(WardenError::Cap("no input channel".into()))?;
-            // forward client input, but don't block on it forever: poll so that when the shell exits
-            // (user types `exit` / Ctrl-D) the loop ends → session closes → the WebTransport stream
-            // closes → the browser closes the pane. Recv wakes immediately on a frame, so this adds
-            // no typing latency; the timeout only bounds how fast we notice a dead shell.
-            use std::sync::mpsc::RecvTimeoutError;
-            loop {
-                match input.recv_timeout(std::time::Duration::from_millis(100)) {
-                    Ok(frame) => {
-                        ctx.invoke(pty, &frame.op, frame.data)?;
+        source: ActionSource::InProcess(warden_core::action_fn(|ctx: &Ctx| {
+            Box::pin(async move {
+                let pty = ctx.cap(PTY).ok_or(WardenError::Cap("no pty".into()))?;
+                let mut input = ctx
+                    .take_input()
+                    .ok_or(WardenError::Cap("no input channel".into()))?;
+                use futures::StreamExt;
+                let mut tick = tokio::time::interval(std::time::Duration::from_millis(100));
+                loop {
+                    tokio::select! {
+                        frame = input.next() => match frame {
+                            Some(frame) => { ctx.invoke(pty, &frame.op, frame.data).await?; }
+                            None => break, // client gone (input stream closed)
+                        },
+                        _ = tick.tick() => {
+                            if ctx.finished(pty) || ctx.killed() { break; }
+                        }
                     }
-                    // tear down promptly on shell-exit OR an operator kill — not just on next keystroke
-                    Err(RecvTimeoutError::Timeout) if ctx.finished(pty) || ctx.killed() => break,
-                    Err(RecvTimeoutError::Timeout) => {}
-                    Err(RecvTimeoutError::Disconnected) => break, // client gone
                 }
-            }
-            Ok(())
+                Ok(())
+            })
         })),
     };
     let session = Session {
@@ -442,7 +428,9 @@ async fn pane_session(
         session,
         runtime: "local".into(),
         observer: Some(observer),
-        input: Some(in_rx),
+        input: Some(Box::pin(
+            tokio_stream::wrappers::UnboundedReceiverStream::new(in_rx),
+        )),
         done: Box::new(move |r: &warden_core::Result<()>| {
             if let Err(e) = r {
                 let _ =
@@ -451,11 +439,10 @@ async fn pane_session(
         }),
     };
 
-    // run the (sync) warden session on a dedicated OS thread — thread-per-session, decoupled from
-    // the tokio runtime's lifecycle (a tracked blocking task would deadlock the runtime on drop
-    // while the attach loop waits for input). It finishes when `in_tx` closes below.
+    // run the warden session as a tokio task now that the kernel is async — no more thread-per-
+    // session. It finishes when `in_tx` closes below (the attach loop's input stream ends).
     let warden_kill = warden.clone(); // kept for the {kill} control frame
-    std::thread::spawn(move || warden.run_incoming(inc));
+    tokio::spawn(async move { warden.run_incoming(inc).await });
 
     // pump pty output → the WebTransport stream (ends when the session drops `out_tx`)
     let out_task = tokio::spawn(async move {

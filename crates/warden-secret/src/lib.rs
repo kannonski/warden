@@ -10,6 +10,7 @@
 //! tier). And the vault seam is for *integration*: pull short-lived/dynamic credentials from a real
 //! vault; don't rebuild secret storage.
 
+use async_trait::async_trait;
 use hmac::{Hmac, Mac};
 use sha2::Sha256;
 use std::collections::HashMap;
@@ -55,6 +56,7 @@ const OPS: &[OpSpec] = &[OpSpec {
     mutates: false,
 }];
 
+#[async_trait]
 impl Capability for SignCap {
     fn kind(&self) -> CapKind {
         SIGN
@@ -62,7 +64,7 @@ impl Capability for SignCap {
     fn ops(&self) -> &'static [OpSpec] {
         OPS
     }
-    fn perform(&self, op: &str, input: &[u8]) -> Result<Vec<u8>> {
+    async fn perform(&self, op: &str, input: &[u8]) -> Result<Vec<u8>> {
         // kernel validates first; this defends the cap in isolation too (see `no_such_op`)
         if op != "sign" {
             return Err(warden_core::no_such_op(SIGN, op));
@@ -99,11 +101,12 @@ impl SignBroker {
         Self { vault }
     }
 }
+#[async_trait]
 impl Broker for SignBroker {
     fn handles(&self, req: &CapRequest) -> bool {
         req.kind == SIGN
     }
-    fn grant(&self, req: &CapRequest) -> Result<Box<dyn Capability>> {
+    async fn grant(&self, req: &CapRequest) -> Result<Box<dyn Capability>> {
         let key = self.vault.fetch(&req.arg).ok_or_else(|| {
             WardenError::Cap(format!("vault has no secret `{}` — grant refused", req.arg))
         })?;
@@ -117,20 +120,21 @@ impl Broker for SignBroker {
 mod tests {
     use super::*;
 
-    fn cap() -> Box<dyn Capability> {
+    async fn cap() -> Box<dyn Capability> {
         let vault = Arc::new(MemVault::new([("k".to_string(), b"topsecretkey".to_vec())]));
         SignBroker::new(vault)
             .grant(&CapRequest {
                 kind: SIGN,
                 arg: "k".into(),
             })
+            .await
             .unwrap()
     }
 
-    #[test]
-    fn signs_but_never_reveals() {
-        let c = cap();
-        let mac = c.perform("sign", b"payload").unwrap();
+    #[tokio::test]
+    async fn signs_but_never_reveals() {
+        let c = cap().await;
+        let mac = c.perform("sign", b"payload").await.unwrap();
         assert_eq!(mac.len(), 64); // hex-encoded hmac-sha256
         assert!(
             !String::from_utf8_lossy(&mac).contains("topsecret"),
@@ -138,14 +142,17 @@ mod tests {
         );
         // no op returns the key
         for op in ["reveal", "read", "export", "key"] {
-            assert!(c.perform(op, &[]).is_err(), "`{op}` should be refused");
+            assert!(
+                c.perform(op, &[]).await.is_err(),
+                "`{op}` should be refused"
+            );
         }
         // deterministic: same input, same mac
-        assert_eq!(c.perform("sign", b"payload").unwrap(), mac);
+        assert_eq!(c.perform("sign", b"payload").await.unwrap(), mac);
     }
 
-    #[test]
-    fn unknown_secret_refuses_grant_and_revoke_kills_signing() {
+    #[tokio::test]
+    async fn unknown_secret_refuses_grant_and_revoke_kills_signing() {
         let vault = Arc::new(MemVault::new([("k".to_string(), b"x".to_vec())]));
         let broker = SignBroker::new(vault);
         assert!(
@@ -154,13 +161,14 @@ mod tests {
                     kind: SIGN,
                     arg: "nope".into()
                 })
+                .await
                 .is_err()
         );
 
-        let c = cap();
+        let c = cap().await;
         c.revoke();
         assert!(
-            c.perform("sign", b"p").is_err(),
+            c.perform("sign", b"p").await.is_err(),
             "revoked cap must not sign"
         );
     }

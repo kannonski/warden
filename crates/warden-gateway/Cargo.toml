@@ -12,6 +12,7 @@ publish = false
 # A pure router — it moves bytes, it is not the enforcement point. Depends on warden-transport only
 # for the shared rendezvous wire types.
 [dependencies]
+async-trait = { workspace = true }
 warden-transport = { path = "../warden-transport" }
 serde_json = "1"
 quinn = "0.11"

@@ -385,7 +385,7 @@ pub struct QuicTransport {
     // holds a quinn endpoint driver deadlocks, so we detach the workers instead
     rt: Option<Runtime>,
     addr: SocketAddr,
-    rx: std::sync::Mutex<std::sync::mpsc::Receiver<Accepted>>,
+    rx: tokio::sync::Mutex<UnboundedReceiver<Accepted>>,
 }
 
 impl QuicTransport {
@@ -407,13 +407,13 @@ impl QuicTransport {
             std::io::Result::Ok((ep, bound))
         })?;
 
-        let (tx, rx) = std::sync::mpsc::channel::<Accepted>();
+        let (tx, rx) = unbounded_channel::<Accepted>();
         rt.spawn(accept_connections(endpoint, tx, catalog, next));
 
         Ok(Self {
             rt: Some(rt),
             addr: bound,
-            rx: std::sync::Mutex::new(rx),
+            rx: tokio::sync::Mutex::new(rx),
         })
     }
 
@@ -432,7 +432,7 @@ impl Drop for QuicTransport {
 
 async fn accept_connections(
     endpoint: Endpoint,
-    tx: std::sync::mpsc::Sender<Accepted>,
+    tx: UnboundedSender<Accepted>,
     catalog: Arc<Catalog>,
     next: Arc<AtomicU64>,
 ) {
@@ -454,13 +454,15 @@ async fn accept_connections(
     }
 }
 
+#[async_trait::async_trait]
 impl Transport for QuicTransport {
-    fn accept(&self) -> warden_core::Result<Accepted> {
+    async fn accept(&self) -> warden_core::Result<Accepted> {
         self.rx
             .lock()
-            .unwrap()
+            .await
             .recv()
-            .map_err(|_| io("endpoint closed"))
+            .await
+            .ok_or_else(|| io("endpoint closed"))
     }
 }
 
@@ -523,21 +525,20 @@ impl QuicTunnel {
     }
 }
 
+#[async_trait::async_trait]
 impl Transport for QuicTunnel {
-    fn accept(&self) -> warden_core::Result<Accepted> {
+    async fn accept(&self) -> warden_core::Result<Accepted> {
         let conn = self.conn.clone();
         let (catalog, next) = (self.catalog.clone(), self.next.clone());
-        // wait for the gateway to open a stream for the next session; loop past malformed ones
-        self.rt.as_ref().unwrap().block_on(async move {
-            loop {
-                let (send, recv) = conn.accept_bi().await.map_err(io)?;
-                if let Some(acc) =
-                    accept_stream(send, recv, "gateway".into(), &catalog, &next).await
-                {
-                    return Ok(acc);
-                }
+        // wait for the gateway to open a stream for the next session; loop past malformed ones.
+        // The quinn driver runs on our own `rt`; awaiting from the caller's runtime is fine because
+        // the connection is runtime-agnostic once that driver is alive.
+        loop {
+            let (send, recv) = conn.accept_bi().await.map_err(io)?;
+            if let Some(acc) = accept_stream(send, recv, "gateway".into(), &catalog, &next).await {
+                return Ok(acc);
             }
-        })
+        }
     }
 }
 

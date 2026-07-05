@@ -19,8 +19,9 @@
 //!  10. the record — hash-chain verified, replayed, rewound, and a doctored copy caught.
 //!
 //! CLI: `warden replay <file> [at]` · `serve <addr>` · `connect <addr> <action> …` · `kill …` ·
-//!      `web <addr>` · `gateway <addr>` · `tunnel <gw> <name>` · `rconnect <gw> <name> <action> …`.
+//!      `gateway <addr>` · `tunnel <gw> <name>` · `rconnect <gw> <name> <action> …`.
 
+use async_trait::async_trait;
 use std::sync::Arc;
 use warden_caps::exec::{ARG_SEP, EXEC, ExecBroker, sha256_hex_of};
 use warden_caps::fs::{FS_READ, FsReadBroker};
@@ -32,18 +33,65 @@ use warden_secret::{MemVault, SIGN, SignBroker};
 use warden_transport::{QuicTransport, QuicTunnel, WireCapRequest, WireRequest};
 // Accepted + Catalog come from warden_core::* above.
 
+/// Drive a future to completion on THIS thread with a bare parker executor — no tokio runtime, no
+/// `futures::executor` thread-local guard. The component (WASI) runtime needs both: wasmtime's sync
+/// linker refuses to run under an ambient tokio runtime (it falls back to its own), and the guest's
+/// capability calls bridge back to the async kernel with `futures::executor::block_on`, which panics
+/// if nested inside another `futures::executor::block_on`. A guard-free parker sidesteps both, so a
+/// component session runs on a plain `std::thread` exactly as it did before the kernel went async.
+fn block_on_bare<F: std::future::Future>(mut fut: F) -> F::Output {
+    use std::sync::Arc;
+    use std::task::{Context, Poll, Wake, Waker};
+    struct ThreadWaker(std::thread::Thread);
+    impl Wake for ThreadWaker {
+        fn wake(self: Arc<Self>) {
+            self.0.unpark();
+        }
+        fn wake_by_ref(self: &Arc<Self>) {
+            self.0.unpark();
+        }
+    }
+    let waker: Waker = Arc::new(ThreadWaker(std::thread::current())).into();
+    let mut cx = Context::from_waker(&waker);
+    // SAFETY: `fut` lives on this stack frame and is never moved after being pinned.
+    let mut fut = unsafe { std::pin::Pin::new_unchecked(&mut fut) };
+    loop {
+        match fut.as_mut().poll(&mut cx) {
+            Poll::Ready(out) => return out,
+            Poll::Pending => std::thread::park(),
+        }
+    }
+}
+
+/// Run one accepted session on a dedicated OS thread with [`block_on_bare`], awaiting its completion
+/// without blocking a tokio worker. Sessions may run the component (WASI) runtime, which must not
+/// execute under an ambient tokio runtime (see [`block_on_bare`]); routing every `run_incoming` here
+/// keeps the accept loop uniform. The tokio `Handle` is entered on the session thread so tokio-based
+/// capabilities (fs.read) still find a reactor.
+async fn run_incoming_bare(warden: Arc<Warden>, inc: warden_core::Incoming) {
+    let h = tokio::runtime::Handle::current();
+    let jh = std::thread::spawn(move || {
+        let _enter = h.enter();
+        block_on_bare(warden.run_incoming(inc));
+    });
+    tokio::task::spawn_blocking(move || jh.join().expect("session thread"))
+        .await
+        .expect("session join");
+}
+
 // ── interceptors: the chokepoint, composed. audit + DLP are just interceptors. ──────────────────
 
 struct LogInterceptor;
+#[async_trait]
 impl Interceptor for LogInterceptor {
-    fn intercept(&self, call: Call, next: Next<'_>) -> Result<CallResult> {
+    async fn intercept(&self, call: Call, next: Next<'_>) -> Result<CallResult> {
         eprintln!(
             "  → {}::{} ({} bytes in)",
             call.kind.0,
             call.op,
             call.input.len()
         );
-        let res = next.run(call)?;
+        let res = next.run(call).await?;
         eprintln!("  ← {} bytes out", res.output.len());
         Ok(res)
     }
@@ -72,10 +120,11 @@ impl MaskInterceptor {
         buf
     }
 }
+#[async_trait]
 impl Interceptor for MaskInterceptor {
-    fn intercept(&self, call: Call, next: Next<'_>) -> Result<CallResult> {
+    async fn intercept(&self, call: Call, next: Next<'_>) -> Result<CallResult> {
         Ok(CallResult {
-            output: Self::mask_all(next.run(call)?.output),
+            output: Self::mask_all(next.run(call).await?.output),
         })
     }
     fn output_masker(&self) -> warden_core::OutputMasker {
@@ -182,8 +231,9 @@ struct Quorum {
     members: Vec<(String, Vote)>,
     need: usize,
 }
+#[async_trait]
 impl Approver for Quorum {
-    fn decide(&self, req: &ApprovalRequest) -> Verdict {
+    async fn decide(&self, req: &ApprovalRequest) -> Verdict {
         let mut yes = Vec::new();
         for (name, vote) in &self.members {
             match vote(req) {
@@ -236,13 +286,14 @@ fn demo_approver() -> Arc<dyn Approver> {
 // ── runtimes: in-process (here) + the real wasm runtime (warden-wasm), both behind the seam ──────
 
 struct DemoRuntime;
+#[async_trait]
 impl Runtime for DemoRuntime {
     fn name(&self) -> &'static str {
         "demo"
     }
-    fn run(&self, action: Action, ctx: &Ctx) -> Result<()> {
+    async fn run(&self, action: Action, ctx: &Ctx) -> Result<()> {
         match action.source {
-            ActionSource::InProcess(body) => body(ctx),
+            ActionSource::InProcess(body) => body(ctx).await,
             _ => Err(WardenError::Cap(
                 "demo runtime requires an in-process action".into(),
             )),
@@ -330,15 +381,17 @@ fn catalog() -> Catalog {
         }
         // a deliberately long-running action — the kill-switch demo target
         "slow-read" => Ok((
-            ActionSource::InProcess(Box::new(|ctx: &Ctx| {
-                let fs = ctx
-                    .cap(FS_READ)
-                    .ok_or(WardenError::Cap("no fs.read granted".into()))?;
-                for _ in 0..50 {
-                    ctx.invoke(fs, "read", vec![])?; // dies here once the session is killed
-                    std::thread::sleep(std::time::Duration::from_millis(100));
-                }
-                Ok(())
+            ActionSource::InProcess(warden_core::action_fn(|ctx: &Ctx| {
+                Box::pin(async move {
+                    let fs = ctx
+                        .cap(FS_READ)
+                        .ok_or(WardenError::Cap("no fs.read granted".into()))?;
+                    for _ in 0..50 {
+                        ctx.invoke(fs, "read", vec![]).await?; // dies here once the session is killed
+                        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                    }
+                    Ok(())
+                })
             })),
             "demo".to_string(),
         )),
@@ -445,8 +498,8 @@ fn replay(path: &str, at: Option<usize>) -> std::result::Result<(), RecordError>
     Ok(())
 }
 
-/// `warden serve <addr>` — a warden accepting sessions over QUIC, thread per session.
-fn serve(addr: &str) -> ! {
+/// `warden serve <addr>` — a warden accepting sessions over QUIC, task per session.
+async fn serve(addr: &str) -> ! {
     let rec_path = std::env::temp_dir().join("warden-serve.jsonl");
     let file_rec = Arc::new(FileRecorder::create(&rec_path).expect("create record file"));
     let recorders: Vec<Arc<dyn Recorder>> = vec![Arc::new(StdoutRecorder), file_rec];
@@ -463,10 +516,10 @@ fn serve(addr: &str) -> ! {
         transport.local_addr()
     );
     loop {
-        match transport.accept() {
+        match transport.accept().await {
             Ok(Accepted::Session(inc)) => {
                 let w = warden.clone();
-                std::thread::spawn(move || w.run_incoming(inc));
+                tokio::spawn(async move { w.run_incoming(inc).await });
             }
             Ok(Accepted::Kill { session, by, ack }) => ack(warden.kill(session, &by)),
             Err(e) => eprintln!("[serve] refused: {e}"),
@@ -481,7 +534,7 @@ fn gateway(addr: &str) -> ! {
 
 /// `warden tunnel <gateway-addr> <name>` — a warden that dials OUT to the gateway (no inbound
 /// ports) and serves sessions routed to `<name>`.
-fn tunnel(args: &[String]) -> ! {
+async fn tunnel(args: &[String]) -> ! {
     let (Some(gw), Some(name)) = (args.first(), args.get(1)) else {
         eprintln!("usage: warden tunnel <gateway-addr> <name>");
         std::process::exit(2);
@@ -497,11 +550,11 @@ fn tunnel(args: &[String]) -> ! {
         rec_path.display()
     );
     loop {
-        match t.accept() {
+        match t.accept().await {
             Ok(Accepted::Session(inc)) => {
                 // NB: sequential accept in the spike — one dial-back served before the next; fine
                 // for the demo. Product tunnel multiplexes concurrent sessions over one connection.
-                warden.run_incoming(inc);
+                warden.run_incoming(inc).await;
             }
             Ok(Accepted::Kill { session, by, ack }) => ack(warden.kill(session, &by)),
             Err(e) => {
@@ -542,15 +595,8 @@ fn rconnect_cmd(args: &[String]) -> i32 {
     }
 }
 
-/// `warden web <addr>` — the browser console: xterm.js over the same governed session model.
-fn web(addr: &str) -> ! {
-    let rec_path = std::env::temp_dir().join("warden-web.jsonl");
-    let file_rec = Arc::new(FileRecorder::create(&rec_path).expect("create record file"));
-    let recorders: Vec<Arc<dyn Recorder>> = vec![Arc::new(StdoutRecorder), file_rec];
-    let warden = Arc::new(build_warden(recorders));
-    println!("record: {}", rec_path.display());
-    warden_web::serve(warden, catalog(), addr)
-}
+// (the `web` subcommand — the old SSE browser console, crate warden-web — was removed; kedi is the
+// browser console now: WebTransport/QUIC, a real pty capability, the full governance UI.)
 
 /// Parse `[--as identity] [kind=arg ...]` into an identity + capability requests.
 fn parse_session_args(args: &[String]) -> (String, Vec<WireCapRequest>) {
@@ -630,7 +676,8 @@ fn kill_cmd(args: &[String]) -> i32 {
     }
 }
 
-fn main() -> Result<()> {
+#[tokio::main(flavor = "multi_thread")]
+async fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.first().map(String::as_str) {
         // `warden replay <file> [at]` — verify + replay any record, optionally rewound to event #at
@@ -646,10 +693,9 @@ fn main() -> Result<()> {
             }
             return Ok(());
         }
-        Some("serve") => serve(args.get(1).map(String::as_str).unwrap_or("127.0.0.1:4747")),
+        Some("serve") => serve(args.get(1).map(String::as_str).unwrap_or("127.0.0.1:4747")).await,
         Some("gateway") => gateway(args.get(1).map(String::as_str).unwrap_or("127.0.0.1:4748")),
-        Some("tunnel") => tunnel(&args[1..]),
-        Some("web") => web(args.get(1).map(String::as_str).unwrap_or("127.0.0.1:8787")),
+        Some("tunnel") => tunnel(&args[1..]).await,
         Some("connect") => std::process::exit(connect_cmd(&args[1..])),
         Some("rconnect") => std::process::exit(rconnect_cmd(&args[1..])),
         Some("kill") => std::process::exit(kill_cmd(&args[1..])),
@@ -665,26 +711,28 @@ fn main() -> Result<()> {
     let rec_path = std::env::temp_dir().join("warden-session.jsonl");
     let file_rec = Arc::new(FileRecorder::create(&rec_path).expect("create record file"));
     let recorders: Vec<Arc<dyn Recorder>> = vec![Arc::new(StdoutRecorder), file_rec.clone()];
-    let warden = build_warden(recorders);
+    let warden = Arc::new(build_warden(recorders));
 
     // ── 1. fs.read, in-process runtime ──────────────────────────────────────────────────────────
     let action = Action {
         name: "read-config".into(),
-        source: ActionSource::InProcess(Box::new(|ctx: &Ctx| {
-            let fs = ctx
-                .cap(FS_READ)
-                .ok_or(WardenError::Cap("no fs.read granted".into()))?;
+        source: ActionSource::InProcess(warden_core::action_fn(|ctx: &Ctx| {
+            Box::pin(async move {
+                let fs = ctx
+                    .cap(FS_READ)
+                    .ok_or(WardenError::Cap("no fs.read granted".into()))?;
 
-            println!("\n-- action: read the file (mediated) --");
-            let bytes = ctx.invoke(fs, "read", vec![])?;
-            println!("  got (masked): {:?}", String::from_utf8_lossy(&bytes));
+                println!("\n-- action: read the file (mediated) --");
+                let bytes = ctx.invoke(fs, "read", vec![]).await?;
+                println!("  got (masked): {:?}", String::from_utf8_lossy(&bytes));
 
-            println!("\n-- action: try to WRITE (least-privilege: fs.read cannot) --");
-            match ctx.invoke(fs, "write", b"evil".to_vec()) {
-                Err(e) => println!("  correctly refused: {e}"),
-                Ok(_) => println!("  !! unexpectedly allowed"),
-            }
-            Ok(())
+                println!("\n-- action: try to WRITE (least-privilege: fs.read cannot) --");
+                match ctx.invoke(fs, "write", b"evil".to_vec()).await {
+                    Err(e) => println!("  correctly refused: {e}"),
+                    Ok(_) => println!("  !! unexpectedly allowed"),
+                }
+                Ok(())
+            })
         })),
     };
     let session = Session {
@@ -697,7 +745,7 @@ fn main() -> Result<()> {
         action,
     };
     println!("== 1. governed fs.read (in-process runtime) ==");
-    warden.run_session(session, "demo")?;
+    warden.run_session(session, "demo").await?;
 
     // ── 2. same warden, same capability — executed by the WASM runtime ──────────────────────────
     // The guest is a real wasm module; its one import `warden::invoke` is wired into `Ctx::invoke`,
@@ -723,7 +771,7 @@ fn main() -> Result<()> {
         },
     };
     println!("\n== 2. same warden, WASM runtime (the `Runtime` seam is swappable) ==");
-    warden.run_session(wasm_session, "wasm")?;
+    warden.run_session(wasm_session, "wasm").await?;
 
     // ── 3. exec: a hash-pinned binary ────────────────────────────────────────────────────────────
     let echo = "/bin/echo";
@@ -740,10 +788,12 @@ fn main() -> Result<()> {
         }],
         action: Action {
             name: "never-runs".into(),
-            source: ActionSource::InProcess(Box::new(|_| Ok(()))),
+            source: ActionSource::InProcess(warden_core::action_fn(|_| {
+                Box::pin(async move { Ok(()) })
+            })),
         },
     };
-    match warden.run_session(bad, "demo") {
+    match warden.run_session(bad, "demo").await {
         Err(e) => println!("  correctly refused: {e}"),
         Ok(_) => println!("  !! unexpectedly granted"),
     }
@@ -751,22 +801,24 @@ fn main() -> Result<()> {
     println!("\n-- right pin → child runs; its stdout flows back through the chokepoint --");
     let exec_action = Action {
         name: "run-echo".into(),
-        source: ActionSource::InProcess(Box::new(|ctx: &Ctx| {
-            let x = ctx
-                .cap(EXEC)
-                .ok_or(WardenError::Cap("no exec granted".into()))?;
-            let args = format!("deploy{ARG_SEP}API_TOKEN=hunter2");
-            let out = ctx.invoke(x, "run", args.into_bytes())?;
-            println!(
-                "  child stdout (masked): {:?}",
-                String::from_utf8_lossy(&out)
-            );
+        source: ActionSource::InProcess(warden_core::action_fn(|ctx: &Ctx| {
+            Box::pin(async move {
+                let x = ctx
+                    .cap(EXEC)
+                    .ok_or(WardenError::Cap("no exec granted".into()))?;
+                let args = format!("deploy{ARG_SEP}API_TOKEN=hunter2");
+                let out = ctx.invoke(x, "run", args.into_bytes()).await?;
+                println!(
+                    "  child stdout (masked): {:?}",
+                    String::from_utf8_lossy(&out)
+                );
 
-            match ctx.invoke(x, "shell", vec![]) {
-                Err(e) => println!("  `shell` correctly refused: {e}"),
-                Ok(_) => println!("  !! unexpectedly allowed"),
-            }
-            Ok(())
+                match ctx.invoke(x, "shell", vec![]).await {
+                    Err(e) => println!("  `shell` correctly refused: {e}"),
+                    Ok(_) => println!("  !! unexpectedly allowed"),
+                }
+                Ok(())
+            })
         })),
     };
     let exec_session = Session {
@@ -778,7 +830,7 @@ fn main() -> Result<()> {
         }],
         action: exec_action,
     };
-    warden.run_session(exec_session, "demo")?;
+    warden.run_session(exec_session, "demo").await?;
 
     // ── 4. escalation: the same grant, held for approval — and a rejection ───────────────────────
     println!("\n== 4. escalation: exec grants go through the approvers ==");
@@ -795,10 +847,12 @@ fn main() -> Result<()> {
         }],
         action: Action {
             name: "never-runs".into(),
-            source: ActionSource::InProcess(Box::new(|_| Ok(()))),
+            source: ActionSource::InProcess(warden_core::action_fn(|_| {
+                Box::pin(async move { Ok(()) })
+            })),
         },
     };
-    match warden.run_session(intern, "demo") {
+    match warden.run_session(intern, "demo").await {
         Err(e) => println!("  correctly rejected: {e}"),
         Ok(_) => println!("  !! unexpectedly approved"),
     }
@@ -815,10 +869,12 @@ fn main() -> Result<()> {
         }],
         action: Action {
             name: "never-runs".into(),
-            source: ActionSource::InProcess(Box::new(|_| Ok(()))),
+            source: ActionSource::InProcess(warden_core::action_fn(|_| {
+                Box::pin(async move { Ok(()) })
+            })),
         },
     };
-    match warden.run_session(bad_secret, "demo") {
+    match warden.run_session(bad_secret, "demo").await {
         Err(e) => println!("  correctly refused: {e}"),
         Ok(_) => println!("  !! unexpectedly granted"),
     }
@@ -833,21 +889,25 @@ fn main() -> Result<()> {
         }],
         action: Action {
             name: "sign-release".into(),
-            source: ActionSource::InProcess(Box::new(|ctx: &Ctx| {
-                let sign = ctx
-                    .cap(SIGN)
-                    .ok_or(WardenError::Cap("no sign granted".into()))?;
-                let mac = ctx.invoke(sign, "sign", b"release manifest v1.2.3".to_vec())?;
-                println!("  signature: {}", String::from_utf8_lossy(&mac));
-                match ctx.invoke(sign, "reveal", vec![]) {
-                    Err(e) => println!("  `reveal` correctly refused: {e}"),
-                    Ok(_) => println!("  !! unexpectedly allowed"),
-                }
-                Ok(())
+            source: ActionSource::InProcess(warden_core::action_fn(|ctx: &Ctx| {
+                Box::pin(async move {
+                    let sign = ctx
+                        .cap(SIGN)
+                        .ok_or(WardenError::Cap("no sign granted".into()))?;
+                    let mac = ctx
+                        .invoke(sign, "sign", b"release manifest v1.2.3".to_vec())
+                        .await?;
+                    println!("  signature: {}", String::from_utf8_lossy(&mac));
+                    match ctx.invoke(sign, "reveal", vec![]).await {
+                        Err(e) => println!("  `reveal` correctly refused: {e}"),
+                        Ok(_) => println!("  !! unexpectedly allowed"),
+                    }
+                    Ok(())
+                })
             })),
         },
     };
-    warden.run_session(sign_session, "demo")?;
+    warden.run_session(sign_session, "demo").await?;
 
     // ── 6. component-model ABI: capabilities as resource handles (wit/warden.wit) ───────────────
     println!("\n== 6. component-model ABI: a sandboxed guest holding capability handles ==");
@@ -876,7 +936,17 @@ fn main() -> Result<()> {
                     source: ActionSource::Wasm(component_bytes.clone()),
                 },
             };
-            warden.run_session(component_session, "component")?;
+            // The component (WASI) runtime uses wasmtime's SYNC linker, which refuses to run under an
+            // ambient tokio runtime. Run it on a plain thread with a bare parker executor (tokio
+            // Handle *entered* only so tokio-based caps like fs.read still find a reactor).
+            let w = warden.clone();
+            let h = tokio::runtime::Handle::current();
+            std::thread::spawn(move || {
+                let _enter = h.enter();
+                block_on_bare(w.run_session(component_session, "component"))
+            })
+            .join()
+            .expect("component thread")?;
         }
     }
 
@@ -887,14 +957,24 @@ fn main() -> Result<()> {
     if guest_bytes.is_none() {
         println!("  (skipped — needs the guest build, see above)");
     } else {
-        let transport = QuicTransport::bind("127.0.0.1:0", catalog(), 100).expect("bind");
+        // `bind` drives its own internal runtime with `block_on`, which cannot run on a tokio worker
+        // thread — do it off-worker via spawn_blocking.
+        let transport = Arc::new(
+            tokio::task::spawn_blocking(|| QuicTransport::bind("127.0.0.1:0", catalog(), 100))
+                .await
+                .expect("bind task")
+                .expect("bind"),
+        );
         let addr = transport.local_addr();
         println!("  warden listening on {addr} (one session)");
-        std::thread::scope(|s| {
-            s.spawn(|| match transport.accept() {
-                Ok(Accepted::Session(inc)) => warden.run_incoming(inc),
-                Ok(Accepted::Kill { .. }) => {}
-                Err(e) => eprintln!("  [server] refused: {e}"),
+        {
+            let (w, t) = (warden.clone(), transport.clone());
+            let server = tokio::spawn(async move {
+                match t.accept().await {
+                    Ok(Accepted::Session(inc)) => run_incoming_bare(w, inc).await,
+                    Ok(Accepted::Kill { .. }) => {}
+                    Err(e) => eprintln!("  [server] refused: {e}"),
+                }
             });
             let request = WireRequest::Session {
                 identity: "carol@web".into(),
@@ -910,52 +990,67 @@ fn main() -> Result<()> {
                 ],
                 action: "guest-demo".into(),
             };
-            let (events, outcome) = warden_transport::connect(addr, &request, |ev| {
-                println!("  [client] {}", describe(ev))
+            let (events, outcome) = tokio::task::spawn_blocking(move || {
+                warden_transport::connect(addr, &request, |ev| {
+                    println!("  [client] {}", describe(ev))
+                })
             })
+            .await
+            .expect("client task")
             .expect("connect");
             println!(
                 "  [client] outcome: {outcome:?} — {} events streamed",
                 events.len()
             );
-        });
+            server.await.expect("server task");
+        }
 
         // ── the kill switch: a runaway session, stopped mid-flight ──────────────────────────────
         // The kill lands in the session's own stream (the watching client sees it), and the next
         // capability call is refused — the action keeps its CPU, loses the world.
         println!("\n-- kill: a runaway `slow-read` session, killed by an operator --");
-        std::thread::scope(|s| {
-            s.spawn(|| {
+        {
+            let (w, t) = (warden.clone(), transport.clone());
+            let server = tokio::spawn(async move {
                 for _ in 0..2 {
-                    match transport.accept() {
+                    match t.accept().await {
                         Ok(Accepted::Session(inc)) => {
-                            s.spawn(|| warden.run_incoming(inc));
+                            let w = w.clone();
+                            tokio::spawn(async move { run_incoming_bare(w, inc).await });
                         }
-                        Ok(Accepted::Kill { session, by, ack }) => ack(warden.kill(session, &by)),
+                        Ok(Accepted::Kill { session, by, ack }) => ack(w.kill(session, &by)),
                         Err(e) => eprintln!("  [server] refused: {e}"),
                     }
                 }
             });
-            let victim = s.spawn(|| {
-                let request = WireRequest::Session {
-                    identity: "carol@web".into(),
-                    requests: vec![WireCapRequest {
-                        kind: "fs.read".into(),
-                        arg: path.to_string_lossy().into_owned(),
-                    }],
-                    action: "slow-read".into(),
-                };
-                warden_transport::connect(addr, &request, |ev| {
-                    println!("  [client] {}", describe(ev))
+            let victim = {
+                let victim_path = path.to_string_lossy().into_owned();
+                tokio::task::spawn_blocking(move || {
+                    let request = WireRequest::Session {
+                        identity: "carol@web".into(),
+                        requests: vec![WireCapRequest {
+                            kind: "fs.read".into(),
+                            arg: victim_path,
+                        }],
+                        action: "slow-read".into(),
+                    };
+                    warden_transport::connect(addr, &request, |ev| {
+                        println!("  [client] {}", describe(ev))
+                    })
+                    .expect("connect")
                 })
-                .expect("connect")
-            });
-            std::thread::sleep(std::time::Duration::from_millis(350));
-            let found = warden_transport::kill(addr, 101, "operator@gateway").expect("kill");
+            };
+            tokio::time::sleep(std::time::Duration::from_millis(350)).await;
+            let found = tokio::task::spawn_blocking(move || {
+                warden_transport::kill(addr, 101, "operator@gateway").expect("kill")
+            })
+            .await
+            .expect("kill task");
             println!("  [operator] kill session 101 → delivered: {found}");
-            let (_, outcome) = victim.join().expect("client thread");
+            let (_, outcome) = victim.await.expect("client task");
             println!("  [client] outcome: {outcome:?}");
-        });
+            server.await.expect("server task");
+        }
     }
 
     // ── 8. the gateway: the remote axis (warden dials out, client routes by name) ───────────────
@@ -968,49 +1063,65 @@ fn main() -> Result<()> {
         std::thread::spawn(move || warden_gateway::serve(&gw.to_string()));
         std::thread::sleep(std::time::Duration::from_millis(150));
 
-        // this warden already served demos 1-7 locally; now it also tunnels out as "prod-1"
-        let tunnel = QuicTunnel::connect(gw, "prod-1", catalog(), 3000).expect("tunnel connect");
+        // this warden already served demos 1-7 locally; now it also tunnels out as "prod-1".
+        // `connect` drives its own internal runtime with `block_on` → run it off the tokio worker.
+        let tunnel = Arc::new(
+            tokio::task::spawn_blocking(move || QuicTunnel::connect(gw, "prod-1", catalog(), 3000))
+                .await
+                .expect("tunnel task")
+                .expect("tunnel connect"),
+        );
         println!(
             "  warden 'prod-1' dialed out to the gateway at {gw} (no inbound port on the warden)"
         );
-        std::thread::scope(|s| {
+        {
             // serve exactly the one session the client routes here (the ghost request below is
             // refused at the gateway and never reaches this warden)
-            s.spawn(|| match tunnel.accept() {
-                Ok(Accepted::Session(inc)) => warden.run_incoming(inc),
-                Ok(Accepted::Kill { session, by, ack }) => ack(warden.kill(session, &by)),
-                Err(e) => eprintln!("  [prod-1] {e}"),
+            let (w, t) = (warden.clone(), tunnel.clone());
+            let server = tokio::spawn(async move {
+                match t.accept().await {
+                    Ok(Accepted::Session(inc)) => run_incoming_bare(w, inc).await,
+                    Ok(Accepted::Kill { session, by, ack }) => ack(w.kill(session, &by)),
+                    Err(e) => eprintln!("  [prod-1] {e}"),
+                }
             });
 
-            println!("\n-- client routes to 'prod-1' through the gateway --");
-            let request = WireRequest::Session {
-                identity: "carol@web".into(),
-                requests: vec![
-                    WireCapRequest {
-                        kind: "sign".into(),
-                        arg: "deploy-key".into(),
-                    },
-                    WireCapRequest {
-                        kind: "fs.read".into(),
-                        arg: path.to_string_lossy().into_owned(),
-                    },
-                ],
-                action: "guest-demo".into(),
-            };
-            let (events, outcome) = warden_transport::connect_via(gw, "prod-1", &request, |ev| {
-                println!("  [client] {}", describe(ev))
-            })
-            .expect("connect_via");
-            println!(
-                "  [client] outcome: {outcome:?} — {} events, all through the tunnel",
-                events.len()
-            );
+            let client_path = path.to_string_lossy().into_owned();
+            let client = tokio::task::spawn_blocking(move || {
+                let request = WireRequest::Session {
+                    identity: "carol@web".into(),
+                    requests: vec![
+                        WireCapRequest {
+                            kind: "sign".into(),
+                            arg: "deploy-key".into(),
+                        },
+                        WireCapRequest {
+                            kind: "fs.read".into(),
+                            arg: client_path,
+                        },
+                    ],
+                    action: "guest-demo".into(),
+                };
 
-            println!("\n-- client routes to an unknown warden → gateway refuses --");
-            let (_, bad) =
-                warden_transport::connect_via(gw, "ghost", &request, |_| {}).expect("connect_via");
-            println!("  [client] outcome: {bad:?}");
-        });
+                println!("\n-- client routes to 'prod-1' through the gateway --");
+                let (events, outcome) =
+                    warden_transport::connect_via(gw, "prod-1", &request, |ev| {
+                        println!("  [client] {}", describe(ev))
+                    })
+                    .expect("connect_via");
+                println!(
+                    "  [client] outcome: {outcome:?} — {} events, all through the tunnel",
+                    events.len()
+                );
+
+                println!("\n-- client routes to an unknown warden → gateway refuses --");
+                let (_, bad) = warden_transport::connect_via(gw, "ghost", &request, |_| {})
+                    .expect("connect_via");
+                println!("  [client] outcome: {bad:?}");
+            });
+            client.await.expect("client task");
+            server.await.expect("server task");
+        }
     }
 
     // ── 9. pty: a real shell's I/O flows through the chokepoint (masked, recorded) ───────────────
@@ -1026,16 +1137,18 @@ fn main() -> Result<()> {
         }],
         action: Action {
             name: "shell".into(),
-            source: ActionSource::InProcess(Box::new(|ctx: &Ctx| {
-                let pty = ctx
-                    .cap(PTY)
-                    .ok_or(WardenError::Cap("no pty granted".into()))?;
-                ctx.invoke(pty, "wait", vec![])?; // let the one-shot shell run to completion
-                Ok(())
+            source: ActionSource::InProcess(warden_core::action_fn(|ctx: &Ctx| {
+                Box::pin(async move {
+                    let pty = ctx
+                        .cap(PTY)
+                        .ok_or(WardenError::Cap("no pty granted".into()))?;
+                    ctx.invoke(pty, "wait", vec![]).await?; // let the one-shot shell run to completion
+                    Ok(())
+                })
             })),
         },
     };
-    warden.run_session(pty_session, "demo")?;
+    warden.run_session(pty_session, "demo").await?;
     println!("  (the shell's stdout streamed through warden — the secret masked in the record)");
 
     // ── 10. the record: verify the chain, replay the timeline, rewind, catch tampering ──────────
@@ -1113,8 +1226,8 @@ mod tests {
             .collect()
     }
 
-    #[test]
-    fn mediates_records_and_masks() {
+    #[tokio::test]
+    async fn mediates_records_and_masks() {
         let path = std::env::temp_dir().join("warden-spike-test.txt");
         std::fs::write(&path, "x\nSECRET=hunter2\n").unwrap();
 
@@ -1125,10 +1238,13 @@ mod tests {
         let got2 = got.clone();
         let action = Action {
             name: "t".into(),
-            source: ActionSource::InProcess(Box::new(move |ctx: &Ctx| {
-                let fs = ctx.cap(FS_READ).unwrap();
-                *got2.lock().unwrap() = ctx.invoke(fs, "read", vec![])?;
-                Ok(())
+            source: ActionSource::InProcess(warden_core::action_fn(move |ctx: &Ctx| {
+                let got2 = got2.clone();
+                Box::pin(async move {
+                    let fs = ctx.cap(FS_READ).unwrap();
+                    *got2.lock().unwrap() = ctx.invoke(fs, "read", vec![]).await?;
+                    Ok(())
+                })
             })),
         };
         let session = Session {
@@ -1140,7 +1256,7 @@ mod tests {
             }],
             action,
         };
-        warden.run_session(session, "demo").unwrap();
+        warden.run_session(session, "demo").await.unwrap();
 
         // the masked output reached the action; the raw secret never did
         let out = String::from_utf8(got.lock().unwrap().clone()).unwrap();
@@ -1155,8 +1271,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn exec_grant_refused_on_hash_mismatch() {
+    #[tokio::test]
+    async fn exec_grant_refused_on_hash_mismatch() {
         let rec = VecRecorder::default();
         let warden = build_warden(vec![Arc::new(rec.clone())]);
 
@@ -1169,10 +1285,12 @@ mod tests {
             }],
             action: Action {
                 name: "n".into(),
-                source: ActionSource::InProcess(Box::new(|_| Ok(()))),
+                source: ActionSource::InProcess(warden_core::action_fn(|_| {
+                    Box::pin(async move { Ok(()) })
+                })),
             },
         };
-        let err = warden.run_session(session, "demo").unwrap_err();
+        let err = warden.run_session(session, "demo").await.unwrap_err();
         assert!(
             err.to_string().contains("grant refused"),
             "unexpected error: {err}"
@@ -1187,8 +1305,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn pty_output_streams_through_the_chokepoint_masked() {
+    #[tokio::test]
+    async fn pty_output_streams_through_the_chokepoint_masked() {
         let rec = VecRecorder::default();
         let warden = build_warden(vec![Arc::new(rec.clone())]);
 
@@ -1201,14 +1319,16 @@ mod tests {
             }],
             action: Action {
                 name: "t".into(),
-                source: ActionSource::InProcess(Box::new(|ctx: &Ctx| {
-                    let pty = ctx.cap(PTY).unwrap();
-                    ctx.invoke(pty, "wait", vec![])?; // one-shot shell self-exits
-                    Ok(())
+                source: ActionSource::InProcess(warden_core::action_fn(|ctx: &Ctx| {
+                    Box::pin(async move {
+                        let pty = ctx.cap(PTY).unwrap();
+                        ctx.invoke(pty, "wait", vec![]).await?; // one-shot shell self-exits
+                        Ok(())
+                    })
                 })),
             },
         };
-        warden.run_session(session, "demo").unwrap();
+        warden.run_session(session, "demo").await.unwrap();
 
         // the shell's stdout arrived as Output events, DLP-masked, and never held the raw secret
         let evs = rec.0.lock().unwrap();
@@ -1230,8 +1350,9 @@ mod tests {
         );
     }
 
-    #[test]
-    fn pty_interactive_input_round_trips_masked() {
+    #[tokio::test]
+    async fn pty_interactive_input_round_trips_masked() {
+        use futures::StreamExt;
         use warden_core::{Incoming, InputFrame};
 
         let rec = VecRecorder::default();
@@ -1249,45 +1370,47 @@ mod tests {
             }],
             action: Action {
                 name: "attach".into(),
-                source: ActionSource::InProcess(Box::new(|ctx: &Ctx| {
-                    let pty = ctx.cap(PTY).ok_or(WardenError::Cap("no pty".into()))?;
-                    let input = ctx
-                        .take_input()
-                        .ok_or(WardenError::Cap("no input channel".into()))?;
-                    for frame in input {
-                        ctx.invoke(pty, &frame.op, frame.data)?;
-                    }
-                    Ok(())
+                source: ActionSource::InProcess(warden_core::action_fn(|ctx: &Ctx| {
+                    Box::pin(async move {
+                        let pty = ctx.cap(PTY).ok_or(WardenError::Cap("no pty".into()))?;
+                        let mut input = ctx
+                            .take_input()
+                            .ok_or(WardenError::Cap("no input channel".into()))?;
+                        while let Some(frame) = input.next().await {
+                            ctx.invoke(pty, &frame.op, frame.data).await?;
+                        }
+                        Ok(())
+                    })
                 })),
             },
         };
 
-        let (tx, rx) = std::sync::mpsc::channel::<InputFrame>();
+        let (tx, rx) = futures::channel::mpsc::unbounded::<InputFrame>();
         let inc = Incoming {
             session,
             runtime: "demo".to_string(),
             observer: None,
-            input: Some(rx),
+            input: Some(Box::pin(rx)),
             done: Box::new(|_| {}),
         };
 
-        std::thread::scope(|s| {
-            s.spawn(|| warden.run_incoming(inc));
+        let feed = async move {
             // type a line containing a secret, then ^D to end cat; drop tx → attach loop ends
-            tx.send(InputFrame {
+            tx.unbounded_send(InputFrame {
                 op: "input".into(),
                 data: b"token=hunter2\n".to_vec(),
             })
             .unwrap();
-            std::thread::sleep(std::time::Duration::from_millis(200));
-            tx.send(InputFrame {
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+            tx.unbounded_send(InputFrame {
                 op: "input".into(),
                 data: vec![0x04],
             })
             .unwrap(); // ^D
-            std::thread::sleep(std::time::Duration::from_millis(150));
+            tokio::time::sleep(std::time::Duration::from_millis(150)).await;
             drop(tx);
-        });
+        };
+        tokio::join!(warden.run_incoming(inc), feed);
 
         // the shell's echoed keystrokes + command output streamed back through the chokepoint,
         // DLP-masked; the raw secret is nowhere in the record
@@ -1309,8 +1432,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn intern_exec_is_rejected_by_quorum() {
+    #[tokio::test]
+    async fn intern_exec_is_rejected_by_quorum() {
         let rec = VecRecorder::default();
         let warden = build_warden(vec![Arc::new(rec.clone())]);
         let pin = sha256_hex_of("/bin/echo").unwrap();
@@ -1324,10 +1447,12 @@ mod tests {
             }],
             action: Action {
                 name: "n".into(),
-                source: ActionSource::InProcess(Box::new(|_| Ok(()))),
+                source: ActionSource::InProcess(warden_core::action_fn(|_| {
+                    Box::pin(async move { Ok(()) })
+                })),
             },
         };
-        let err = warden.run_session(session, "demo").unwrap_err();
+        let err = warden.run_session(session, "demo").await.unwrap_err();
         assert!(
             err.to_string().contains("may not run binaries"),
             "unexpected error: {err}"
@@ -1346,8 +1471,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn session_routed_through_gateway_still_enforces() {
+    #[tokio::test]
+    async fn session_routed_through_gateway_still_enforces() {
         let path = std::env::temp_dir().join("warden-gw-test.txt");
         std::fs::write(&path, "gw\nTOKEN=hunter2\n").unwrap();
 
@@ -1355,9 +1480,11 @@ mod tests {
         let warden = build_warden(vec![Arc::new(rec.clone())]);
         let cat: Catalog = Arc::new(|name| match name {
             "read-config" => Ok((
-                ActionSource::InProcess(Box::new(|ctx: &Ctx| {
-                    let fs = ctx.cap(FS_READ).unwrap();
-                    ctx.invoke(fs, "read", vec![]).map(drop)
+                ActionSource::InProcess(warden_core::action_fn(|ctx: &Ctx| {
+                    Box::pin(async move {
+                        let fs = ctx.cap(FS_READ).unwrap();
+                        ctx.invoke(fs, "read", vec![]).await.map(drop)
+                    })
                 })),
                 "demo".to_string(),
             )),
@@ -1369,15 +1496,20 @@ mod tests {
         std::thread::spawn(move || warden_gateway::serve(&gw.to_string()));
         std::thread::sleep(std::time::Duration::from_millis(150));
 
-        // warden dials out and registers "prod-1"
-        let tunnel = QuicTunnel::connect(gw, "prod-1", cat, 3000).unwrap();
+        // warden dials out and registers "prod-1" (own runtime `block_on` → off the tokio worker)
+        let tunnel = tokio::task::spawn_blocking(move || {
+            QuicTunnel::connect(gw, "prod-1", cat, 3000).unwrap()
+        })
+        .await
+        .unwrap();
 
-        std::thread::scope(|s| {
-            s.spawn(|| match tunnel.accept().unwrap() {
-                Accepted::Session(inc) => warden.run_incoming(inc),
+        let server = async {
+            match tunnel.accept().await.unwrap() {
+                Accepted::Session(inc) => warden.run_incoming(inc).await,
                 Accepted::Kill { .. } => panic!("expected a session"),
-            });
-
+            }
+        };
+        let client = tokio::task::spawn_blocking(move || {
             let request = WireRequest::Session {
                 identity: "web-user".into(),
                 requests: vec![WireCapRequest {
@@ -1413,10 +1545,12 @@ mod tests {
             let (_, bad) = warden_transport::connect_via(gw, "ghost", &request, |_| {}).unwrap();
             assert!(bad.is_err(), "unknown warden must be refused");
         });
+        let (_, client) = tokio::join!(server, client);
+        client.expect("client task");
     }
 
-    #[test]
-    fn session_over_quic_streams_the_masked_record() {
+    #[tokio::test]
+    async fn session_over_quic_streams_the_masked_record() {
         let path = std::env::temp_dir().join("warden-wire-test.txt");
         std::fs::write(&path, "wire\nPIN=hunter2\n").unwrap();
 
@@ -1426,24 +1560,32 @@ mod tests {
         // catalog with an in-process action so this test doesn't depend on the guest artifact
         let catalog: Catalog = Arc::new(|name| match name {
             "read-config" => Ok((
-                ActionSource::InProcess(Box::new(|ctx: &Ctx| {
-                    let fs = ctx.cap(FS_READ).unwrap();
-                    ctx.invoke(fs, "read", vec![]).map(drop)
+                ActionSource::InProcess(warden_core::action_fn(|ctx: &Ctx| {
+                    Box::pin(async move {
+                        let fs = ctx.cap(FS_READ).unwrap();
+                        ctx.invoke(fs, "read", vec![]).await.map(drop)
+                    })
                 })),
                 "demo".to_string(),
             )),
             other => Err(WardenError::Cap(format!("not in catalog: {other}"))),
         });
-        let transport = QuicTransport::bind("127.0.0.1:0", catalog, 500).unwrap();
+        // `bind` drives its own runtime with `block_on`; keep it off the tokio worker.
+        let transport = tokio::task::spawn_blocking(move || {
+            QuicTransport::bind("127.0.0.1:0", catalog, 500).unwrap()
+        })
+        .await
+        .unwrap();
         let addr = transport.local_addr();
 
-        let accept_session = |t: &QuicTransport| match t.accept().unwrap() {
-            Accepted::Session(inc) => inc,
-            Accepted::Kill { .. } => panic!("expected a session"),
+        let server = async {
+            let inc = match transport.accept().await.unwrap() {
+                Accepted::Session(inc) => inc,
+                Accepted::Kill { .. } => panic!("expected a session"),
+            };
+            warden.run_incoming(inc).await;
         };
-        std::thread::scope(|s| {
-            s.spawn(|| warden.run_incoming(accept_session(&transport)));
-
+        let client = tokio::task::spawn_blocking(move || {
             let request = WireRequest::Session {
                 identity: "wire-test".into(),
                 requests: vec![WireCapRequest {
@@ -1482,80 +1624,97 @@ mod tests {
             let (_, bad_outcome) = warden_transport::connect(addr, &bad, |_| {}).unwrap();
             assert!(bad_outcome.is_err(), "unknown action must be refused");
         });
+        let (_, client) = tokio::join!(server, client);
+        client.expect("client task");
     }
 
-    #[test]
-    fn kill_severs_a_live_session_mid_flight() {
+    #[tokio::test]
+    async fn kill_severs_a_live_session_mid_flight() {
         let path = std::env::temp_dir().join("warden-kill-test.txt");
         std::fs::write(&path, "x\n").unwrap();
 
         let rec = VecRecorder::default();
-        let warden = build_warden(vec![Arc::new(rec.clone())]);
+        let warden = Arc::new(build_warden(vec![Arc::new(rec.clone())]));
 
         // an action that loops on a capability until the world stops answering
         let catalog: Catalog = Arc::new(|name| match name {
             "loop-read" => Ok((
-                ActionSource::InProcess(Box::new(|ctx: &Ctx| {
-                    let fs = ctx.cap(FS_READ).unwrap();
-                    loop {
-                        ctx.invoke(fs, "read", vec![])?; // Err once killed → action ends
-                        std::thread::sleep(std::time::Duration::from_millis(20));
-                    }
+                ActionSource::InProcess(warden_core::action_fn(|ctx: &Ctx| {
+                    Box::pin(async move {
+                        let fs = ctx.cap(FS_READ).unwrap();
+                        loop {
+                            ctx.invoke(fs, "read", vec![]).await?; // Err once killed → action ends
+                            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                        }
+                    })
                 })),
                 "demo".to_string(),
             )),
             other => Err(WardenError::Cap(format!("not in catalog: {other}"))),
         });
-        let transport = QuicTransport::bind("127.0.0.1:0", catalog, 900).unwrap();
+        let transport = Arc::new(
+            tokio::task::spawn_blocking(move || {
+                QuicTransport::bind("127.0.0.1:0", catalog, 900).unwrap()
+            })
+            .await
+            .unwrap(),
+        );
         let addr = transport.local_addr();
 
-        std::thread::scope(|s| {
-            s.spawn(|| {
+        let server = {
+            let (w, t) = (warden.clone(), transport.clone());
+            tokio::spawn(async move {
                 for _ in 0..2 {
-                    match transport.accept() {
+                    match t.accept().await {
                         Ok(Accepted::Session(inc)) => {
-                            s.spawn(|| warden.run_incoming(inc));
+                            let w = w.clone();
+                            tokio::spawn(async move { w.run_incoming(inc).await });
                         }
-                        Ok(Accepted::Kill { session, by, ack }) => ack(warden.kill(session, &by)),
+                        Ok(Accepted::Kill { session, by, ack }) => ack(w.kill(session, &by)),
                         Err(e) => panic!("accept: {e}"),
                     }
                 }
-            });
-            let victim = s.spawn(|| {
+            })
+        };
+        let victim = {
+            let victim_path = path.to_string_lossy().into_owned();
+            tokio::task::spawn_blocking(move || {
                 let request = WireRequest::Session {
                     identity: "runaway".into(),
                     requests: vec![WireCapRequest {
                         kind: "fs.read".into(),
-                        arg: path.to_string_lossy().into_owned(),
+                        arg: victim_path,
                     }],
                     action: "loop-read".into(),
                 };
                 warden_transport::connect(addr, &request, |_| {}).unwrap()
-            });
-            std::thread::sleep(std::time::Duration::from_millis(150));
+            })
+        };
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
 
-            assert!(
-                warden_transport::kill(addr, 900, "op").unwrap(),
-                "session should be live"
-            );
-            let (events, outcome) = victim.join().unwrap();
+        let killed =
+            tokio::task::spawn_blocking(move || warden_transport::kill(addr, 900, "op").unwrap())
+                .await
+                .expect("kill task");
+        assert!(killed, "session should be live");
+        let (events, outcome) = victim.await.expect("victim task");
 
-            // the loop was cut: session failed with the kill, and the client's own stream shows it
-            assert!(
-                matches!(&outcome, Err(e) if e.contains("killed by op")),
-                "outcome: {outcome:?}"
-            );
-            assert!(
-                events
-                    .iter()
-                    .any(|e| matches!(e, RecEvent::Killed { by, .. } if by == "op")),
-                "kill must appear in the session's stream"
-            );
-        });
+        // the loop was cut: session failed with the kill, and the client's own stream shows it
+        assert!(
+            matches!(&outcome, Err(e) if e.contains("killed by op")),
+            "outcome: {outcome:?}"
+        );
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, RecEvent::Killed { by, .. } if by == "op")),
+            "kill must appear in the session's stream"
+        );
+        server.await.expect("server task");
     }
 
-    #[test]
-    fn exec_child_stdout_is_masked() {
+    #[tokio::test]
+    async fn exec_child_stdout_is_masked() {
         let rec = VecRecorder::default();
         let warden = build_warden(vec![Arc::new(rec.clone())]);
         let pin = sha256_hex_of("/bin/echo").unwrap();
@@ -1571,14 +1730,18 @@ mod tests {
             }],
             action: Action {
                 name: "t".into(),
-                source: ActionSource::InProcess(Box::new(move |ctx: &Ctx| {
-                    let x = ctx.cap(EXEC).unwrap();
-                    *got2.lock().unwrap() = ctx.invoke(x, "run", b"PASS=hunter2".to_vec())?;
-                    Ok(())
+                source: ActionSource::InProcess(warden_core::action_fn(move |ctx: &Ctx| {
+                    let got2 = got2.clone();
+                    Box::pin(async move {
+                        let x = ctx.cap(EXEC).unwrap();
+                        *got2.lock().unwrap() =
+                            ctx.invoke(x, "run", b"PASS=hunter2".to_vec()).await?;
+                        Ok(())
+                    })
                 })),
             },
         };
-        warden.run_session(session, "demo").unwrap();
+        warden.run_session(session, "demo").await.unwrap();
 
         let out = String::from_utf8(got.lock().unwrap().clone()).unwrap();
         assert!(
@@ -1591,8 +1754,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn sign_works_but_key_never_reaches_action_or_record() {
+    #[tokio::test]
+    async fn sign_works_but_key_never_reaches_action_or_record() {
         let rec = VecRecorder::default();
         let warden = build_warden(vec![Arc::new(rec.clone())]);
 
@@ -1605,19 +1768,21 @@ mod tests {
             }],
             action: Action {
                 name: "t".into(),
-                source: ActionSource::InProcess(Box::new(|ctx: &Ctx| {
-                    let s = ctx.cap(SIGN).unwrap();
-                    let mac = ctx.invoke(s, "sign", b"payload".to_vec())?;
-                    assert_eq!(mac.len(), 64, "hex hmac-sha256");
-                    assert!(
-                        ctx.invoke(s, "reveal", vec![]).is_err(),
-                        "reveal must be refused"
-                    );
-                    Ok(())
+                source: ActionSource::InProcess(warden_core::action_fn(|ctx: &Ctx| {
+                    Box::pin(async move {
+                        let s = ctx.cap(SIGN).unwrap();
+                        let mac = ctx.invoke(s, "sign", b"payload".to_vec()).await?;
+                        assert_eq!(mac.len(), 64, "hex hmac-sha256");
+                        assert!(
+                            ctx.invoke(s, "reveal", vec![]).await.is_err(),
+                            "reveal must be refused"
+                        );
+                        Ok(())
+                    })
                 })),
             },
         };
-        warden.run_session(session, "demo").unwrap();
+        warden.run_session(session, "demo").await.unwrap();
 
         // the key material appears in NO recorded event, in no form
         for ev in rec.0.lock().unwrap().iter() {
@@ -1629,8 +1794,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn component_guest_holds_handles_not_secrets() {
+    #[tokio::test]
+    async fn component_guest_holds_handles_not_secrets() {
         let guest_path = concat!(
             env!("CARGO_MANIFEST_DIR"),
             "/../../guest/target/wasm32-wasip2/release/warden_guest_demo.wasm"
@@ -1665,7 +1830,18 @@ mod tests {
                 source: ActionSource::Wasm(component),
             },
         };
-        warden.run_session(session, "component").unwrap();
+        let warden = Arc::new(warden);
+        {
+            let w = warden.clone();
+            let h = tokio::runtime::Handle::current();
+            std::thread::spawn(move || {
+                let _enter = h.enter(); // reactor for tokio-based caps (fs.read); not a driver ctx
+                block_on_bare(w.run_session(session, "component"))
+            })
+            .join()
+            .expect("component thread")
+            .unwrap();
+        }
 
         // every byte that crossed into the guest is on record — masked, and key-free
         let evs = rec.0.lock().unwrap();

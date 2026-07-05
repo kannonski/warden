@@ -26,6 +26,7 @@ const ECHO_OPS: &[warden_core::OpSpec] = &[
 ];
 
 struct EchoCap;
+#[async_trait::async_trait]
 impl Capability for EchoCap {
     fn kind(&self) -> CapKind {
         ECHO
@@ -33,7 +34,7 @@ impl Capability for EchoCap {
     fn ops(&self) -> &'static [warden_core::OpSpec] {
         ECHO_OPS
     }
-    fn perform(&self, _op: &str, input: &[u8]) -> WResult<Vec<u8>> {
+    async fn perform(&self, _op: &str, input: &[u8]) -> WResult<Vec<u8>> {
         Ok(input.to_vec()) // echoes its input back
     }
     fn revoke(&self) {}
@@ -46,11 +47,12 @@ impl Plugin for EchoPlugin {
     }
     fn contribute(&self, reg: &mut Registry) {
         struct EchoBroker;
+        #[async_trait::async_trait]
         impl warden_core::Broker for EchoBroker {
             fn handles(&self, req: &CapRequest) -> bool {
                 req.kind == ECHO
             }
-            fn grant(&self, _req: &CapRequest) -> WResult<Box<dyn Capability>> {
+            async fn grant(&self, _req: &CapRequest) -> WResult<Box<dyn Capability>> {
                 Ok(Box::new(EchoCap))
             }
         }
@@ -66,13 +68,14 @@ impl Plugin for LocalRuntimePlugin {
     }
     fn contribute(&self, reg: &mut Registry) {
         struct Local;
+        #[async_trait::async_trait]
         impl Runtime for Local {
             fn name(&self) -> &'static str {
                 "local"
             }
-            fn run(&self, action: Action, ctx: &Ctx) -> WResult<()> {
+            async fn run(&self, action: Action, ctx: &Ctx) -> WResult<()> {
                 match action.source {
-                    ActionSource::InProcess(body) => body(ctx),
+                    ActionSource::InProcess(body) => body(ctx).await,
                     _ => Err(WardenError::Cap("local runs in-process only".into())),
                 }
             }
@@ -99,33 +102,39 @@ impl Plugin for RecorderPlugin {
     }
 }
 
-fn run_echo(warden: &Warden, identity: &str, msg: &[u8]) -> WResult<()> {
+async fn run_echo(warden: &Warden, identity: &str, msg: &[u8]) -> WResult<()> {
     let msg = msg.to_vec();
     let action = Action {
         name: "echo-once".into(),
-        source: ActionSource::InProcess(Box::new(move |ctx: &Ctx| {
-            let cap = ctx.cap(ECHO).ok_or(WardenError::Cap("no echo".into()))?;
-            ctx.invoke(cap, "echo", msg.clone())?;
-            Ok(())
+        source: ActionSource::InProcess(warden_core::action_fn(move |ctx: &Ctx| {
+            let msg = msg.clone();
+            Box::pin(async move {
+                let cap = ctx.cap(ECHO).ok_or(WardenError::Cap("no echo".into()))?;
+                ctx.invoke(cap, "echo", msg.clone()).await?;
+                Ok(())
+            })
         })),
     };
-    warden.run_session(
-        Session {
-            id: SessionId(1),
-            identity: identity.into(),
-            requests: vec![CapRequest {
-                kind: ECHO,
-                arg: String::new(),
-            }],
-            action,
-        },
-        "local",
-    )
+    warden
+        .run_session(
+            Session {
+                id: SessionId(1),
+                identity: identity.into(),
+                requests: vec![CapRequest {
+                    kind: ECHO,
+                    arg: String::new(),
+                }],
+                action,
+            },
+            "local",
+        )
+        .await
 }
 
 // ── a capability that records whether it was revoked, to prove failure-path cleanup ────────────
 
 struct TrackCap(Arc<AtomicUsize>);
+#[async_trait::async_trait]
 impl Capability for TrackCap {
     fn kind(&self) -> CapKind {
         ECHO
@@ -133,7 +142,7 @@ impl Capability for TrackCap {
     fn ops(&self) -> &'static [warden_core::OpSpec] {
         ECHO_OPS
     }
-    fn perform(&self, _op: &str, input: &[u8]) -> WResult<Vec<u8>> {
+    async fn perform(&self, _op: &str, input: &[u8]) -> WResult<Vec<u8>> {
         Ok(input.to_vec())
     }
     fn revoke(&self) {
@@ -145,11 +154,12 @@ impl Capability for TrackCap {
 fn tracking_echo_plugin(revoked: Arc<AtomicUsize>) -> Box<dyn Plugin> {
     plugin(Manifest::new("tracking-echo"), move |reg| {
         struct B(Arc<AtomicUsize>);
+        #[async_trait::async_trait]
         impl warden_core::Broker for B {
             fn handles(&self, req: &CapRequest) -> bool {
                 req.kind == ECHO
             }
-            fn grant(&self, _req: &CapRequest) -> WResult<Box<dyn Capability>> {
+            async fn grant(&self, _req: &CapRequest) -> WResult<Box<dyn Capability>> {
                 Ok(Box::new(TrackCap(self.0.clone())))
             }
         }
@@ -157,26 +167,30 @@ fn tracking_echo_plugin(revoked: Arc<AtomicUsize>) -> Box<dyn Plugin> {
     })
 }
 
-fn open_session(warden: &Warden, requests: Vec<CapRequest>, runtime: &str) -> WResult<()> {
+async fn open_session(warden: &Warden, requests: Vec<CapRequest>, runtime: &str) -> WResult<()> {
     let action = Action {
         name: "noop".into(),
-        source: ActionSource::InProcess(Box::new(|_ctx: &Ctx| Ok(()))),
+        source: ActionSource::InProcess(warden_core::action_fn(|_ctx: &Ctx| {
+            Box::pin(async move { Ok(()) })
+        })),
     };
-    warden.run_session(
-        Session {
-            id: SessionId(1),
-            identity: "carol".into(),
-            requests,
-            action,
-        },
-        runtime,
-    )
+    warden
+        .run_session(
+            Session {
+                id: SessionId(1),
+                identity: "carol".into(),
+                requests,
+                action,
+            },
+            runtime,
+        )
+        .await
 }
 
 // ── 1. a warden composed purely from plugins runs a session end-to-end ─────────────────────────
 
-#[test]
-fn composes_and_runs_a_session_from_plugins() {
+#[tokio::test]
+async fn composes_and_runs_a_session_from_plugins() {
     let rec = VecRec::default();
     let loaded = load(vec![
         Box::new(EchoPlugin),
@@ -184,7 +198,7 @@ fn composes_and_runs_a_session_from_plugins() {
         Box::new(RecorderPlugin(rec.clone())),
     ])
     .unwrap();
-    run_echo(&loaded.warden, "carol", b"hi").unwrap();
+    run_echo(&loaded.warden, "carol", b"hi").await.unwrap();
 
     let evs = rec.0.lock().unwrap().join("\n");
     assert!(evs.contains("SessionOpened"));
@@ -201,8 +215,8 @@ fn composes_and_runs_a_session_from_plugins() {
 
 // ── 2. many policy plugins compose (most-restrictive-wins) ──────────────────────────────────────
 
-#[test]
-fn policies_compose_deny_wins() {
+#[tokio::test]
+async fn policies_compose_deny_wins() {
     struct AllowAll;
     impl Policy for AllowAll {
         fn on_session(&self, _: &SessionCtx) -> Decision {
@@ -259,8 +273,8 @@ fn policies_compose_deny_wins() {
     );
 
     // carol allowed by both policies; root denied by one → chain denies
-    assert!(run_echo(&loaded.warden, "carol", b"ok").is_ok());
-    let err = run_echo(&loaded.warden, "root", b"nope").unwrap_err();
+    assert!(run_echo(&loaded.warden, "carol", b"ok").await.is_ok());
+    let err = run_echo(&loaded.warden, "root", b"nope").await.unwrap_err();
     assert!(
         matches!(err, WardenError::Denied(_)),
         "root must be denied by the policy chain"
@@ -362,14 +376,15 @@ fn missing_requirement_fails_load() {
 
 // ── 6. interceptor priority orders the chain (mask-before-record semantics) ─────────────────────
 
-#[test]
-fn interceptor_priority_orders_the_chain() {
+#[tokio::test]
+async fn interceptor_priority_orders_the_chain() {
     use warden_core::{CallResult, Next};
     struct Tag(&'static str, Arc<Mutex<Vec<&'static str>>>);
+    #[async_trait::async_trait]
     impl Interceptor for Tag {
-        fn intercept(&self, call: Call, next: Next<'_>) -> WResult<CallResult> {
+        async fn intercept(&self, call: Call, next: Next<'_>) -> WResult<CallResult> {
             self.1.lock().unwrap().push(self.0);
-            next.run(call)
+            next.run(call).await
         }
     }
     struct TagPlugin(&'static str, i32, Arc<Mutex<Vec<&'static str>>>);
@@ -391,7 +406,7 @@ fn interceptor_priority_orders_the_chain() {
         Box::new(TagPlugin("early", 1, order.clone())),
     ])
     .unwrap();
-    run_echo(&loaded.warden, "carol", b"x").unwrap();
+    run_echo(&loaded.warden, "carol", b"x").await.unwrap();
     assert_eq!(
         *order.lock().unwrap(),
         vec!["early", "late"],
@@ -401,8 +416,8 @@ fn interceptor_priority_orders_the_chain() {
 
 // ── 7. failure-path cleanup: a failed grant revokes the caps already granted ────────────────────
 
-#[test]
-fn failed_grant_revokes_already_granted_caps() {
+#[tokio::test]
+async fn failed_grant_revokes_already_granted_caps() {
     const MISSING: CapKind = CapKind("missing");
     let revoked = Arc::new(AtomicUsize::new(0));
     let rec = VecRec::default();
@@ -427,6 +442,7 @@ fn failed_grant_revokes_already_granted_caps() {
         ],
         "local",
     )
+    .await
     .unwrap_err();
     assert!(matches!(err, WardenError::NoBroker(_)));
     assert_eq!(
@@ -447,8 +463,8 @@ fn failed_grant_revokes_already_granted_caps() {
 
 // ── 8. a missing runtime revokes every granted cap ─────────────────────────────────────────────
 
-#[test]
-fn missing_runtime_revokes_granted_caps() {
+#[tokio::test]
+async fn missing_runtime_revokes_granted_caps() {
     let revoked = Arc::new(AtomicUsize::new(0));
     let loaded = load(vec![
         tracking_echo_plugin(revoked.clone()),
@@ -463,6 +479,7 @@ fn missing_runtime_revokes_granted_caps() {
         }],
         "does-not-exist",
     )
+    .await
     .unwrap_err();
     assert!(matches!(err, WardenError::NoRuntime(_)));
     assert_eq!(
@@ -474,8 +491,9 @@ fn missing_runtime_revokes_granted_caps() {
 
 // ── 9. a panic in the action still closes the session (no phantom live session) ─────────────────
 
-#[test]
-fn panic_in_action_still_closes_the_session() {
+#[tokio::test]
+async fn panic_in_action_still_closes_the_session() {
+    use futures::FutureExt;
     let rec = VecRec::default();
     let loaded = load(vec![
         Box::new(EchoPlugin),
@@ -485,24 +503,26 @@ fn panic_in_action_still_closes_the_session() {
     .unwrap();
     let action = Action {
         name: "boom".into(),
-        source: ActionSource::InProcess(Box::new(|_ctx: &Ctx| panic!("boom"))),
+        source: ActionSource::InProcess(warden_core::action_fn(|_ctx: &Ctx| {
+            Box::pin(async move { panic!("boom") })
+        })),
     };
     let prev = std::panic::take_hook();
     std::panic::set_hook(Box::new(|_| {})); // silence the expected panic
-    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        loaded.warden.run_session(
-            Session {
-                id: SessionId(7),
-                identity: "carol".into(),
-                requests: vec![CapRequest {
-                    kind: ECHO,
-                    arg: String::new(),
-                }],
-                action,
-            },
-            "local",
-        )
-    }));
+    let outcome = std::panic::AssertUnwindSafe(loaded.warden.run_session(
+        Session {
+            id: SessionId(7),
+            identity: "carol".into(),
+            requests: vec![CapRequest {
+                kind: ECHO,
+                arg: String::new(),
+            }],
+            action,
+        },
+        "local",
+    ))
+    .catch_unwind()
+    .await;
     std::panic::set_hook(prev);
     assert!(outcome.is_err(), "the action panicked");
     assert!(
@@ -521,8 +541,8 @@ fn panic_in_action_still_closes_the_session() {
 /// purely on `call.mutates`, which the kernel fills from the capability's published `OpSpec`. This is
 /// the whole point of typing the op contract: a governance rule that works across every capability,
 /// present and future, without knowing that pty's mutating op is "input" or exec's is "run".
-#[test]
-fn read_only_policy_denies_mutating_ops_by_contract() {
+#[tokio::test]
+async fn read_only_policy_denies_mutating_ops_by_contract() {
     struct ReadOnly;
     impl Policy for ReadOnly {
         fn on_session(&self, _: &SessionCtx) -> Decision {
@@ -553,16 +573,18 @@ fn read_only_policy_denies_mutating_ops_by_contract() {
     fn probe() -> Action {
         Action {
             name: "probe".into(),
-            source: ActionSource::InProcess(Box::new(|ctx: &Ctx| {
-                let cap = ctx.cap(ECHO).ok_or(WardenError::Cap("no echo".into()))?;
-                let read_ok = ctx.invoke(cap, "echo", b"hi".to_vec()).is_ok();
-                let mutate_ok = ctx.invoke(cap, "poke", b"x".to_vec()).is_ok();
-                assert!(read_ok, "read op should be allowed");
-                assert!(
-                    !mutate_ok,
-                    "mutating op should be denied by the read-only policy"
-                );
-                Ok(())
+            source: ActionSource::InProcess(warden_core::action_fn(|ctx: &Ctx| {
+                Box::pin(async move {
+                    let cap = ctx.cap(ECHO).ok_or(WardenError::Cap("no echo".into()))?;
+                    let read_ok = ctx.invoke(cap, "echo", b"hi".to_vec()).await.is_ok();
+                    let mutate_ok = ctx.invoke(cap, "poke", b"x".to_vec()).await.is_ok();
+                    assert!(read_ok, "read op should be allowed");
+                    assert!(
+                        !mutate_ok,
+                        "mutating op should be denied by the read-only policy"
+                    );
+                    Ok(())
+                })
             })),
         }
     }
@@ -589,6 +611,7 @@ fn read_only_policy_denies_mutating_ops_by_contract() {
             },
             "local",
         )
+        .await
         .unwrap();
 
     let log = rec.0.lock().unwrap().join("\n");

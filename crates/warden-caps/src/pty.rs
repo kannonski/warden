@@ -12,13 +12,16 @@
 //! Substrate for the governed terminal (kedi): xterm.js keystrokes → `input`, the governed output
 //! stream → the display, kill/rewind reuse the existing seams. Coarse authority (a governed shell).
 
+use async_trait::async_trait;
 use portable_pty::{Child, CommandBuilder, MasterPty, PtySize, SlavePty, native_pty_system};
 use std::io::{Read, Write};
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{self, Receiver};
-use warden_core::{Broker, CapKind, CapRequest, Capability, OpSpec, Result, WardenError};
+use tokio::sync::mpsc::{self, UnboundedReceiver};
+use warden_core::{
+    Broker, CapKind, CapRequest, Capability, OpSpec, OutputStream, Result, WardenError,
+};
 
 pub const PTY: CapKind = CapKind("pty");
 
@@ -29,7 +32,7 @@ struct PtyCap {
     child: Mutex<Option<Box<dyn Child + Send + Sync>>>,
     command: String,
     spawned: AtomicBool,
-    output: Mutex<Option<Receiver<Vec<u8>>>>,
+    output: Mutex<Option<UnboundedReceiver<Vec<u8>>>>,
     exited: Arc<AtomicBool>, // set by the reader thread on EOF (shell gone); read via `finished()`
 }
 
@@ -86,6 +89,7 @@ const OPS: &[OpSpec] = &[
     },
 ];
 
+#[async_trait]
 impl Capability for PtyCap {
     fn kind(&self) -> CapKind {
         PTY
@@ -93,7 +97,7 @@ impl Capability for PtyCap {
     fn ops(&self) -> &'static [OpSpec] {
         OPS
     }
-    fn perform(&self, op: &str, input: &[u8]) -> Result<Vec<u8>> {
+    async fn perform(&self, op: &str, input: &[u8]) -> Result<Vec<u8>> {
         match op {
             "resize" => {
                 let spec = std::str::from_utf8(input)
@@ -147,8 +151,13 @@ impl Capability for PtyCap {
             let _ = child.kill();
         }
     }
-    fn output(&self) -> Option<Receiver<Vec<u8>>> {
-        self.output.lock().unwrap().take()
+    fn output(&self) -> Option<OutputStream> {
+        // hand the reader-thread's receiver to the kernel as an async Stream; the blocking pty read
+        // stays on its dedicated OS thread (that's the right home for blocking OS I/O), bridged into
+        // async by the unbounded tokio channel.
+        self.output.lock().unwrap().take().map(|rx| {
+            Box::pin(tokio_stream::wrappers::UnboundedReceiverStream::new(rx)) as OutputStream
+        })
     }
     fn finished(&self) -> bool {
         self.exited.load(Ordering::SeqCst)
@@ -156,11 +165,12 @@ impl Capability for PtyCap {
 }
 
 pub struct PtyBroker;
+#[async_trait]
 impl Broker for PtyBroker {
     fn handles(&self, req: &CapRequest) -> bool {
         req.kind == PTY
     }
-    fn grant(&self, req: &CapRequest) -> Result<Box<dyn Capability>> {
+    async fn grant(&self, req: &CapRequest) -> Result<Box<dyn Capability>> {
         let pair = native_pty_system()
             .openpty(PtySize {
                 rows: 24,
@@ -180,7 +190,7 @@ impl Broker for PtyBroker {
             .take_writer()
             .map_err(|e| WardenError::Cap(format!("pty writer: {e}")))?;
 
-        let (tx, rx) = mpsc::channel::<Vec<u8>>();
+        let (tx, rx) = mpsc::unbounded_channel::<Vec<u8>>();
         let exited = Arc::new(AtomicBool::new(false));
         let exited_reader = exited.clone();
         std::thread::spawn(move || {

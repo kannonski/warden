@@ -62,9 +62,11 @@ impl warden::action::caps::HostCapability for State {
         input: Vec<u8>,
     ) -> std::result::Result<Vec<u8>, String> {
         let id = self.table.get(&cap).expect("live resource").id;
-        self.warden()
-            .invoke(id, &op, input)
-            .map_err(|e| e.to_string())
+        // The component is driven with SYNC wasmtime (add_to_linker_sync / call_run), so this
+        // generated host method is sync and can't `.await`. `ctx.invoke` is async now → block on it.
+        // Making this truly async is the wasmtime async-host tier (add_to_linker + call_run_async +
+        // async component config); deferred, same honest caveat as the core-module runtime.
+        futures::executor::block_on(self.warden().invoke(id, &op, input)).map_err(|e| e.to_string())
     }
 
     fn drop(&mut self, cap: Resource<CapEntry>) -> wasmtime::Result<()> {
@@ -75,12 +77,13 @@ impl warden::action::caps::HostCapability for State {
 
 pub struct ComponentRuntime;
 
+#[async_trait::async_trait]
 impl Runtime for ComponentRuntime {
     fn name(&self) -> &'static str {
         "component"
     }
 
-    fn run(&self, action: warden_core::Action, ctx: &Ctx) -> warden_core::Result<()> {
+    async fn run(&self, action: warden_core::Action, ctx: &Ctx) -> warden_core::Result<()> {
         let bytes = match action.source {
             ActionSource::Wasm(b) => b,
             _ => {
