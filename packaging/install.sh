@@ -41,7 +41,10 @@ if [ "$(uname -s)" = "Linux" ]; then
   icondir="$prefix/icons/hicolor/scalable/apps"
   mkdir -p "$appdir" "$icondir"
   install -m 0644 "$here/kedi.svg" "$icondir/kedi.svg"
-  install -m 0644 "$here/kedi.desktop" "$appdir/kedi.desktop"
+  # Rewrite Exec to the absolute installed path: GNOME (and most launchers) start .desktop entries
+  # with a minimal PATH that omits ~/.local/bin, so a bare `Exec=kedi` would not resolve from the GUI.
+  sed "s|^Exec=kedi |Exec=$bindir/kedi |" "$here/kedi.desktop" > "$appdir/kedi.desktop"
+  chmod 0644 "$appdir/kedi.desktop"
   command -v update-desktop-database >/dev/null 2>&1 && update-desktop-database "$appdir" 2>/dev/null || true
   command -v gtk-update-icon-cache   >/dev/null 2>&1 && gtk-update-icon-cache -f "$prefix/icons/hicolor" 2>/dev/null || true
   echo "kedi: installed desktop entry + icon — look for 'kedi' in your launcher."
