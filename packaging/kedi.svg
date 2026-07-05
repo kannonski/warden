@@ -1,9 +1,27 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 128 128" role="img" aria-label="kedi">
-  <rect width="128" height="128" rx="28" fill="#1e1e2e"/>
-  <g transform="translate(14 14) scale(1.0)" fill="none" stroke="#cba6f7" stroke-width="3.1" stroke-linecap="round" stroke-linejoin="round">
-    <path d="M25 35 L24 15 L38 26 Q50 21 62 26 L76 15 L75 35 Q83 45 83 56 Q83 79 50 79 Q17 79 17 56 Q17 45 25 35 Z"/>
-    <path d="M35 52 q5 5 10 0"/><path d="M55 52 q5 5 10 0"/>
-    <path d="M46.5 63 h7 l-3.5 4.5 Z"/>
-    <path d="M13 55 H3 M14 62 H5"/><path d="M87 55 h10 M86 62 h9"/>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#3a2f5c"/>
+      <stop offset="1" stop-color="#1e1e2e"/>
+    </linearGradient>
+    <linearGradient id="cat" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#cba6f7"/>
+      <stop offset="1" stop-color="#b48ef0"/>
+    </linearGradient>
+  </defs>
+  <rect width="128" height="128" rx="28" fill="url(#bg)"/>
+  <!-- prompt/whisker cue: the terminal chevron+underscore made of the two side strokes -->
+  <g stroke="#cba6f7" stroke-width="4.5" stroke-linecap="round" opacity=".55">
+    <path d="M22 60 H8 M23 71 H12"/>
+    <path d="M106 60 h14 M105 71 h11"/>
   </g>
+  <!-- filled cat head -->
+  <path fill="url(#cat)" d="M40 44 L38 22 L55 34 Q64 30 73 34 L90 22 L88 44
+       Q99 55 99 68 Q99 96 64 96 Q29 96 29 68 Q29 55 40 44 Z"/>
+  <!-- eyes (closed, content) + nose, punched out of the fill -->
+  <g fill="none" stroke="#1e1e2e" stroke-width="4.2" stroke-linecap="round">
+    <path d="M46 64 q7 7 14 0"/>
+    <path d="M68 64 q7 7 14 0"/>
+  </g>
+  <path fill="#1e1e2e" d="M59 74 h10 l-5 6 Z"/>
 </svg>
