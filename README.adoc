@@ -220,15 +220,17 @@ cargo run -p kedi -- --host kedi.localhost     # then open http://kedi.localhost
 
 A working spike, kept deliberately honest:
 
-* Sync kernel (thread-per-session); the product tier is async throughout.
 * Wire security is spike-grade: self-signed certs, skip-verify clients, loopback binds. Identity
   is *claimed*, not authenticated — auth on the wire (mTLS/OIDC) is the next tier.
+* The wasm runtimes drive sync wasmtime and `block_on` the async chokepoint inside their host
+  callbacks; a native async-wasmtime host is a later tier (the rest of the kernel is async).
 * The record is tamper-*evident*, not tamper-proof: catching tail truncation requires anchoring
   the chain head externally.
 * Rewind is reconstruction of observed state, not undo of side effects.
 * The kill switch severs a session's access to the world (every call refused at the chokepoint);
   preempting pure CPU inside a wasm guest is the epoch-interruption tier, later.
-* In-memory vault, blocking approver; the product versions live behind the same seams.
+* In-memory vault, demo approver; the product versions (real KMS/HSM, a quorum approver that
+  parks for humans — `Approver::decide` is already async) live behind the same seams.
 
 == License
 

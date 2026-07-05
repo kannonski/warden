@@ -83,10 +83,11 @@ step 1 checks. A killed action *keeps its CPU* but *loses the world* — every
 a guest is a separate, harder problem, deliberately left to a later tier.)
 
 The kernel that owns this door is `warden-core`. It is **sans-IO**: it performs no
-actual reads, writes, or network calls — and it *schedules* nothing either (concurrent
-work like the output pump is handed to a host `Spawner`; §6.4). It only orchestrates
-the flow around `capability.perform`. That keeps it tiny, dependency-free, and fully
-unit-testable — and it's why the same kernel drives a local terminal and a remote
+actual reads, writes, or network calls — and it *schedules* nothing either (the
+concurrent output pump is a future the kernel `futures::join`s with the action, not a
+thread or task it spawns; §6.4). It only orchestrates the flow around
+`capability.perform`. That keeps it small and fully unit-testable — and it's why the
+same kernel drives a local terminal and a remote
 gateway without change.
 
 ---
@@ -615,25 +616,28 @@ were designed, not hoped for.** A record that says a session is open means it is
 
 ### 6.4 Streaming output & the revoke-before-join ordering
 
-A streaming capability (a pty) exposes `output()` — a channel of raw chunks. The
-kernel builds a **pump** per stream that drains it, folds every interceptor's
-per-stream stateful masker over each chunk, and records the masked bytes as
-`Event::Output`. So streamed output is governed at the *same* chokepoint as a call's
+A streaming capability (a pty) exposes `output()` — an async `Stream` of raw chunks.
+The kernel builds a **pump** per stream that awaits chunks off it, folds every
+interceptor's per-stream stateful masker over each chunk, and records the masked bytes
+as `Event::Output`. So streamed output is governed at the *same* chokepoint as a call's
 result — nothing reaches the client un-mediated.
 
-The kernel does **not** choose *how* the pump runs concurrently — it hands the pump
-(a `Box<dyn FnOnce() + Send>`) to the host's `Spawner` and joins the returned handle.
-Default is `ThreadSpawner` (one std thread per pump); a host overrides it with
-`.with_spawner(...)` — kedi installs a named-thread spawner for its blocking pty pumps.
-This is what keeps `warden-core` sans-IO: it schedules nothing itself (see
-[boundary.md](boundary.md)).
+The kernel does **not** spawn the pump. Each pump is a *future*, and the kernel runs it
+concurrently with the action via `futures::join` — no thread, no task, no host-provided
+scheduler. Async is itself the mechanism-neutral concurrency (an earlier interim
+`Spawner` seam was retired when the kernel went async). This is what keeps
+`warden-core` sans-IO: it schedules nothing itself. The pty's genuinely-blocking OS
+read still lives on its own thread inside `warden-caps`, bridged to the async stream by
+a tokio channel — the blocking I/O is at the edge, not in the kernel. (See
+[boundary.md](boundary.md).)
 
-The teardown order is load-bearing and commented as such in the code: **revoke
-first, then join.** A pty's pump only ends when its source hits EOF, which for a
+The teardown order is load-bearing and commented as such in the code: **revoke first,
+then finish the pump.** A pty's pump only ends when its source hits EOF, which for a
 still-live shell happens on `revoke` (revoke closes the child → the reader drains
-trailing bytes → EOF → the pump ends). Joining *before* revoking would deadlock when
-the action ends while the child is alive (an operator kill, or a client disconnect):
-the pump would wait for an EOF that only revoke produces.
+trailing bytes → EOF → the pump future completes). Awaiting the pump to completion
+*before* revoking would deadlock when the action ends while the child is alive (an
+operator kill, or a client disconnect): the pump would await an EOF that only revoke
+produces. So the join drives the pump concurrently while the run side revokes.
 
 ### 6.5 Kill & the live registry
 
@@ -904,9 +908,16 @@ The design is a working spike, kept deliberately honest. These are not bugs; the
 the seams where the spike-grade impl sits behind a real interface, so the product
 tier is a swap, not a redesign.
 
-- **Sync kernel.** `warden-core` is synchronous, thread-per-session, for clarity. The
-  product is async throughout — that changes the trait *signatures* (streams + IO),
-  not the *shape* (the seams, the chokepoint, the events all stand).
+- **Async kernel (done).** `warden-core` is async: the seam methods that touch the
+  world (`perform`, `grant`, `run`, `accept`, `intercept`, `decide`, `invoke`) are
+  `async`; the cheap/pure ones (`kind`, `ops`, `finished`, `handles`, `revoke`,
+  `Policy`, `Recorder::record`) stay sync. The conversion proved the design claim it
+  used to *assert*: going async changed the trait **signatures**, not the **shape** —
+  the seams, the chokepoint, the events, and every guarantee stood unchanged. The
+  kernel schedules nothing (the output pump is a `futures::join`ed future, not a
+  spawned thread) and still does no IO. Remaining async gap: the wasm runtimes drive
+  sync wasmtime and `block_on` the chokepoint in their host callbacks; a native
+  async-wasmtime host is a later tier.
 - **Wire security is spike-grade.** Self-signed certs, skip-verify clients, loopback
   binds. Identity is **claimed, not authenticated** — attribution, not auth. Real auth
   on the wire (mTLS / OIDC) is the next tier and lands behind the existing `Transport`
@@ -921,24 +932,23 @@ tier is a swap, not a redesign.
 - **Panic revokes by drop, not gracefully.** `SessionGuard` keeps the audit trail
   consistent through a panic (§6.3), but a panicking runtime drops caps rather than
   running their `revoke()` side effects.
-- **In-memory vault, blocking approver, unbounded audit channel.** All three are the
+- **In-memory vault, demo approver, unbounded audit channel.** All three are the
   demo-grade impls behind their seams (`Vault`, `Approver`, `Recorder`); the product
-  versions — real KMS/HSM, async quorum approver, bounded channel with backpressure —
-  live behind the same traits.
+  versions — real KMS/HSM, a quorum approver that parks and pushes to humans, a bounded
+  channel with backpressure — live behind the same traits. (`Approver::decide` is now
+  async, so the parking version is a drop-in, not a signature change.)
 - **DLP masking is not wired in kedi.** The spike's literal-secret masker was a demo
   toy; real detection (regex/entropy over logical terminal content, off the hot path)
   is deferred. The `Interceptor` seam and its per-stream stateful masker exist and are
   exercised by the `warden` demo bin — kedi's governance today is *recorded +
   replayable + killable*, not *masked*.
-- **The core/host boundary is now drawn on purpose.** Three smells were one boundary
-  error (the kernel owning ingress/scheduling/lifecycle that belong to the host), mapped
-  and resolved in [boundary.md](boundary.md): `Transport` is a host concern (§4.8),
-  `SessionHook` is parked (§4.9), and the output pump's concurrency is the host's via
-  the `Spawner` seam (§6.4) — `warden-core` no longer spawns threads. The kernel is now
-  genuinely sans-IO. What's left is the deeper move it enables, not requires: an **async
-  kernel** (async `output()` → a `Stream`, async signatures), so the pump is a real
-  async task rather than a blocking-recv on a host thread. That's the next tier; the
-  seams already fit it.
+- **The core/host boundary is now drawn on purpose (done).** Three smells were one
+  boundary error (the kernel owning ingress/scheduling/lifecycle that belong to the
+  host), mapped and resolved in [boundary.md](boundary.md): `Transport` is a host
+  concern (§4.8), `SessionHook` is parked (§4.9), and the output pump is a
+  `futures::join`ed future — the kernel spawns nothing and schedules nothing (§6.4).
+  The kernel owns the inner loop; ingress, scheduling, and lifecycle-wiring are the
+  host's. Fully sans-IO.
 
 ---
 

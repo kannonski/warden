@@ -74,20 +74,16 @@ The host decides these; the kernel should *describe the work*, not *do it*:
    a peer kernel seam. The kernel's contract is "give me a session"; getting the
    session is the host's job. (Net: the "structural seams" become just `Runtime`.)
 
-2. **The kernel stops choosing the pump's concurrency — a `Spawner` seam does.**
-   *(Done.)* `warden-core` no longer calls `thread::spawn`. It gained a `Spawner`
-   trait: the kernel *describes* the pump as a `Box<dyn FnOnce() + Send>` and hands it
-   to `spawner.spawn(...)`, then joins the returned `Joiner`. `Warden` holds an
-   `Arc<dyn Spawner>` (default `ThreadSpawner`, so nothing broke), overridable with
-   `.with_spawner(...)`. The host now owns the choice.
-
-   Note vs. the original sketch: the pump drains a **blocking** `std::sync::mpsc`
-   (a pty's bytes), so a thread is still the right home — running it on a tokio task
-   would block a worker. kedi therefore installs a *named-thread* spawner (`kedi-pump`),
-   not a tokio one. The win is not "tokio tasks"; it's that **the mechanism is the
-   host's decision, made in kedi, not hardcoded in the kernel.** A truly async pump
-   (an async `output()` returning a `Stream`) is a later move, once the kernel goes
-   async; the seam is already in place for it.
+2. **The kernel stops spawning the pump — the async kernel runs it as a future.**
+   *(Done, via the async conversion.)* `warden-core` no longer calls `thread::spawn`.
+   There was a brief interim `Spawner` seam (a host-provided thread/task scheduler);
+   the async move **retired it**: the pump is now a future the kernel drives
+   concurrently with the action via `futures::join`. No thread, no seam, no host
+   choice — async is itself the mechanism-neutral concurrency the Spawner was reaching
+   for. `output()` returns an async `Stream`; the pty's genuinely-blocking OS read
+   stays on its own thread inside `warden-caps`, bridged to that stream by a tokio
+   mpsc. The kernel is now sans-IO in full: no reads/writes/network **and** it
+   schedules nothing.
 
 3. **`SessionHook` parks.** Remove it from the reserved seams (keep the idea in
    DESIGN.md §6 as "where handoff/quotas will attach") until a real implementation
@@ -99,20 +95,24 @@ the capability axis (`Capability`+`Broker`), the decision (`Policy`+`Approver`),
 observer axis (`Interceptor`+`Recorder`), and `Runtime`. Ingress, scheduling, and
 lifecycle-wiring are named as host concerns, on purpose.
 
-## Status
+## Status — all done
 
-All three cuts are done, in the order the boundary implied:
+Every cut the boundary implied is landed:
 
-1. **Demote `Transport` + park `SessionHook`** — done (docs + small code): `SessionHook`
-   removed (it had only a test impl); `Transport` reframed as a host concern (kedi
-   bypasses the trait).
-2. **Lift the pump's concurrency to the host** — done: the `Spawner` seam (above); the
-   kernel no longer spawns threads.
+1. **Demote `Transport` + park `SessionHook`** — `SessionHook` removed (it had only a
+   test impl); `Transport` reframed as a host concern (kedi bypasses the trait).
+2. **Take pump scheduling out of the kernel** — done by the **async kernel**: the pump
+   is a `futures::join`ed future, not a spawned thread (the interim `Spawner` seam was
+   retired in the same move). `output()` returns an async `Stream`.
+3. **The async kernel itself** — the seam methods that touch the world are `async`; the
+   kernel schedules nothing and does no IO. This was the deeper move the boundary
+   enabled, now complete.
 
-What remains is *further* work the boundary enables but doesn't require: an **async
-kernel**, where `output()` returns a `Stream` and the pump is a genuine async task
-rather than a blocking-recv on a thread. That's the sync→async move, tracked in
-DESIGN.md §10 — the `Spawner` seam is the groundwork for it, not the whole of it.
+The kernel over-reach is fully corrected: `warden-core` owns the inner loop (the
+chokepoint, the gate, grant→revoke, the event stream, the seam contracts) and nothing
+of the outer loop (ingress, scheduling, lifecycle wiring). The lesson stands: **draw
+the boundary first, cut to it deliberately** — each cut was small and safe because this
+note said where the line was before any code moved.
 
 The lesson worth keeping: **draw the boundary first, cut to it deliberately.** Each cut
 here was small and safe *because* the map (this note) said where the line was before any
