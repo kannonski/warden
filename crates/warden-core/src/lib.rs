@@ -474,6 +474,13 @@ fn gate(
 }
 
 // ── Ctx: the running action's handle; every capability op goes through invoke() ────────────────
+//
+// Ctx has ONE public role: the action-facing handle (`invoke`, `cap`, `finished`, `take_input`,
+// `killed`, plus the `session` identity). That's the whole surface an action needs. The mediation
+// machinery it drives — the interceptor chain, policy, approver, recorder, kill flag, seq — are
+// PRIVATE fields, not exposed: an action can touch the world only through `invoke`, never reach the
+// wiring behind it. (Two extra methods, `cap_by_name`/`first_cap`, are runtime-plumbing, grouped in
+// a separate impl block below and documented as such.)
 
 pub struct Ctx {
     pub session: SessionCtx,
@@ -587,21 +594,6 @@ impl Ctx {
         self.cap_by_name(kind.0)
     }
 
-    /// Same, by kind name — for runtimes whose guests name kinds as runtime strings (the component
-    /// ABI's `get("sign")` can't construct a `CapKind`, which wraps a `&'static str`).
-    pub fn cap_by_name(&self, kind: &str) -> Option<CapId> {
-        self.caps
-            .iter()
-            .find(|(_, c)| c.kind().0 == kind)
-            .map(|(id, _)| *id)
-    }
-
-    /// The first granted capability, kind-agnostic. Lets a runtime that hasn't yet grown a cap-by-id
-    /// ABI (e.g. the spike's wasm host shim) reach the session's capability without hardcoding a kind.
-    pub fn first_cap(&self) -> Option<CapId> {
-        self.caps.keys().next().copied()
-    }
-
     /// Whether a capability's underlying resource has ended on its own (e.g. a pty's shell exited).
     /// An attach loop polls this so the session ends when the shell dies. Unknown id → `false`.
     pub fn finished(&self, cap: CapId) -> bool {
@@ -623,6 +615,28 @@ impl Ctx {
                 cap: *id,
             });
         }
+    }
+}
+
+// ── Ctx: the runtime-facing surface ────────────────────────────────────────────────────────────
+// These exist for a *runtime* bridging a guest ABI to the session's capabilities — NOT for actions,
+// which use the typed `cap(CapKind)` above. They're grouped and named apart so the action API stays
+// small and clean, and so it's obvious these are host/runtime plumbing that a richer guest cap-by-id
+// ABI would eventually retire.
+impl Ctx {
+    /// Resolve a capability by kind *name* — for a runtime whose guest names kinds as runtime strings
+    /// (the component ABI's `get("sign")` can't construct a `CapKind`, which wraps a `&'static str`).
+    pub fn cap_by_name(&self, kind: &str) -> Option<CapId> {
+        self.caps
+            .iter()
+            .find(|(_, c)| c.kind().0 == kind)
+            .map(|(id, _)| *id)
+    }
+
+    /// The first granted capability, kind-agnostic — for a runtime that hasn't grown a cap-by-id ABI
+    /// yet (the spike's minimal wasm core-module host shim) and just needs *the* granted capability.
+    pub fn first_cap(&self) -> Option<CapId> {
+        self.caps.keys().next().copied()
     }
 }
 
