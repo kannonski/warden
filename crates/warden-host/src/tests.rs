@@ -12,11 +12,26 @@ use warden_core::{
 // ── a tiny real capability + broker to run a session end-to-end (no pty/shell needed) ──────────
 
 const ECHO: CapKind = CapKind("echo");
+const ECHO_OPS: &[warden_core::OpSpec] = &[
+    warden_core::OpSpec {
+        op: "echo",
+        doc: "echo the input back",
+        mutates: false,
+    },
+    warden_core::OpSpec {
+        op: "poke",
+        doc: "a mutating op (for the read-only-policy test)",
+        mutates: true,
+    },
+];
 
 struct EchoCap;
 impl Capability for EchoCap {
     fn kind(&self) -> CapKind {
         ECHO
+    }
+    fn ops(&self) -> &'static [warden_core::OpSpec] {
+        ECHO_OPS
     }
     fn perform(&self, _op: &str, input: &[u8]) -> WResult<Vec<u8>> {
         Ok(input.to_vec()) // echoes its input back
@@ -114,6 +129,9 @@ struct TrackCap(Arc<AtomicUsize>);
 impl Capability for TrackCap {
     fn kind(&self) -> CapKind {
         ECHO
+    }
+    fn ops(&self) -> &'static [warden_core::OpSpec] {
+        ECHO_OPS
     }
     fn perform(&self, _op: &str, input: &[u8]) -> WResult<Vec<u8>> {
         Ok(input.to_vec())
@@ -533,5 +551,93 @@ fn panic_in_action_still_closes_the_session() {
     assert!(
         rec.0.lock().unwrap().join("\n").contains("SessionClosed"),
         "SessionClosed recorded even on panic"
+    );
+}
+
+// ── the OpSpec payoff: a policy that reasons about read-vs-mutate, not op strings ────────────────
+
+/// Denies any op the capability marks `mutates` — the read-only tier. It never names an op; it keys
+/// purely on `call.mutates`, which the kernel fills from the capability's published `OpSpec`. This is
+/// the whole point of typing the op contract: a governance rule that works across every capability,
+/// present and future, without knowing that pty's mutating op is "input" or exec's is "run".
+#[test]
+fn read_only_policy_denies_mutating_ops_by_contract() {
+    struct ReadOnly;
+    impl Policy for ReadOnly {
+        fn on_session(&self, _: &SessionCtx) -> Decision {
+            Decision::Allow
+        }
+        fn on_request(&self, _: &SessionCtx, _: &CapRequest) -> Decision {
+            Decision::Allow
+        }
+        fn on_call(&self, _: &SessionCtx, call: &Call) -> Decision {
+            if call.mutates {
+                Decision::Deny(format!("read-only: `{}` mutates", call.op))
+            } else {
+                Decision::Allow
+            }
+        }
+    }
+    struct ReadOnlyPlugin;
+    impl Plugin for ReadOnlyPlugin {
+        fn manifest(&self) -> Manifest {
+            Manifest::new("read-only").provides(&["policy:read-only"])
+        }
+        fn contribute(&self, reg: &mut Registry) {
+            reg.add::<dyn Policy>(Arc::new(ReadOnly));
+        }
+    }
+
+    // an action that tries a read op (echo) then a mutating op (poke) on the same capability
+    fn probe() -> Action {
+        Action {
+            name: "probe".into(),
+            source: ActionSource::InProcess(Box::new(|ctx: &Ctx| {
+                let cap = ctx.cap(ECHO).ok_or(WardenError::Cap("no echo".into()))?;
+                let read_ok = ctx.invoke(cap, "echo", b"hi".to_vec()).is_ok();
+                let mutate_ok = ctx.invoke(cap, "poke", b"x".to_vec()).is_ok();
+                assert!(read_ok, "read op should be allowed");
+                assert!(
+                    !mutate_ok,
+                    "mutating op should be denied by the read-only policy"
+                );
+                Ok(())
+            })),
+        }
+    }
+
+    let rec = VecRec::default();
+    let loaded = load(vec![
+        Box::new(EchoPlugin),
+        Box::new(LocalRuntimePlugin),
+        Box::new(RecorderPlugin(rec.clone())),
+        Box::new(ReadOnlyPlugin),
+    ])
+    .unwrap();
+    loaded
+        .warden
+        .run_session(
+            Session {
+                id: SessionId(1),
+                identity: "carol".into(),
+                requests: vec![CapRequest {
+                    kind: ECHO,
+                    arg: String::new(),
+                }],
+                action: probe(),
+            },
+            "local",
+        )
+        .unwrap();
+
+    let log = rec.0.lock().unwrap().join("\n");
+    // the read produced a Result; the mutate produced a Denied citing the read-only rule
+    assert!(
+        log.contains("Result"),
+        "the read op should have succeeded: {log}"
+    );
+    assert!(
+        log.contains("read-only") && log.contains("mutates"),
+        "the mutating op should have been denied by contract: {log}"
     );
 }

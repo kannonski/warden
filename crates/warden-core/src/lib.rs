@@ -53,6 +53,9 @@ pub struct Call {
     pub cap: CapId,
     pub kind: CapKind,
     pub op: String,
+    /// Whether this op mutates the world, from the capability's [`OpSpec`]. Lets [`Policy::on_call`]
+    /// reason about read-vs-write without matching op strings it can't verify.
+    pub mutates: bool,
     pub input: Vec<u8>,
 }
 #[derive(Clone, Debug)]
@@ -173,10 +176,39 @@ pub enum Event {
 
 // ── the 8 seams ─────────────────────────────────────────────────────────────────────────────
 
+/// One operation a capability accepts — its self-description. A capability publishes its full op set
+/// via [`Capability::ops`], which makes ops *enumerable* (a UI/audit can list them), lets the kernel
+/// reject an unknown op centrally (§ `Ctx::invoke`) instead of every impl hand-rolling the check, and
+/// gives [`Policy`] a typed handle (`mutates`) so it can reason about read-vs-write without matching
+/// on op strings it can't verify. The `op` stays a string because ops cross the wire and the WASM
+/// ABI as strings; `ops()` is the *contract* those strings are validated against.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct OpSpec {
+    /// The op name — the string passed to [`Capability::perform`].
+    pub op: &'static str,
+    /// One line for a human, a UI, or the audit trail.
+    pub doc: &'static str,
+    /// Whether the op changes the world (write/exec/spawn) vs. only observes it (read). Policy can
+    /// key on this — e.g. deny every mutating op for a read-only identity — without knowing op names.
+    pub mutates: bool,
+}
+
+/// The uniform "unknown op" error, shared so every capability rejects an out-of-contract op the same
+/// way. The kernel validates ops centrally before calling `perform` (so this is the primary guard),
+/// but a capability can call this as defense-in-depth — which also keeps it testable in isolation,
+/// outside a kernel that would have rejected the op first.
+pub fn no_such_op(kind: CapKind, op: &str) -> WardenError {
+    WardenError::Cap(format!("`{}` has no op `{op}`", kind.0))
+}
+
 /// A granted, mediated resource — THE extension axis. `perform` is the *raw* op; the kernel wraps
 /// every call through the interceptor chain, so impls never do policy/audit/masking themselves.
 pub trait Capability: Send + Sync {
     fn kind(&self) -> CapKind;
+    /// The operations this capability accepts — its published contract (see [`OpSpec`]). The kernel
+    /// validates every `perform`'s `op` against this set, so impls no longer hand-roll an
+    /// "unknown op" arm. Should be a stable `&'static` slice.
+    fn ops(&self) -> &'static [OpSpec];
     fn perform(&self, op: &str, input: &[u8]) -> Result<Vec<u8>>;
     fn revoke(&self);
     /// An optional *continuous output* stream (e.g. a pty's byte stream). The kernel takes it once,
@@ -448,12 +480,27 @@ impl Ctx {
             return Err(WardenError::Denied(why));
         }
         let cap_obj = self.caps.get(&cap).ok_or(WardenError::NotGranted(cap))?;
+
+        // Central op validation: an op the capability doesn't publish (§ `Capability::ops`) is
+        // refused here, once, for every capability — so impls never hand-roll an "unknown op" arm,
+        // and the refusal is a recorded governance denial, not a per-impl error string.
+        let Some(spec) = cap_obj.ops().iter().find(|s| s.op == op) else {
+            let why = format!("`{}` has no op `{op}`", cap_obj.kind().0);
+            self.recorder.record(Event::Denied {
+                session: self.session.id,
+                subject: format!("call `{op}` on {}", cap_obj.kind().0),
+                why: why.clone(),
+            });
+            return Err(WardenError::Denied(why));
+        };
+
         let seq = self.seq.fetch_add(1, Ordering::Relaxed) + 1;
         let call = Call {
             session: self.session.id,
             cap,
             kind: cap_obj.kind(),
             op: op.to_string(),
+            mutates: spec.mutates,
             input,
         };
 

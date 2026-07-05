@@ -14,7 +14,7 @@ use hmac::{Hmac, Mac};
 use sha2::Sha256;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
-use warden_core::{Broker, CapKind, CapRequest, Capability, Result, WardenError};
+use warden_core::{Broker, CapKind, CapRequest, Capability, OpSpec, Result, WardenError};
 
 pub const SIGN: CapKind = CapKind("sign");
 
@@ -46,32 +46,40 @@ pub struct SignCap {
     /// plus mlock/no-swap so key material can't linger in memory or hit disk.
     key: Mutex<Option<Vec<u8>>>,
 }
+// The contract IS the design: `sign` is the only op. There is deliberately no `reveal`/`export`/`key`
+// op — the key never leaves the host, and now that's a positive fact in the published op set, not just
+// a refusal buried in a match arm. Signing observes the key but doesn't change the world → not mutating.
+const OPS: &[OpSpec] = &[OpSpec {
+    op: "sign",
+    doc: "HMAC-SHA256 the input with the vaulted key (never returns the key)",
+    mutates: false,
+}];
+
 impl Capability for SignCap {
     fn kind(&self) -> CapKind {
         SIGN
     }
+    fn ops(&self) -> &'static [OpSpec] {
+        OPS
+    }
     fn perform(&self, op: &str, input: &[u8]) -> Result<Vec<u8>> {
-        match op {
-            "sign" => {
-                let guard = self.key.lock().unwrap();
-                let key = guard
-                    .as_ref()
-                    .ok_or(WardenError::Cap("sign capability revoked".into()))?;
-                let mut mac = Hmac::<Sha256>::new_from_slice(key)
-                    .map_err(|e| WardenError::Cap(format!("hmac init: {e}")))?;
-                mac.update(input);
-                let out: Vec<u8> = mac.finalize().into_bytes().to_vec();
-                Ok(out
-                    .iter()
-                    .map(|b| format!("{b:02x}"))
-                    .collect::<String>()
-                    .into_bytes())
-            }
-            // there is deliberately NO op that returns the key — the refusal below is the design
-            other => Err(WardenError::Cap(format!(
-                "sign grants only `sign`, not `{other}`"
-            ))),
+        // kernel validates first; this defends the cap in isolation too (see `no_such_op`)
+        if op != "sign" {
+            return Err(warden_core::no_such_op(SIGN, op));
         }
+        let guard = self.key.lock().unwrap();
+        let key = guard
+            .as_ref()
+            .ok_or(WardenError::Cap("sign capability revoked".into()))?;
+        let mut mac = Hmac::<Sha256>::new_from_slice(key)
+            .map_err(|e| WardenError::Cap(format!("hmac init: {e}")))?;
+        mac.update(input);
+        let out: Vec<u8> = mac.finalize().into_bytes().to_vec();
+        Ok(out
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect::<String>()
+            .into_bytes())
     }
     fn revoke(&self) {
         if let Some(mut key) = self.key.lock().unwrap().take() {

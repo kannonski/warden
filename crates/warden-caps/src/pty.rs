@@ -18,7 +18,7 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver};
-use warden_core::{Broker, CapKind, CapRequest, Capability, Result, WardenError};
+use warden_core::{Broker, CapKind, CapRequest, Capability, OpSpec, Result, WardenError};
 
 pub const PTY: CapKind = CapKind("pty");
 
@@ -67,9 +67,31 @@ impl PtyCap {
     }
 }
 
+// input and resize change the terminal's state; wait only observes the exit code.
+const OPS: &[OpSpec] = &[
+    OpSpec {
+        op: "input",
+        doc: "write bytes to the shell's stdin (spawns the shell on first use)",
+        mutates: true,
+    },
+    OpSpec {
+        op: "resize",
+        doc: "resize the pty to `COLSxROWS` (spawns the shell at that size on first use)",
+        mutates: true,
+    },
+    OpSpec {
+        op: "wait",
+        doc: "block until the shell exits; returns its exit code",
+        mutates: false,
+    },
+];
+
 impl Capability for PtyCap {
     fn kind(&self) -> CapKind {
         PTY
+    }
+    fn ops(&self) -> &'static [OpSpec] {
+        OPS
     }
     fn perform(&self, op: &str, input: &[u8]) -> Result<Vec<u8>> {
         match op {
@@ -116,9 +138,8 @@ impl Capability for PtyCap {
                     .map_err(|e| WardenError::Cap(format!("pty wait: {e}")))?;
                 Ok(status.exit_code().to_string().into_bytes())
             }
-            other => Err(WardenError::Cap(format!(
-                "pty grants input/resize/wait, not `{other}`"
-            ))),
+            // kernel validates first; this defends the cap in isolation too (see `no_such_op`)
+            other => Err(warden_core::no_such_op(PTY, other)),
         }
     }
     fn revoke(&self) {

@@ -1687,11 +1687,11 @@ mod tests {
                 "key reached the guest: {o}"
             );
         }
-        // and the guest's refused `reveal` is in the trail
+        // and the guest's refused `reveal` is in the trail — now a governance Denied (the op isn't
+        // in `sign`'s published contract), recorded centrally by the kernel, not a per-cap error
         assert!(
-            evs.iter().any(
-                |e| matches!(e, Event::Failed { error, .. } if error.contains("not `reveal`"))
-            ),
+            evs.iter()
+                .any(|e| matches!(e, Event::Denied { why, .. } if why.contains("no op `reveal`"))),
             "refused reveal not recorded"
         );
     }

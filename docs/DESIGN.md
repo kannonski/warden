@@ -156,6 +156,24 @@ resource ended on its own" (the shell exited).
 The `kind` (a `CapKind("…")` string) is what makes this the main extension axis:
 `fs.read`, `exec`, `sign`, `pty`, and any new one you invent — `sql`, `http`, `s3`.
 
+**The op contract — `ops() -> &[OpSpec]`.** A capability publishes the operations it
+accepts, each an `OpSpec { op, doc, mutates }`. The op *string* stays a string
+(because ops cross the wire and the WASM ABI as strings — you can't enum a value that
+arrives from the network), but `ops()` is the *contract* those strings are validated
+against. This buys three things the old bare `perform(op: &str, …)` couldn't:
+
+- **Central validation.** `Ctx::invoke` checks the op against `ops()` *before* policy;
+  an op the capability doesn't publish is a recorded `Denied` — one check in the
+  kernel, instead of a copy-pasted `other => Err("only accepts X")` in every impl.
+  (Each impl still rejects gracefully too, via `no_such_op`, so it's testable in
+  isolation — defense in depth.)
+- **Enumerability.** A UI or the audit trail can *list* what a capability can do.
+- **A typed handle for policy.** `mutates` (does this op change the world, or only
+  observe it?) rides on the `Call`, so a `Policy` can say "deny every mutating op for
+  a read-only identity" **without knowing any op names** — a rule that works across
+  every capability, present and future. (This is exactly what the `warden-host`
+  `read_only_policy_denies_mutating_ops_by_contract` test proves.)
+
 **Real impls** (`warden-caps`, `warden-secret`): `fs.read` (read *one* path),
 `exec` (run *one* hash-pinned binary), `pty` (an interactive shell — the substrate
 for kedi), `sign` (HMAC with a key the action never sees).

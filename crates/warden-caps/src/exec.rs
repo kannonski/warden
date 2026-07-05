@@ -12,7 +12,7 @@
 
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
-use warden_core::{Broker, CapKind, CapRequest, Capability, Result, WardenError};
+use warden_core::{Broker, CapKind, CapRequest, Capability, OpSpec, Result, WardenError};
 
 pub const EXEC: CapKind = CapKind("exec");
 
@@ -31,48 +31,52 @@ pub struct ExecCap {
     program: PathBuf,
     pinned_sha256: String,
 }
+const OPS: &[OpSpec] = &[OpSpec {
+    op: "run",
+    doc: "spawn the hash-pinned binary (args = input, split on the separator); returns stdout",
+    mutates: true,
+}];
+
 impl Capability for ExecCap {
     fn kind(&self) -> CapKind {
         EXEC
     }
+    fn ops(&self) -> &'static [OpSpec] {
+        OPS
+    }
     fn perform(&self, op: &str, input: &[u8]) -> Result<Vec<u8>> {
-        match op {
-            "run" => {
-                // re-verify the pin at spawn time — the binary must not have changed since grant
-                let now = sha256_hex_of(&self.program)?;
-                if !now.eq_ignore_ascii_case(&self.pinned_sha256) {
-                    return Err(WardenError::Cap(format!(
-                        "{} changed since grant (hash mismatch) — refusing to spawn",
-                        self.program.display()
-                    )));
-                }
-                let args: Vec<&str> = match input {
-                    [] => Vec::new(),
-                    _ => std::str::from_utf8(input)
-                        .map_err(|e| WardenError::Cap(format!("args not utf-8: {e}")))?
-                        .split(ARG_SEP)
-                        .collect(),
-                };
-                let out = std::process::Command::new(&self.program)
-                    .args(&args)
-                    .output()
-                    .map_err(|e| {
-                        WardenError::Cap(format!("spawn {}: {e}", self.program.display()))
-                    })?;
-                if !out.status.success() {
-                    return Err(WardenError::Cap(format!(
-                        "{} exited {}: {}",
-                        self.program.display(),
-                        out.status,
-                        String::from_utf8_lossy(&out.stderr).trim()
-                    )));
-                }
-                Ok(out.stdout)
-            }
-            other => Err(WardenError::Cap(format!(
-                "exec grants only `run`, not `{other}`"
-            ))),
+        // kernel validates first; this defends the cap in isolation too (see `no_such_op`)
+        if op != "run" {
+            return Err(warden_core::no_such_op(EXEC, op));
         }
+        // re-verify the pin at spawn time — the binary must not have changed since grant
+        let now = sha256_hex_of(&self.program)?;
+        if !now.eq_ignore_ascii_case(&self.pinned_sha256) {
+            return Err(WardenError::Cap(format!(
+                "{} changed since grant (hash mismatch) — refusing to spawn",
+                self.program.display()
+            )));
+        }
+        let args: Vec<&str> = match input {
+            [] => Vec::new(),
+            _ => std::str::from_utf8(input)
+                .map_err(|e| WardenError::Cap(format!("args not utf-8: {e}")))?
+                .split(ARG_SEP)
+                .collect(),
+        };
+        let out = std::process::Command::new(&self.program)
+            .args(&args)
+            .output()
+            .map_err(|e| WardenError::Cap(format!("spawn {}: {e}", self.program.display())))?;
+        if !out.status.success() {
+            return Err(WardenError::Cap(format!(
+                "{} exited {}: {}",
+                self.program.display(),
+                out.status,
+                String::from_utf8_lossy(&out.stderr).trim()
+            )));
+        }
+        Ok(out.stdout)
     }
     fn revoke(&self) {
         // real impl: kill any children still running under this grant. spike: run() is blocking.
