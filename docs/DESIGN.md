@@ -118,6 +118,17 @@ implementation into. There are eight, plus a ninth for session lifecycle.
 Think of them in two groups: **the two structural seams** that decide *what runs and
 how it arrives*, and **the six mediation seams** that sit on the path of every call.
 
+Two of the mediation seams — `Interceptor` and `Recorder` — are really **one axis
+seen at two settings**: *observing the event stream*. A `Recorder` observes every
+event, out-of-path, and can only watch. An `Interceptor` observes one kind of event
+(a `Call`), in-path, and may also *act* — transform or deny it — before the recorders
+downstream see the result. Same substrate (the stream of things that happen), graded
+power (watch vs. watch-and-act). They stay two traits because the signatures genuinely
+differ — a `Recorder` takes a finished `Event`; an `Interceptor` takes a `Call` plus a
+`Next` continuation it can short-circuit — but it's worth carrying the one-axis picture
+as you read §4.5 and §4.6. See the ordering note in §4.6 for why "interceptor acts,
+then recorder observes" is load-bearing.
+
 ```
                           a session arrives
                                 │
@@ -134,8 +145,8 @@ how it arrives*, and **the six mediation seams** that sit on the path of every c
                         └──────────────┘
                           [Policy]      allow / deny / escalate      (per session, grant, call)
                           [Approver]    resolves an escalation       (quorum, timeout)
-                          [Interceptor] log / mask / meter the call  (a chain)
-                          [Recorder]    append every event           (fan-out)
+                          [Interceptor] ┐ observe the event stream:  in-path, acts on a Call (chain)
+                          [Recorder]    ┘ ONE axis, two powers       out-of-path, watches every event (fan-out)
                           [Capability]  THE raw side effect          (the thing being mediated)
                           [SessionHook] open / close lifecycle       (persistence, quotas, handoff)
 ```
@@ -245,13 +256,18 @@ Multiple approvers **all must approve** (attributions merge), and it is
 **fail-closed**: if policy escalates but no approver is configured, the op is
 rejected — an escalation with nobody to answer it must never silently pass.
 
-### 4.5 `Interceptor` — the mediation middleware
+### 4.5 `Interceptor` — the acting observer *(the observer axis, in-path)*
 
 **Concept.** A chain that wraps every call. Each interceptor gets the `Call` and a
 `Next` continuation; it can inspect, log, meter, rewrite, deny, or pass through —
 then call `next`. It also builds a **per-stream stateful masker** (`output_masker`)
 for streaming capabilities, so a secret split across two pty reads is still caught
 (a stateless per-chunk filter can't do that).
+
+This is the *in-path* end of the observer axis (see the group intro): it observes the
+`Call` event and, uniquely, may change or block it. The `Recorder` (§4.6) is the
+*out-of-path* end — same event stream, watch-only. An interceptor is the one observer
+whose action the other observers then record.
 
 **Real impls** (`warden` bin): a `Log` interceptor and a DLP `Mask` interceptor.
 
@@ -266,7 +282,7 @@ plugin(Manifest::new("audit-mw").provides(&["interceptor:log"]), |reg| {
 
 They compose into one chain, ordered by priority (low runs first / outermost).
 
-### 4.6 `Recorder` — the event sink
+### 4.6 `Recorder` — the watching observer *(the observer axis, out-of-path)*
 
 **Concept.** `record(Event)` — an append-only structured sink. This is the "records"
 in the one idea. What the sink *does* is pluggable: write hash-chained JSONL to
@@ -274,6 +290,16 @@ disk, ship to a SIEM, or (for a live client) *be the client's view*. The kernel
 tees the same stream to the durable recorder and a session's live observer, so **the
 client's terminal sees exactly what the record sees, post-mask** — no separate,
 un-audited display path.
+
+This is the *out-of-path* end of the observer axis (§4.5 is the in-path end). A
+recorder sees the **whole** event stream — `SessionOpened`, `CapGranted`, `Denied`,
+`Escalation…`, `Killed`, `Revoked`, `Output`, the `Call`/`Result`/`Failed` trio,
+`SessionClosed` — not just calls (which is exactly why it can't be "a kind of
+interceptor": most events never enter the interceptor chain). **Ordering is
+load-bearing:** in `Ctx::invoke`, the interceptor chain runs *between* recording the
+`Call` and recording the `Result`, so a recorder captures whatever the interceptors
+produced — that's how the trail holds the post-mask output. Interceptor acts; recorder
+then observes the result.
 
 **Real impl.** `warden-record`: append-only JSONL, hash-chained (line N carries the
 SHA-256 of line N−1), on a background thread so the audit log is never on the hot
