@@ -5,6 +5,17 @@
 
 ---
 
+## 0. The whole thing, one picture
+
+![warden architecture](architecture.svg)
+
+> Source: [`architecture.d2`](architecture.d2). Render with
+> `d2 docs/architecture.d2 docs/architecture.svg`. Every box maps to a section
+> below: the chokepoint is §2, the seams around it are §4, the event-stream tee is
+> §5, the arrival/kill flow is §6.
+
+---
+
 ## 1. The one idea
 
 **An action can only touch the world through capabilities the warden grants, mediates, and records.**

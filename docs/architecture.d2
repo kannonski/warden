@@ -1,0 +1,158 @@
+# warden — one-picture architecture
+# The one idea: an action can only touch the world through capabilities the warden
+# grants, mediates, and records. This diagram is that sentence, drawn.
+#
+# Render:  d2 docs/architecture.d2 docs/architecture.svg
+#          d2 --theme 200 --dark-theme 200 docs/architecture.d2 docs/architecture.svg
+
+direction: down
+
+vars: {
+  d2-config: {
+    layout-engine: elk
+    theme-id: 200
+    sketch: false
+    pad: 40
+  }
+}
+
+title: "warden — an action touches the world only through capabilities the warden grants, mediates, and records" {
+  near: top-center
+  shape: text
+  style.font-size: 26
+  style.bold: true
+  style.font-color: "#cba6f7"
+}
+
+# ── how a session arrives (the two structural seams) ──────────────────────────
+arrival: How a session arrives {
+  style.stroke-dash: 3
+  style.fill: transparent
+
+  transport: "Transport\n\nloopback · QUIC · gateway\n(kernel never sees bytes)" {
+    shape: hexagon
+    style.fill: "#2d3b55"
+    style.font-color: white
+  }
+  runtime: "Runtime\n\nin-process · WASM component · native\n(routes guest calls into invoke)" {
+    shape: hexagon
+    style.fill: "#2d3b55"
+    style.font-color: white
+  }
+}
+
+# ── the action ────────────────────────────────────────────────────────────────
+action: "Action\n\nWASM guest / native / closure\nholds capability HANDLES,\nnot resources" {
+  shape: rectangle
+  style.fill: "#3a2f5c"
+  style.font-color: white
+  style.bold: true
+}
+
+# ── the chokepoint: Ctx::invoke, with the mediation seams stacked inside ───────
+chokepoint: "Ctx::invoke  —  THE only door to the world" {
+  direction: down
+  style.fill: "#1e1e2e"
+  style.stroke: "#cba6f7"
+  style.stroke-width: 3
+  style.font-color: "#cba6f7"
+  style.bold: true
+
+  s1: "1 · killed?  → refuse + record Denied" { style.fill: "#45293a"; style.font-color: "#f38ba8" }
+  s2: "2 · Policy   → allow / deny / escalate→approve" { style.fill: "#2a3550"; style.font-color: "#89b4fa" }
+  s3: "3 · record Call" { style.fill: "#2a3550"; style.font-color: "#a6adc8" }
+  s4: "4 · Interceptor chain  (log · mask · meter)" { style.fill: "#2a3550"; style.font-color: "#89b4fa" }
+  s5: "5 · Capability.perform  ← the RAW side effect" { style.fill: "#294539"; style.font-color: "#a6e3a1"; style.bold: true }
+  s6: "6 · record Result  (post-mask)" { style.fill: "#2a3550"; style.font-color: "#a6adc8" }
+
+  # numbered order conveys the sequence; no chain edges, so ELK stacks them vertically
+  s1 -> s2: { style.stroke: "#6c7086"; style.stroke-width: 1 }
+  s2 -> s3: { style.stroke: "#6c7086"; style.stroke-width: 1 }
+  s3 -> s4: { style.stroke: "#6c7086"; style.stroke-width: 1 }
+  s4 -> s5: { style.stroke: "#6c7086"; style.stroke-width: 1 }
+  s5 -> s6: { style.stroke: "#6c7086"; style.stroke-width: 1 }
+}
+
+# ── the world ───────────────────────────────────────────────────────────────
+world: "The world" {
+  direction: down
+  style.fill: transparent
+  style.stroke-dash: 3
+
+  fs: "fs.read\n(one path)" { style.fill: "#313244"; style.font-color: white }
+  exec: "exec\n(hash-pinned)" { style.fill: "#313244"; style.font-color: white }
+  sign: "sign\n(vaulted key,\nnever seen)" { style.fill: "#313244"; style.font-color: white }
+  pty: "pty\n(your shell)" { style.fill: "#313244"; style.font-color: white }
+}
+
+# ── the broker turns a request into a live capability ─────────────────────────
+broker: "Broker\n\nCapRequest → live Capability\n(secret → handle)" {
+  shape: hexagon
+  style.fill: "#2d3b55"
+  style.font-color: white
+}
+
+# ── approver resolves an escalation ───────────────────────────────────────────
+approver: "Approver\n\nresolves escalate\n(quorum · timeout)\nfail-closed" {
+  shape: hexagon
+  style.fill: "#4a3a2a"
+  style.font-color: "#f9e2af"
+}
+
+# ── the event stream tees to two readers ──────────────────────────────────────
+events: "Event stream  (append-only)" {
+  style.fill: "#181825"
+  style.font-color: "#cba6f7"
+  style.bold: true
+
+  record: "durable Recorder\n\nhash-chained JSONL\n→ verify · replay · rewind" {
+    style.fill: "#294539"
+    style.font-color: "#a6e3a1"
+  }
+  live: "live observer\n\nthe client's terminal —\nsees EXACTLY the record,\npost-mask" {
+    style.fill: "#2a3550"
+    style.font-color: "#89b4fa"
+  }
+}
+
+# ── the flows ─────────────────────────────────────────────────────────────────
+arrival.transport -> action: "delivers session" { style.stroke: "#6c7086" }
+arrival.runtime -> action: "runs" { style.stroke: "#6c7086" }
+
+action -> chokepoint.s1: "ctx.invoke(cap, op, input)" {
+  style.stroke: "#cba6f7"
+  style.stroke-width: 3
+  style.bold: true
+}
+
+broker -> chokepoint: "grants the Capability\nthe action holds" {
+  style.stroke: "#6c7086"
+  style.stroke-dash: 4
+}
+chokepoint.s2 -> approver: "escalate" { style.stroke: "#f9e2af"; style.stroke-dash: 4 }
+approver -> chokepoint.s2: "verdict" { style.stroke: "#f9e2af"; style.stroke-dash: 4 }
+
+chokepoint.s5 -> world.pty: "the actual effect" {
+  style.stroke: "#a6e3a1"
+  style.stroke-width: 2
+}
+
+chokepoint -> events: "every step recorded" {
+  style.stroke: "#cba6f7"
+  style.stroke-width: 2
+}
+events -> events.record { style.stroke: "#6c7086" }
+events -> events.live { style.stroke: "#6c7086" }
+
+# ── the kill switch ───────────────────────────────────────────────────────────
+kill: "operator kill\n(attributed)" {
+  shape: circle
+  style.fill: "#f38ba8"
+  style.font-color: "#1e1e2e"
+  style.bold: true
+}
+kill -> chokepoint.s1: "sets flag → every\ncall refused (world\nsevered, CPU kept)" {
+  style.stroke: "#f38ba8"
+  style.stroke-width: 2
+  style.stroke-dash: 2
+}
