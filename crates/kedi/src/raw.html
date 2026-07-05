@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>kedi /raw — minimal terminal (diagnostic)</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/css/xterm.min.css">
+<script src="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/lib/xterm.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0.10.0/lib/addon-fit.min.js"></script>
+<style>
+  html, body { height:100%; margin:0; background:#0b0e14; }
+  #t { height:100%; width:100%; }
+</style>
+</head>
+<body>
+<div id="t"></div>
+<script>
+// ABSOLUTE MINIMUM: one full-screen xterm, DEFAULT (DOM) renderer, only the fit addon, one pty.
+// No float windows, no WebGL/Canvas/unicode11/search/weblinks, no custom container CSS.
+const CERT_HASH = new Uint8Array([__CERT_HASH__]);
+const WT_URL = "__WT_URL__";
+const enc = new TextEncoder();
+
+const term = new Terminal({
+  fontFamily: '"FiraCode Nerd Font Mono", monospace', fontSize: 14, cursorBlink: true,
+  theme: { // Catppuccin Mocha
+    background:"#1e1e2e", foreground:"#cdd6f4", cursor:"#f5e0dc", cursorAccent:"#1e1e2e", selectionBackground:"#585b70",
+    black:"#45475a", red:"#f38ba8", green:"#a6e3a1", yellow:"#f9e2af", blue:"#89b4fa", magenta:"#f5c2e7", cyan:"#94e2d5", white:"#bac2de",
+    brightBlack:"#585b70", brightRed:"#f38ba8", brightGreen:"#a6e3a1", brightYellow:"#f9e2af", brightBlue:"#89b4fa", brightMagenta:"#f5c2e7", brightCyan:"#94e2d5", brightWhite:"#a6adc8",
+  },
+});
+const fit = new FitAddon.FitAddon();
+term.loadAddon(fit);
+term.open(document.getElementById("t"));
+fit.fit();
+
+(async () => {
+  const wt = new WebTransport(WT_URL, { serverCertificateHashes: [{ algorithm: "sha-256", value: CERT_HASH }] });
+  await wt.ready;
+  const stream = await wt.createBidirectionalStream();
+  const writer = stream.writable.getWriter();
+  const reader = stream.readable.getReader();
+  const send = (o) => writer.write(enc.encode(JSON.stringify(o) + "\n"));
+  (async () => { while (true) { const { value, done } = await reader.read(); if (done) break; if (value) term.write(value); } })();
+  term.onData((d) => send({ input: d }));
+  term.onResize(({ cols, rows }) => send({ resize: [cols, rows] }));
+  fit.fit();
+  send({ resize: [term.cols, term.rows] });
+  console.log(`[raw] ${term.cols}x${term.rows}`);
+  term.focus();
+  window.addEventListener("resize", () => fit.fit());
+})();
+</script>
+</body>
+</html>

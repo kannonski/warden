@@ -1,0 +1,28 @@
+// warden action contract — the component-model ABI between a warden and the actions it runs.
+//
+// The one primitive, expressed as WIT: an action's ONLY door to the world is the `caps` interface,
+// and a capability is a RESOURCE HANDLE — the guest holds an opaque handle, never the thing itself.
+// Every `invoke` crosses the warden chokepoint (policy, DLP, record) on the host side. Combined
+// with an empty WASI sandbox (no preopened dirs, no net, no env), least-privilege is structural:
+// there is nothing else to call.
+//
+// This is also why secret-backed capabilities (e.g. `sign`) are safe to hand to untrusted actions:
+// the key lives host-side behind the handle and never enters the guest's linear memory.
+package warden:action@0.1.0;
+
+interface caps {
+    /// A granted, mediated capability.
+    resource capability {
+        /// Perform one operation. What ops exist is defined by the capability kind
+        /// ("fs.read" -> read; "exec" -> run; "sign" -> sign; ...).
+        invoke: func(op: string, input: list<u8>) -> result<list<u8>, string>;
+    }
+
+    /// Look up a capability granted to this session by kind. `none` = not granted.
+    get: func(kind: string) -> option<capability>;
+}
+
+world action {
+    import caps;
+    export run: func() -> result<_, string>;
+}

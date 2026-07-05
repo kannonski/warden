@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 128 128" role="img" aria-label="kedi">
+  <rect width="128" height="128" rx="28" fill="#1e1e2e"/>
+  <g transform="translate(14 14) scale(1.0)" fill="none" stroke="#cba6f7" stroke-width="3.1" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M25 35 L24 15 L38 26 Q50 21 62 26 L76 15 L75 35 Q83 45 83 56 Q83 79 50 79 Q17 79 17 56 Q17 45 25 35 Z"/>
+    <path d="M35 52 q5 5 10 0"/><path d="M55 52 q5 5 10 0"/>
+    <path d="M46.5 63 h7 l-3.5 4.5 Z"/>
+    <path d="M13 55 H3 M14 62 H5"/><path d="M87 55 h10 M86 62 h9"/>
+  </g>
+</svg>

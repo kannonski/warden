@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=kedi
+GenericName=Governed Terminal
+Comment=Your shell in the browser — recorded, replayable, killable
+Exec=kedi --open
+Icon=kedi
+Terminal=false
+Categories=Utility;
+Keywords=terminal;shell;warden;governed;audit;
+StartupNotify=false

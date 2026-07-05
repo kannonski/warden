@@ -1,0 +1,11 @@
+[package]
+name = "warden-core"
+description = "Sans-IO governed-execution kernel: one mediation chokepoint behind 8 swappable seams (capability, broker, policy, approver, interceptor, recorder, runtime, transport)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+# The sans-IO kernel: the 8 seams + the mediation flow. No IO, no external deps → unit-testable.
+[dependencies]

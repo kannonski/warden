@@ -1,0 +1,234 @@
+= warden
+:toc: preamble
+:toc-title:
+
+image:https://github.com/kannonski/warden/actions/workflows/ci.yml/badge.svg[CI,link=https://github.com/kannonski/warden/actions/workflows/ci.yml]
+image:https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue[License]
+
+Governed execution, built on one primitive: an action can only touch the world through
+*capabilities* the warden grants, mediates, and records. Least-privilege, audit, masking,
+record/replay, approval, revocation, kill — none of these are subsystems; they are rules applied
+at that single chokepoint.
+
+----
+                              ┌─────────────────────────────────────────┐
+   session ──► policy gate ──►│           Ctx::invoke                   │──► capability ──► world
+   (identity)  allow/deny/    │  interceptor chain: log · mask · meter  │    fs.read
+               escalate ──►   │  every call recorded (hash-chained)     │    exec (hash-pinned)
+               approver       │  killed? → refused                      │    sign (vaulted key)
+               (quorum)       └─────────────────────────────────────────┘    pty (your shell)
+----
+
+The shape is the point: a sans-IO kernel (`warden-core`, zero dependencies) with *eight extension
+seams* — `Capability`, `Broker`, `Policy`, `Approver`, `Interceptor`, `Recorder`, `Runtime`,
+`Transport` — plus a session-lifecycle seam (`SessionHook`), and everything else as pluggable
+implementations. Adding a feature means writing a *plugin*, not editing the kernel (see
+<<Plugins>>).
+
+The most complete thing built on it so far is *kedi*, a governed web terminal — your real shell in
+the browser at native-feeling latency, with every session recordable, replayable, and killable.
+See link:crates/kedi/README.adoc[crates/kedi].
+
+== Try kedi
+
+// Demo: drop a screen capture at docs/demo.gif and uncomment the next line.
+// image::docs/demo.gif[kedi: draw a terminal · type at native speed · deny root · kill from the console · replay the verified record]
+
+*Prebuilt binary* (no Rust toolchain needed — `kedi` is one self-contained file):
+
+[source,shell]
+----
+# grab the binary for your platform from the latest release, then:
+chmod +x kedi-* && mv kedi-* kedi
+./kedi --open                            # starts a loopback background server + opens the tab
+----
+
+`kedi --open` self-detaches a loopback-only server and opens `http://localhost:8788` in a
+Chromium-family browser; run it again and it just re-opens the tab (one server, singleton). Quit it
+explicitly from the *⏻* button in the header (or `POST /shutdown`) — nothing lingers unless you
+launched it. On Linux, `packaging/install.sh` puts `kedi` on your `PATH` and drops a desktop icon
+(`Exec=kedi --open`) so it launches like any app.
+
+See https://github.com/kannonski/warden/releases[Releases] for `kedi-linux-x86_64` /
+`kedi-macos-aarch64`.
+
+*From source* (for building on it / hacking warden):
+
+[source,shell]
+----
+git clone https://github.com/kannonski/warden && cd warden
+cargo run -p kedi -- --host kedi.localhost
+----
+
+The 30-second tour: double-click to draw a terminal (it's your real `$SHELL`, native-fast), flip on
+recording, open the *audit* panel to watch the live event feed, set your identity to `root` and see
+policy refuse it, `kill` a session from the console, then scrub the whole thing back on the replay
+timeline — over a hash-chained record that turns red if a single byte is doctored. Loopback-only by
+design; recording is opt-in. Full guide: link:crates/kedi/README.adoc[crates/kedi/README].
+
+== Workspace
+
+[cols="1,3"]
+|===
+| `warden-core`
+| The sans-IO kernel: the seam traits plus the mediation flow (`Ctx::invoke`, the chokepoint) and
+  the escalate→approve gate. Zero dependencies, fully unit-testable.
+
+| `warden-host`
+| The composition layer. An *open, type-keyed extension registry* (a point is any trait; new points
+  cost nothing) and a two-phase plugin loader that assembles a `Warden` from plugins. Single-provider
+  points compose: policy = most-restrictive-wins, approver = all-must-approve (fail-closed),
+  recorder = fan-out; interceptors order by explicit priority. See <<Plugins>>.
+
+| `warden-caps`
+| Capability-type implementations. `fs.read` (read one file, nothing else), `exec` (run one
+  hash-pinned binary; the grant is refused on pin mismatch and the pin is re-verified at every
+  spawn), and `pty` (an interactive shell as a capability — the substrate for kedi).
+
+| `warden-record`
+| The `Recorder` seam's persistence: append-only JSONL, hash-chained — line N carries the SHA-256
+  of line N−1, so any edit breaks every later link. Tamper-evident, not tamper-proof: anchor the
+  chain head externally to catch tail truncation. `state_at()` rewinds to the observed state at
+  any point in the record (rewind is reconstruction, not undo). Recording runs on a background
+  thread — the audit log is never on an interactive hot path.
+
+| `warden-secret`
+| Secrets as capabilities. The action requests an operation over a secret (`sign`), never the
+  secret: the broker pulls the key from a `Vault`, the capability uses it (HMAC), no op returns
+  it, revoke zeroizes it. Isolated from the action, not the warden (warden-blind = TEE/HSM, a
+  later tier).
+
+| `warden-wasm`
+| The wasm `Runtime` impls, both routing every guest call into the same `Ctx::invoke` chokepoint.
+  `WasmRuntime`: minimal core-module ABI, self-contained. `ComponentRuntime`: the real ABI —
+  component model + `wit/warden.wit`, where a capability is a *resource handle* (the guest holds
+  an opaque handle; the file grant, pinned binary, or signing key stays host-side and never enters
+  guest memory) and WASI is granted empty — the `caps` interface is the guest's only door.
+
+| `warden-transport`
+| The `Transport` seam over QUIC (quinn): TLS 1.3 on the wire, one session = one bidi stream
+  (native multiplexing). A client sends one request (identity, capability requests, action *name* —
+  resolved by a server-side catalog, never uploaded) and receives the session's event stream: the
+  client's live view IS the record, post-mask. The kernel stays sync; async is confined here.
+  Spike wire = self-signed cert + skip-verify client (localhost); the product path is real
+  certs / mTLS — same shape, a real verifier.
+
+| `warden-gateway`
+| The remote axis over QUIC. Wardens dial OUT and register a name (no inbound ports); a client asks
+  for a warden by name; the gateway opens a fresh bidi stream on that warden's connection and
+  splices the two. The warden still runs and enforces end-to-end; the gateway only moves bytes.
+
+| `warden-web`
+| A minimal browser console: xterm.js over the same governed session model, via hand-rolled
+  HTTP + SSE. Run and kill from the page; the browser sees exactly the wire client's event stream.
+
+| `warden`
+| Composition root (policy, quorum approver, interceptors, catalog) + demo binary. CLI:
+  `replay` / `serve` / `connect` / `kill` / `web` / `gateway` / `tunnel` / `rconnect`.
+
+| `kedi`
+| *The governed web terminal.* Browser ↔ kedi is QUIC via WebTransport (HTTP/3); each pane is a
+  warden `pty` capability, so your shell's I/O is governed: opt-in recording to the hash-chained
+  log, a replay scrubber, a live operator console with attributed kill, and session policy
+  (identity + blocklist) — all visible in the UI. Floating window manager, Catppuccin, measured
+  38µs engine round-trip. link:crates/kedi/README.adoc[Full README].
+|===
+
+`wit/warden.wit` is the action contract; `guest/` is the demo action (a Rust component built
+against it).
+
+[#Plugins]
+== Plugins
+
+A feature is a *plugin*, not an edit to the kernel or a monolithic composition root. An extension
+point is any `Send + Sync + 'static` trait; the registry is open, so a plugin can even *define a new
+point* that other plugins contribute to. Plugins load in two phases — `contribute` (only writes, so
+load order never matters) then `assemble` (read the complete registry, add derived points) — and a
+plugin declares what it `provides`/`requires`, validated at load.
+
+Both consumers (`kedi` and the demo bin) are composed this way. The common case is one line:
+
+[source,rust]
+----
+use warden_host::{load, plugin, Manifest};
+
+let warden = load(vec![
+    plugin(Manifest::new("audit").provides(&["recorder"]), |reg| {
+        reg.add::<dyn Recorder>(Arc::new(MyRecorder));
+    }),
+    // …a policy plugin, a capability broker plugin, a SessionHook plugin, …
+])?.warden;
+----
+
+For a cross-layer feature (say, session handoff = a `SessionHook` + a `Policy` + an `Approver`
+sharing state), implement the `Plugin` trait directly so one object owns all its hooks.
+
+== Measured
+
+Numbers from the built-in benchmarks (release build, Linux, loopback; run them yourself with
+`cargo test -p kedi --release <name> -- --ignored --nocapture`):
+
+[cols="2,1,3"]
+|===
+| keystroke → echo round-trip (engine, browser excluded) | p50 *38µs* · p99 <1ms
+| `engine_roundtrip_latency` — WebTransport + chokepoint + pty echo per keystroke
+
+| bulk output through the governed pipeline | *~400 MiB/s*
+| `engine_throughput_bulk` — pty → record → WebTransport → client, 32 MiB burst
+
+| audit cost | ×2 bytes, ~37 MiB/s drain
+| hex-JSON amplification; the async recorder lags a 32 MiB burst by ~1.7s (documented trade-off)
+|===
+
+The engine adds microseconds; the gap to a native terminal is the browser's render path, and
+kedi ships the two available levers (desynchronized canvas, sync render on interactive writes).
+
+== Run
+
+[source,shell]
+----
+(cd guest && cargo build --release --target wasm32-wasip2)   # the demo action (once)
+cargo run            # the demos: fs.read, the same session on the wasm runtime, a hash-pinned
+                     # exec held for quorum approval (and an intern rejected),
+                     # sign-without-seeing-the-key, a sandboxed component guest holding
+                     # capability handles, the same session over QUIC, the remote axis through a
+                     # gateway, and record -> verify -> rewind -> tamper-evidence
+cargo test
+cargo run -- replay /tmp/warden-session.jsonl [at]   # verify + replay any record file
+
+# direct, over QUIC (two terminals):
+cargo run -- serve 127.0.0.1:4747
+cargo run -- connect 127.0.0.1:4747 guest-demo --as you@here sign=deploy-key fs.read=/some/file
+cargo run -- kill 127.0.0.1:4747 1000          # sever a live session mid-flight
+
+# the remote axis — a gateway, a warden dialing out, a client routing by name (three terminals):
+cargo run -- gateway 127.0.0.1:4748
+cargo run -- tunnel 127.0.0.1:4748 prod-1      # warden dials out, no inbound ports
+cargo run -- rconnect 127.0.0.1:4748 prod-1 guest-demo --as you@here sign=deploy-key fs.read=/some/file
+
+# kedi — the governed web terminal (Chromium-based browser):
+cargo run -p kedi -- --host kedi.localhost     # then open http://kedi.localhost:8788
+----
+
+== Status & honest caveats
+
+A working spike, kept deliberately honest:
+
+* Sync kernel (thread-per-session); the product tier is async throughout.
+* Wire security is spike-grade: self-signed certs, skip-verify clients, loopback binds. Identity
+  is *claimed*, not authenticated — auth on the wire (mTLS/OIDC) is the next tier.
+* The record is tamper-*evident*, not tamper-proof: catching tail truncation requires anchoring
+  the chain head externally.
+* Rewind is reconstruction of observed state, not undo of side effects.
+* The kill switch severs a session's access to the world (every call refused at the chokepoint);
+  preempting pure CPU inside a wasm guest is the epoch-interruption tier, later.
+* In-memory vault, blocking approver; the product versions live behind the same seams.
+
+== License
+
+Dual-licensed under either of
+
+* Apache License, Version 2.0 (link:LICENSE-APACHE[LICENSE-APACHE])
+* MIT license (link:LICENSE-MIT[LICENSE-MIT])
+
+at your option.

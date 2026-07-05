@@ -1,0 +1,172 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>warden console</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/css/xterm.min.css">
+<script src="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/lib/xterm.min.js"></script>
+<style>
+  :root {
+    --bg: #0b0e14; --panel: #11151f; --edge: #1e2635; --fg: #c9d4e3; --dim: #5c6b82;
+    --cyan: #56c8d8; --green: #7bd88f; --red: #f0716f; --yellow: #e5c07b; --magenta: #c678dd;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--fg);
+         font: 13px/1.5 "JetBrains Mono", "Fira Code", ui-monospace, monospace; }
+  header { display: flex; align-items: baseline; gap: 12px; padding: 14px 18px 10px; }
+  header h1 { margin: 0; font-size: 15px; font-weight: 600; letter-spacing: .08em; }
+  header h1::before { content: "⬢ "; color: var(--cyan); }
+  header .sub { color: var(--dim); font-size: 12px; }
+  #controls { display: flex; flex-wrap: wrap; gap: 8px; padding: 0 18px 10px; align-items: center; }
+  #controls input {
+    background: var(--panel); border: 1px solid var(--edge); border-radius: 6px;
+    color: var(--fg); padding: 6px 10px; font: inherit; outline: none;
+  }
+  #controls input:focus { border-color: var(--cyan); }
+  #identity { width: 150px; } #action { width: 130px; } #caps { flex: 1; min-width: 260px; }
+  button {
+    border: 1px solid var(--edge); border-radius: 6px; padding: 6px 16px; font: inherit;
+    cursor: pointer; background: var(--panel); color: var(--fg);
+  }
+  #run  { border-color: var(--green); color: var(--green); }
+  #kill { border-color: var(--red);   color: var(--red); }
+  button:disabled { opacity: .35; cursor: default; }
+  #status { display: flex; flex-wrap: wrap; gap: 8px; padding: 0 18px 12px; min-height: 26px; }
+  .badge {
+    background: var(--panel); border: 1px solid var(--edge); border-radius: 999px;
+    padding: 2px 12px; font-size: 12px; color: var(--dim);
+  }
+  .badge b { color: var(--fg); font-weight: 600; }
+  .badge.cap    { border-color: #2b4f38; } .badge.cap b { color: var(--green); }
+  .badge.hold   { border-color: #55406b; color: var(--magenta); }
+  .badge.killed { border-color: #6b3230; color: var(--red); }
+  #term { margin: 0 18px 18px; border: 1px solid var(--edge); border-radius: 8px;
+          padding: 10px; background: var(--panel); }
+</style>
+</head>
+<body>
+<header>
+  <h1>WARDEN</h1>
+  <div class="sub">governed session console — what you see is the record, post-mask</div>
+</header>
+
+<div id="controls">
+  <input id="identity" value="carol@web" title="identity">
+  <input id="action" value="guest-demo" title="action (from the server catalog)">
+  <input id="caps" value="sign=deploy-key,fs.read=/tmp/warden-spike.txt" title="capability requests: kind=arg,kind=arg">
+  <button id="run">run ▸</button>
+  <button id="kill" disabled>kill ■</button>
+</div>
+
+<div id="status">
+  <span class="badge">session <b id="sid">—</b></span>
+  <span class="badge">state <b id="state">idle</b></span>
+  <span id="dyn"></span>
+</div>
+
+<div id="term"></div>
+
+<script>
+const term = new Terminal({
+  convertEol: true, fontSize: 13, cursorBlink: false, disableStdin: true,
+  cols: 120, rows: 32,
+  theme: { background: '#11151f', foreground: '#c9d4e3', cursor: '#11151f' }
+});
+term.open(document.getElementById('term'));
+
+const C = { cyan:'\x1b[36m', green:'\x1b[32m', red:'\x1b[31m', yellow:'\x1b[33m',
+            magenta:'\x1b[35m', dim:'\x1b[90m', bold:'\x1b[1m', off:'\x1b[0m' };
+const $ = id => document.getElementById(id);
+
+// hex payloads (the record is binary-safe) -> text for display
+const hx = h => {
+  const b = new Uint8Array(h.length / 2);
+  for (let i = 0; i < b.length; i++) b[i] = parseInt(h.substr(i * 2, 2), 16);
+  return new TextDecoder().decode(b).replace(/\u001f/g, ' ');
+};
+const trunc = s => s.length > 100 ? s.slice(0, 100) + '…' : s;
+
+let es = null, sid = null, caps = {}, pending = null, killed = null;
+
+function badges() {
+  $('sid').textContent = sid ?? '—';
+  let html = '';
+  for (const [id, kind] of Object.entries(caps))
+    html += `<span class="badge cap">cap ${id} <b>${kind}</b></span>`;
+  if (pending) html += `<span class="badge hold">⧗ held: ${pending}</span>`;
+  if (killed)  html += `<span class="badge killed">✖ killed by ${killed}</span>`;
+  $('dyn').innerHTML = html;
+}
+
+function render(ev) {
+  const w = s => term.writeln(s);
+  switch (ev.t) {
+    case 'session_opened':
+      sid = ev.session; caps = {}; pending = null; killed = null;
+      w(`${C.cyan}▶ session ${ev.session} opened by ${ev.identity}${C.off}`); break;
+    case 'cap_granted':
+      caps[ev.cap] = ev.kind;
+      w(`${C.green}✚ cap ${ev.cap} granted · ${ev.kind}${C.off}`); break;
+    case 'call':
+      w(`${C.yellow}→ call ${ev.seq}: ${ev.op}${C.off} ${C.dim}${trunc(hx(ev.input))}${C.off}`); break;
+    case 'result':
+      w(`← ${trunc(hx(ev.output))}`); break;
+    case 'failed':
+      w(`${C.red}✗ call ${ev.seq} failed — ${ev.error}${C.off}`); break;
+    case 'denied':
+      w(`${C.red}⛔ ${ev.subject} — ${ev.why}${C.off}`); break;
+    case 'escalation_requested':
+      pending = ev.subject;
+      w(`${C.magenta}⧗ HELD for approval: ${ev.subject} (${ev.reason})${C.off}`); break;
+    case 'approved':
+      pending = null;
+      w(`${C.green}✓ approved by ${ev.by.join(' + ')}${C.off}`); break;
+    case 'rejected':
+      pending = null;
+      w(`${C.red}✗ REJECTED by ${ev.by} — ${ev.why}${C.off}`); break;
+    case 'killed':
+      killed = ev.by;
+      w(`${C.red}${C.bold}■ SESSION KILLED by ${ev.by}${C.off}`); break;
+    case 'revoked':
+      delete caps[ev.cap];
+      w(`${C.dim}− cap ${ev.cap} revoked${C.off}`); break;
+    case 'session_closed':
+      w(`${C.dim}◼ session ${ev.session} closed${C.off}`); break;
+  }
+  badges();
+}
+
+$('run').onclick = () => {
+  if (es) es.close();
+  term.clear(); sid = null; caps = {}; pending = null; killed = null; badges();
+  $('state').textContent = 'running'; $('run').disabled = true; $('kill').disabled = false;
+  const q = new URLSearchParams({
+    identity: $('identity').value, action: $('action').value, caps: $('caps').value
+  });
+  es = new EventSource('/run?' + q);
+  es.onmessage = e => {
+    const m = JSON.parse(e.data);
+    if (m.done !== undefined) {
+      $('state').textContent = m.ok ? 'done' : 'failed';
+      if (m.error) term.writeln(`${C.red}session: ${m.error}${C.off}`);
+      es.close(); es = null; $('run').disabled = false; $('kill').disabled = true;
+      return;
+    }
+    render(m);
+  };
+  es.onerror = () => {
+    $('state').textContent = 'disconnected';
+    if (es) { es.close(); es = null; }
+    $('run').disabled = false; $('kill').disabled = true;
+  };
+};
+
+$('kill').onclick = async () => {
+  if (sid === null) return;
+  const q = new URLSearchParams({ session: sid, by: $('identity').value + ' (web)' });
+  const r = await fetch('/kill?' + q).then(r => r.json());
+  if (!r.killed) term.writeln(`${C.dim}kill: session not live${C.off}`);
+};
+</script>
+</body>
+</html>

@@ -1,0 +1,30 @@
+# warden — governed execution: actions touch the world only through capabilities the warden
+# grants, mediates, and records. Sans-IO kernel (warden-core) + capability/record/secret/wasm/
+# transport impls + kedi, the governed web terminal built on it.
+[workspace]
+resolver = "2"
+exclude = ["guest"]                     # different target (wasm32-wasip2), own workspace
+members = [
+    "crates/kedi",
+    "crates/warden-core",
+    "crates/warden-host",
+    "crates/warden-caps",
+    "crates/warden-gateway",
+    "crates/warden-record",
+    "crates/warden-secret",
+    "crates/warden-transport",
+    "crates/warden-wasm",
+    "crates/warden-web",
+    "crates/warden",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/kannonski/warden"
+
+# lean, fast release artifacts (the kedi binary is a download)
+[profile.release]
+strip = true
+lto = "thin"

@@ -1,0 +1,16 @@
+[package]
+name = "warden-record"
+description = "Append-only, hash-chained audit record for warden: verify, replay, rewind"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+# The `Recorder` seam's first real impl: append-only, hash-chained (tamper-evident) JSONL event
+# persistence, plus load/verify and rewind (state reconstruction at any point in the record).
+[dependencies]
+warden-core = { path = "../warden-core" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"

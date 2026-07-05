@@ -1,0 +1,22 @@
+[package]
+name = "warden"
+description = "warden demo bin + CLI: compose the seams; run, serve, connect, replay, kill"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+# Composition root: wires capabilities (warden-caps) + runtimes (warden-wasm, in-process demo) +
+# interceptors/policy/recorder into a Warden, and demos the governed flows.
+[dependencies]
+warden-core = { path = "../warden-core" }
+warden-host = { path = "../warden-host" }
+warden-caps = { path = "../warden-caps" }
+warden-gateway = { path = "../warden-gateway" }
+warden-record = { path = "../warden-record" }
+warden-secret = { path = "../warden-secret" }
+warden-transport = { path = "../warden-transport" }
+warden-wasm = { path = "../warden-wasm" }
+warden-web = { path = "../warden-web" }
+wat = "1"                                     # compile the demo guest's embedded WAT → wasm bytes

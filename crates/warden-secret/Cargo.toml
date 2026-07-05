@@ -1,0 +1,16 @@
+[package]
+name = "warden-secret"
+description = "Secrets as capabilities for warden: vault seam + brokered signing; key material never reaches the action"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+# Secret = a capability. The action requests an operation over a secret (`sign`), never the secret
+# itself: the broker pulls it from a Vault, the capability uses it, no op returns it, revoke
+# zeroizes it. Isolated from the ACTION, not the warden (warden-blind needs TEE/HSM — later tier).
+[dependencies]
+warden-core = { path = "../warden-core" }
+hmac = "0.12"
+sha2 = "0.10"

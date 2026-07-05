@@ -1,0 +1,131 @@
+= kedi — the governed web terminal
+:toc: preamble
+:toc-title:
+
+Your real shell, in the browser, at native-feeling speed — with governance you can see.
+Every terminal pane is a *warden* capability: sessions can be recorded to a tamper-evident,
+hash-chained log, replayed on a scrubber, watched live in an operator console, refused by
+policy, and killed with attribution. kedi is the demonstration that a terminal can be
+*governed* without feeling like one.
+
+kedi (Turkish: _cat_) is built on link:../../README.adoc[warden], a sans-IO
+governed-execution kernel.
+
+----
+ Chromium ── WebTransport (QUIC/HTTP3) ──►┌─ kedi ─────────────────────────────┐
+   xterm.js                               │ session = a warden pty capability  │
+   floating panes                         │   policy: identity + blocklist     │
+   replay scrubber                        │   record: hash-chained JSONL (opt-in)
+   live console                           │   kill:   attributed, mid-flight   │
+                                          └──────────────► your $SHELL ────────┘
+----
+
+== The 90-second tour
+
+1. `cargo run -p kedi -- --host kedi.localhost --record /tmp/kedi.jsonl`, open
+   `http://kedi.localhost:8788` in a Chromium-based browser.
+2. Double-click the canvas — a terminal appears, running your `$SHELL` with your prompt,
+   your aliases, your colors. Drag on the canvas to draw a second one at exactly that size.
+   Typing feels native: the engine adds ~38µs per keystroke (measured, benchmark included).
+3. Click *◉ live* — the operator console: every live session with identity and capabilities,
+   and the audit event feed scrolling in real time.
+4. Click *kill* on a session — it dies instantly, and the feed shows `✖ killed by <you>`.
+5. Click the *id* chip, rename yourself `root`, open a new pane — policy refuses it, in red,
+   in the pane; the deny lands in the feed.
+6. Click *⏮ replay* — scrub the whole history on a timeline: every grant, keystroke event,
+   output chunk, deny, and kill, reconstructed from a record whose hash chain is verified on
+   every load. Doctor one byte of the file and the badge turns red.
+
+== Run
+
+[source,shell]
+----
+cargo run -p kedi -- --host kedi.localhost          # recording OFF (default)
+cargo run -p kedi -- --host kedi.localhost --record ~/.local/share/kedi/record.jsonl
+----
+
+Requires a Chromium-based browser (WebTransport). kedi binds *loopback only* by design —
+it spawns your shell; never expose it. Both loopback families are bound (127.0.0.1 + ::1)
+because `*.localhost` resolves to `::1` for QUIC on many systems.
+
+== Configuration
+
+`~/.config/kedi/kedi.toml` (or `--config PATH`); CLI flags override the file:
+
+[source,toml]
+----
+host = "kedi.localhost"   # the domain the browser uses
+# bind = "127.0.0.1"      # pin one loopback interface (default: both families)
+http_port = 8788
+wt_port = 4433
+shell = ""                # "" → $SHELL; e.g. "bash --norc" to isolate config
+deny = ["root"]           # identities refused by policy ([] clears)
+record = ""               # "" → recording off; a path enables record/replay/console
+
+[ui]
+font_size = 14
+----
+
+Flags: `--config` `--host` `--bind` `--http-port` `--wt-port` `--shell` `--deny NAME|-`
+`--record PATH|-`.
+
+== Keys & mouse
+
+[cols="1,2"]
+|===
+| double-click canvas       | new terminal at the pointer
+| drag on canvas            | draw a terminal at exactly that size
+| right-click canvas        | menu: new terminal · grid · live console · replay
+| select text               | copies (kitty-style)
+| right- / middle-click in a terminal | paste
+| drag title bar            | move (snap previews at the edges)
+| double-click title bar    | maximize / restore
+| `Ctrl+Shift+N`            | new terminal
+| `Ctrl+Shift+W`            | close
+| `Ctrl+Shift+M`            | minimize to the taskbar
+| `Ctrl+Shift+←/→/↑/↓`      | snap left / right / maximize / restore
+| `Ctrl+Shift+G`            | arrange all windows in a grid
+| `Ctrl+Shift+F`            | find in terminal
+| `Ctrl+Shift+C/V`          | copy / paste (explicit)
+| `Ctrl+Shift+±/0`          | zoom / reset
+|===
+
+== How the governance works
+
+* *Sessions are capabilities.* Each pane opens a warden `pty` capability; keystrokes and
+  resizes are mediated calls, output is a governed stream. The kill switch and policy act at
+  that chokepoint — they don't need the record to function.
+* *Identity is claimed, not authenticated.* The browser introduces itself
+  (`{"hello":"name"}`, the id chip in the header); sessions, kills, and denials carry that
+  name in the record. Real auth on the wire is a later tier, and the UI says so.
+* *Recording is opt-in.* A local terminal is not surveilled by default. With `--record`, every
+  event lands in an append-only JSONL log where line N carries the SHA-256 of line N−1 —
+  edit anything and every later link breaks, which the replay UI surfaces as a red badge.
+  Recording runs on a background thread, off the typing hot path (that's measured, not hoped).
+* *Replay reconstructs what the operator saw* — output events only; raw keystroke payloads
+  are never rendered back.
+
+== Performance
+
+Measured on Linux, release build, loopback (benchmarks in the repo — run with
+`cargo test -p kedi --release <name> -- --ignored --nocapture`):
+
+* keystroke → echo, full engine round-trip: *p50 38µs, p99 <1ms* (`engine_roundtrip_latency`)
+* bulk output through the governed pipeline: *~400 MiB/s* (`engine_throughput_bulk`)
+* rendering: WebGL with a desynchronized canvas + synchronous render on interactive writes —
+  the two available levers against the browser's compositor latency
+
+== Honest limitations
+
+* Chromium-only (WebTransport). Firefox/Safari when their WebTransport ships what kedi needs.
+* Self-signed certs pinned by hash to the served page — fine for loopback, not a deployment story.
+* Identity is attribution, not authentication.
+* The audit log costs ×2 bytes of output (hex-JSON) and drains at ~37 MiB/s under bulk floods;
+  a sustained multi-GiB flood would balloon the recorder's queue. Documented in code.
+* `/record` re-verifies the whole chain per request — fine to ~50k events (~260ms), then it
+  needs incremental verify state.
+
+== License
+
+Dual-licensed under either of Apache-2.0 or MIT, at your option — see the
+link:../../README.adoc[workspace README].

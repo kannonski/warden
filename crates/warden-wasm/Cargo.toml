@@ -1,0 +1,18 @@
+[package]
+name = "warden-wasm"
+description = "WASM runtimes for warden: component model (WIT, resource-handle capabilities) + a minimal module shim"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+# Two `Runtime` impls behind the same seam: `WasmRuntime` (minimal core-module ABI, self-contained)
+# and `ComponentRuntime` (the real one — component model + WIT, capabilities as resource handles,
+# empty WASI sandbox). Both route every guest call into `Ctx::invoke` — the same chokepoint the
+# in-process demo runtime uses. wasmtime is isolated to this crate — the kernel stays dep-free, and
+# swapping engines (or adding a native runtime) is just another crate implementing `Runtime`.
+[dependencies]
+warden-core = { path = "../warden-core" }
+wasmtime = "27"
+wasmtime-wasi = "27"

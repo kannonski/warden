@@ -1,0 +1,40 @@
+name: release
+
+# On a version tag, build the self-contained kedi binary per platform and attach it to the
+# GitHub Release. kedi bakes its HTML in and loads xterm.js from a CDN, so each artifact is one file.
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            name: kedi-linux-x86_64
+          - os: macos-14
+            target: aarch64-apple-darwin
+            name: kedi-macos-aarch64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+      - name: build kedi
+        run: cargo build -p kedi --release --target ${{ matrix.target }}
+      - name: stage artifact
+        run: |
+          mkdir -p dist
+          cp "target/${{ matrix.target }}/release/kedi" "dist/${{ matrix.name }}"
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/${{ matrix.name }}
+          generate_release_notes: true

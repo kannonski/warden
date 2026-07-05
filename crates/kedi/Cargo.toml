@@ -1,0 +1,27 @@
+[package]
+name = "kedi"
+description = "kedi — the governed web terminal: your shell over WebTransport, recorded, replayable, killable"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+# kedi — the governed web terminal on warden. Browser ↔ kedi is QUIC via WebTransport (HTTP/3); a
+# tiny HTTP server hands out the xterm.js page. Each session opens a warden pty capability, so the
+# terminal's I/O is recorded + DLP-masked + killable exactly like any other governed capability.
+[dependencies]
+warden-core = { path = "../warden-core" }
+warden-host = { path = "../warden-host" }
+warden-caps = { path = "../warden-caps" }
+warden-record = { path = "../warden-record" }
+wtransport = "0.7"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "io-util"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+sha2 = "0.10"
+
+# `--open` launcher: setsid(2) to detach the background server from the controlling terminal
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"

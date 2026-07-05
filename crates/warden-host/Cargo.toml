@@ -1,0 +1,14 @@
+[package]
+name = "warden-host"
+description = "Plugin host for warden: an open, type-keyed extension registry + a two-phase plugin loader that composes a governed Warden from plugins"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+# The composition layer. warden-core stays a pure kernel (the seams + the chokepoint); this crate
+# turns "impl a trait + edit the composition root" into "drop in a plugin". Depends only on the
+# kernel — no IO, no external deps.
+[dependencies]
+warden-core = { path = "../warden-core" }
