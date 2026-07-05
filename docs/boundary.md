@@ -22,13 +22,14 @@ bypassed it or was forced into a choice that doesn't fit.
 
 ## The evidence
 
-| smell | what the code shows |
+| smell (as originally found) | what the code showed |
 |---|---|
-| `Transport` bypassed | kedi and the gateway call `endpoint.accept()` (wtransport/quinn), **not** the `Transport` trait. Only the `warden` demo bin uses `transport.accept()`. The flagship consumer routes around the seam. |
-| kernel spawns threads | `run_full` does `std::thread::spawn` for each streaming capability's output pump. The kernel picks *one OS thread per stream* — a concurrency policy. kedi is async/tokio; the kernel forces its streaming onto blocking std threads. |
-| `SessionHook` unused | the only `impl SessionHook` is a test counter. Zero real users; it's a guess at a host need (handoff/quotas) that no host has yet. |
+| `Transport` bypassed | kedi and the gateway call `endpoint.accept()` (wtransport/quinn), **not** the `Transport` trait. Only the `warden` demo bin uses `transport.accept()`. The flagship consumer routed around the seam. |
+| kernel spawns threads | `run_full` did `std::thread::spawn` for each streaming capability's output pump — the kernel picking *one OS thread per stream*, a concurrency policy that belongs to the host. |
+| `SessionHook` unused | the only `impl SessionHook` was a test counter. Zero real users; a guess at a host need (handoff/quotas) that no host had. |
 
-Each is the kernel owning a decision the host should make.
+Each was the kernel owning a decision the host should make. **All three are now
+resolved** (see Status, below); this note is kept as the record of the reasoning.
 
 ## The boundary, drawn on purpose
 
@@ -73,10 +74,20 @@ The host decides these; the kernel should *describe the work*, not *do it*:
    a peer kernel seam. The kernel's contract is "give me a session"; getting the
    session is the host's job. (Net: the "structural seams" become just `Runtime`.)
 
-2. **The output pump becomes a returned unit of work.** `run_full` stops spawning; it
-   produces the pump closures (or an iterator of "streams to drain") and the caller
-   runs them. The sync demo bin runs them on threads exactly as today; kedi runs them
-   as tokio tasks. The kernel is then *actually* sans-IO — it schedules nothing.
+2. **The kernel stops choosing the pump's concurrency — a `Spawner` seam does.**
+   *(Done.)* `warden-core` no longer calls `thread::spawn`. It gained a `Spawner`
+   trait: the kernel *describes* the pump as a `Box<dyn FnOnce() + Send>` and hands it
+   to `spawner.spawn(...)`, then joins the returned `Joiner`. `Warden` holds an
+   `Arc<dyn Spawner>` (default `ThreadSpawner`, so nothing broke), overridable with
+   `.with_spawner(...)`. The host now owns the choice.
+
+   Note vs. the original sketch: the pump drains a **blocking** `std::sync::mpsc`
+   (a pty's bytes), so a thread is still the right home — running it on a tokio task
+   would block a worker. kedi therefore installs a *named-thread* spawner (`kedi-pump`),
+   not a tokio one. The win is not "tokio tasks"; it's that **the mechanism is the
+   host's decision, made in kedi, not hardcoded in the kernel.** A truly async pump
+   (an async `output()` returning a `Stream`) is a later move, once the kernel goes
+   async; the seam is already in place for it.
 
 3. **`SessionHook` parks.** Remove it from the reserved seams (keep the idea in
    DESIGN.md §6 as "where handoff/quotas will attach") until a real implementation
@@ -88,17 +99,21 @@ the capability axis (`Capability`+`Broker`), the decision (`Policy`+`Approver`),
 observer axis (`Interceptor`+`Recorder`), and `Runtime`. Ingress, scheduling, and
 lifecycle-wiring are named as host concerns, on purpose.
 
-## Why not just do it now
+## Status
 
-Two of the three are real refactors with blast radius:
+All three cuts are done, in the order the boundary implied:
 
-- Removing `thread::spawn` changes `run_full`'s signature and *every* caller that runs
-  a session (kedi's async loop, the demo bin, the transport/gateway paths, the tests).
-  Worth doing, but it's a surgery, not a doc edit — and it wants to land with the async
-  kernel work (the sync→async move touches the same code).
-- Demoting `Transport`/`SessionHook` is cheaper (mostly reclassification + docs), and
-  is the natural first step.
+1. **Demote `Transport` + park `SessionHook`** — done (docs + small code): `SessionHook`
+   removed (it had only a test impl); `Transport` reframed as a host concern (kedi
+   bypasses the trait).
+2. **Lift the pump's concurrency to the host** — done: the `Spawner` seam (above); the
+   kernel no longer spawns threads.
 
-So the sequence is: **(1) this note** (done) → **(2) demote `Transport` + park
-`SessionHook`** (docs + small code) → **(3) lift the output pump to the host** (with or
-just before the async move). Draw the boundary first; cut to it deliberately.
+What remains is *further* work the boundary enables but doesn't require: an **async
+kernel**, where `output()` returns a `Stream` and the pump is a genuine async task
+rather than a blocking-recv on a thread. That's the sync→async move, tracked in
+DESIGN.md §10 — the `Spawner` seam is the groundwork for it, not the whole of it.
+
+The lesson worth keeping: **draw the boundary first, cut to it deliberately.** Each cut
+here was small and safe *because* the map (this note) said where the line was before any
+code moved.

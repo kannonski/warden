@@ -274,6 +274,37 @@ pub trait Recorder: Send + Sync {
 // SessionGuard); session-level governance (quotas, idle-timeout, handoff) will attach there when a
 // real user forces the hook's shape. See docs/boundary.md.
 
+/// How the kernel runs a concurrent *unit of work* — currently the output pump that drains a
+/// streaming capability, masks each chunk, and records it while the action runs. The kernel
+/// **describes** the work; the host **schedules** it. That keeps `warden-core` sans-IO: it never
+/// chooses a concurrency mechanism (an OS thread, a tokio task, an inline runner) — the host does,
+/// to match its own runtime. Default: [`ThreadSpawner`] (one std thread per unit), so a host that
+/// doesn't care gets the old behavior for free.
+pub trait Spawner: Send + Sync {
+    /// Run `work` concurrently with the caller; return a handle whose `join` blocks until it finishes.
+    fn spawn(&self, work: Box<dyn FnOnce() + Send>) -> Box<dyn Joiner>;
+}
+
+/// A handle to spawned work, joined once. `Box<Self>` so it's object-safe by-value.
+pub trait Joiner: Send {
+    fn join(self: Box<Self>);
+}
+
+/// The default [`Spawner`]: one OS thread per unit of work (what the kernel used to hardcode). A
+/// host with its own runtime (kedi → tokio) provides its own spawner instead, so the pump runs as a
+/// task on that runtime rather than a blocking thread.
+pub struct ThreadSpawner;
+impl Spawner for ThreadSpawner {
+    fn spawn(&self, work: Box<dyn FnOnce() + Send>) -> Box<dyn Joiner> {
+        Box::new(std::thread::spawn(work))
+    }
+}
+impl Joiner for std::thread::JoinHandle<()> {
+    fn join(self: Box<Self>) {
+        let _ = (*self).join();
+    }
+}
+
 /// How an action executes. Impls: an in-process demo (here), a WASM component host, a native process.
 pub trait Runtime: Send + Sync {
     fn name(&self) -> &'static str;
@@ -624,6 +655,7 @@ pub struct Warden {
     brokers: Vec<Arc<dyn Broker>>,
     runtimes: HashMap<&'static str, Arc<dyn Runtime>>,
     recorder: Arc<dyn Recorder>,
+    spawner: Arc<dyn Spawner>,
     live: Mutex<HashMap<u64, LiveSession>>,
     next_cap: AtomicU64,
 }
@@ -696,9 +728,18 @@ impl Warden {
             brokers,
             runtimes,
             recorder,
+            spawner: Arc::new(ThreadSpawner), // default: one std thread per pump (host may override)
             live: Mutex::new(HashMap::new()),
             next_cap: AtomicU64::new(0),
         }
+    }
+
+    /// Provide the [`Spawner`] the kernel uses to run output pumps concurrently. A host with its own
+    /// runtime (e.g. tokio) supplies one so the kernel never spawns an OS thread itself. Default:
+    /// [`ThreadSpawner`].
+    pub fn with_spawner(mut self, spawner: Arc<dyn Spawner>) -> Self {
+        self.spawner = spawner;
+        self
     }
 
     /// Kill a live session: record the kill in its stream and refuse every later capability call.
@@ -863,14 +904,15 @@ impl Warden {
 
         // An output pump per streaming capability (e.g. a pty): drain raw chunks, mask them through
         // the interceptor chain, record each as Event::Output → the observer/client. Streamed output
-        // is governed at the same chokepoint as call results.
+        // is governed at the same chokepoint as call results. The kernel *describes* this work and
+        // hands it to the host's `Spawner` — it does not choose the concurrency mechanism itself.
         let mut pumps = Vec::new();
         for (id, cap) in &guard.caps {
             if let Some(rx) = cap.output() {
                 let rec = recorder.clone();
                 let interceptors = self.interceptors.clone();
                 let (sid, cid) = (session.id, *id);
-                pumps.push(std::thread::spawn(move || {
+                pumps.push(self.spawner.spawn(Box::new(move || {
                     // one stateful masker per interceptor, per stream (carries across chunk bounds)
                     let mut maskers: Vec<OutputMasker> =
                         interceptors.iter().map(|i| i.output_masker()).collect();
@@ -891,7 +933,7 @@ impl Warden {
                             bytes: tail,
                         });
                     }
-                }));
+                })));
             }
         }
 
@@ -915,7 +957,7 @@ impl Warden {
         // the reader drains its trailing bytes then EOFs, and the join drains them onto the record.
         ctx.revoke_all();
         for p in pumps {
-            let _ = p.join();
+            p.join();
         }
         result
     }

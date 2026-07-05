@@ -174,13 +174,34 @@ pub fn terminal_warden(
         }),
     ])
     .expect("kedi plugin set loads");
+    // kedi picks the concurrency mechanism for the kernel's output pumps — the kernel no longer
+    // hardcodes it. The pump drains a blocking std mpsc (a pty's bytes), so a thread is the right
+    // home (a tokio task would block a worker); kedi just names it for observability. The point is
+    // that this is now the *host's* choice, made here, not baked into warden-core.
+    let warden = loaded
+        .warden
+        .with_spawner(Arc::new(NamedThreadSpawner("kedi-pump")));
     Ok((
-        loaded.warden,
+        warden,
         RecordControl {
             on,
             path: record_path.to_string(),
         },
     ))
+}
+
+/// A [`Spawner`](warden_core::Spawner) that runs each pump on a named OS thread — kedi's explicit
+/// choice for its blocking pty-output pumps (see `terminal_warden`). Named so the threads show up as
+/// `kedi-pump` in a debugger / `top -H`, which the kernel's anonymous default can't do.
+struct NamedThreadSpawner(&'static str);
+impl warden_core::Spawner for NamedThreadSpawner {
+    fn spawn(&self, work: Box<dyn FnOnce() + Send>) -> Box<dyn warden_core::Joiner> {
+        let handle = std::thread::Builder::new()
+            .name(self.0.to_string())
+            .spawn(work)
+            .expect("spawn pump thread");
+        Box::new(handle)
+    }
 }
 
 /// The warden's currently-open sessions as JSON (id, identity, cap kinds) — record-independent, so

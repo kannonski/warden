@@ -83,10 +83,11 @@ step 1 checks. A killed action *keeps its CPU* but *loses the world* — every
 a guest is a separate, harder problem, deliberately left to a later tier.)
 
 The kernel that owns this door is `warden-core`. It is **sans-IO**: it performs no
-actual reads, writes, or network calls itself. It only orchestrates the flow around
-`capability.perform`. That keeps it tiny, dependency-free, and fully unit-testable —
-and it's why the same kernel drives a local terminal and a remote gateway without
-change.
+actual reads, writes, or network calls — and it *schedules* nothing either (concurrent
+work like the output pump is handed to a host `Spawner`; §6.4). It only orchestrates
+the flow around `capability.perform`. That keeps it tiny, dependency-free, and fully
+unit-testable — and it's why the same kernel drives a local terminal and a remote
+gateway without change.
 
 ---
 
@@ -615,10 +616,17 @@ were designed, not hoped for.** A record that says a session is open means it is
 ### 6.4 Streaming output & the revoke-before-join ordering
 
 A streaming capability (a pty) exposes `output()` — a channel of raw chunks. The
-kernel starts a **pump thread** per stream that drains it, folds every interceptor's
+kernel builds a **pump** per stream that drains it, folds every interceptor's
 per-stream stateful masker over each chunk, and records the masked bytes as
 `Event::Output`. So streamed output is governed at the *same* chokepoint as a call's
 result — nothing reaches the client un-mediated.
+
+The kernel does **not** choose *how* the pump runs concurrently — it hands the pump
+(a `Box<dyn FnOnce() + Send>`) to the host's `Spawner` and joins the returned handle.
+Default is `ThreadSpawner` (one std thread per pump); a host overrides it with
+`.with_spawner(...)` — kedi installs a named-thread spawner for its blocking pty pumps.
+This is what keeps `warden-core` sans-IO: it schedules nothing itself (see
+[boundary.md](boundary.md)).
 
 The teardown order is load-bearing and commented as such in the code: **revoke
 first, then join.** A pty's pump only ends when its source hits EOF, which for a
@@ -923,13 +931,15 @@ tier is a swap, not a redesign.
   is deferred. The `Interceptor` seam and its per-stream stateful masker exist and are
   exercised by the `warden` demo bin — kedi's governance today is *recorded +
   replayable + killable*, not *masked*.
-- **The kernel still over-reaches into the outer loop — one step done, one left.**
-  Three smells were one boundary error (the kernel owning ingress/scheduling/lifecycle
-  that belong to the host), mapped in [boundary.md](boundary.md). *Done:* `Transport`
-  reframed as a host concern (§4.8) and `SessionHook` parked (§4.9). *Remaining:*
-  `run_full` still spawns OS threads for the output pumps — a concurrency policy the
-  host should own. Fixing it (the kernel hands the host a unit of work instead of
-  spawning) lands with the sync→async move, which touches the same code.
+- **The core/host boundary is now drawn on purpose.** Three smells were one boundary
+  error (the kernel owning ingress/scheduling/lifecycle that belong to the host), mapped
+  and resolved in [boundary.md](boundary.md): `Transport` is a host concern (§4.8),
+  `SessionHook` is parked (§4.9), and the output pump's concurrency is the host's via
+  the `Spawner` seam (§6.4) — `warden-core` no longer spawns threads. The kernel is now
+  genuinely sans-IO. What's left is the deeper move it enables, not requires: an **async
+  kernel** (async `output()` → a `Stream`, async signatures), so the pump is a real
+  async task rather than a blocking-recv on a host thread. That's the next tier; the
+  seams already fit it.
 
 ---
 
