@@ -910,9 +910,14 @@ tier is a swap, not a redesign.
   is deferred. The `Interceptor` seam and its per-stream stateful masker exist and are
   exercised by the `warden` demo bin — kedi's governance today is *recorded +
   replayable + killable*, not *masked*.
-- **Transport isn't a plugin point yet.** The seven other seams compose via
-  `warden-host`; the `Transport` is still wired by the front-end/composition root
-  (§4.8).
+- **Transport isn't a plugin point yet.** The other seams compose via `warden-host`;
+  the `Transport` is still wired by the front-end/composition root (§4.8).
+- **The kernel over-reaches into the outer loop.** `warden-core` claims to be sans-IO
+  but `run_full` spawns OS threads for output pumps (a concurrency policy), `Transport`
+  is bypassed by kedi (which drives its own accept loop), and `SessionHook` has no real
+  user. These are one boundary error — the kernel owning ingress/scheduling/lifecycle
+  that belong to the host. Mapped in [boundary.md](boundary.md), with the target
+  boundary and the sequence to reach it. Not yet fixed.
 
 ---
 
