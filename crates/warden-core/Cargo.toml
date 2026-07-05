@@ -7,5 +7,5 @@ license.workspace = true
 repository.workspace = true
 publish = false
 
-# The sans-IO kernel: the 8 seams + the mediation flow. No IO, no external deps → unit-testable.
+# The sans-IO kernel: the seam traits + the mediation flow. No IO, no external deps → unit-testable.
 [dependencies]

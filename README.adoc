@@ -19,11 +19,12 @@ at that single chokepoint.
                (quorum)       └─────────────────────────────────────────┘    pty (your shell)
 ----
 
-The shape is the point: a sans-IO kernel (`warden-core`, zero dependencies) with *eight extension
-seams* — `Capability`, `Broker`, `Policy`, `Approver`, `Interceptor`, `Recorder`, `Runtime`,
-`Transport` — plus a session-lifecycle seam (`SessionHook`), and everything else as pluggable
-implementations. Adding a feature means writing a *plugin*, not editing the kernel (see
-<<Plugins>>).
+The shape is the point: a sans-IO kernel (`warden-core`, zero dependencies) whose behavior lives
+entirely in *extension seams* — `Capability` + its `Broker`, `Policy` (with `Approver` resolving its
+escalations), `Interceptor` and `Recorder` (one observer axis, two powers), `Runtime`, `Transport`,
+and the `SessionHook` lifecycle. Nine traits, five concerns — not nine equal peers (see the design
+doc). Everything else is a pluggable implementation; adding a feature means writing a *plugin*, not
+editing the kernel (see <<Plugins>>).
 
 The most complete thing built on it so far is *kedi*, a governed web terminal — your real shell in
 the browser at native-feeling latency, with every session recordable, replayable, and killable.
@@ -32,7 +33,7 @@ See link:crates/kedi/README.adoc[crates/kedi].
 [TIP]
 ====
 *New here? Start with the design.* link:docs/DESIGN.md[docs/DESIGN.md] explains the
-whole thing from the one idea outward — the chokepoint, the eight seams and what to plug where, the
+whole thing from the one idea outward — the chokepoint, the seams and what to plug where, the
 event stream, the run loop, the plugin model, and kedi as the worked example. Two diagrams:
 link:docs/architecture.svg[the runtime flow] (a call crossing the door) and
 link:docs/composition.svg[the plugin model] (how a `Warden` is assembled).

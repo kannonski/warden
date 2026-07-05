@@ -174,7 +174,7 @@ pub enum Event {
     },
 }
 
-// ── the 8 seams ─────────────────────────────────────────────────────────────────────────────
+// ── the seams (nine traits, five concerns — see docs/DESIGN.md §4) ────────────────────────────
 
 /// One operation a capability accepts — its self-description. A capability publishes its full op set
 /// via [`Capability::ops`], which makes ops *enumerable* (a UI/audit can list them), lets the kernel

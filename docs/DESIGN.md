@@ -94,7 +94,8 @@ change.
 
 The rest of this document builds outward from the chokepoint:
 
-- **§4 The eight seams** — the extension points that make everything else pluggable.
+- **§4 The seams** — the extension points that make everything else pluggable (nine
+  traits, five concerns).
 - **§5 The event stream** — what "records" actually produces, and how replay/rewind
   fall out of it.
 - **§6 Sessions & the run loop** — grant → run → mediate → revoke, and the drop
@@ -109,25 +110,37 @@ The rest of this document builds outward from the chokepoint:
 
 ---
 
-## 4. The eight seams
+## 4. The seams
 
 The kernel defines the flow (§2). It defines almost no behavior. Every place where a
 real decision or a real side effect happens is a **trait** — a seam you plug an
-implementation into. There are eight, plus a ninth for session lifecycle.
+implementation into. There are nine traits, but they are **not nine equal peers** —
+and being honest about that is half of understanding the design. They fall out like
+this:
 
-Think of them in two groups: **the two structural seams** that decide *what runs and
-how it arrives*, and **the six mediation seams** that sit on the path of every call.
+- **Two structural seams** — `Transport` (how sessions arrive) and `Runtime` (how the
+  action executes). The pipeline's ingress and execution ends.
+- **The capability axis** — `Capability` (the mediated resource) plus `Broker` (the
+  grant-time factory that constructs one, holding any ambient state a grant needs — a
+  vault, a pty system). The main extension axis.
+- **The decision** — `Policy` decides `Allow`/`Deny`/`Escalate`; `Approver` is the
+  **resolver for `Escalate`**, not a peer (see §4.4). *One* concept — "decide,
+  possibly by asking someone" — kept as two traits for state + the async future.
+- **The observer axis** — `Interceptor` and `Recorder` are **one axis at two
+  settings**: observing the event stream. A `Recorder` observes every event,
+  out-of-path, watch-only. An `Interceptor` observes one event (a `Call`), in-path,
+  and may also *act* on it before the recorders downstream see the result. They stay
+  two traits because the signatures differ — a `Recorder` takes a finished `Event`; an
+  `Interceptor` takes a `Call` plus a `Next` it can short-circuit — but read §4.5/§4.6
+  as one idea. (The ordering "interceptor acts, then recorder observes" is
+  load-bearing — see §4.6.)
+- **The lifecycle seam** — `SessionHook`, fired at session open/close.
 
-Two of the mediation seams — `Interceptor` and `Recorder` — are really **one axis
-seen at two settings**: *observing the event stream*. A `Recorder` observes every
-event, out-of-path, and can only watch. An `Interceptor` observes one kind of event
-(a `Call`), in-path, and may also *act* — transform or deny it — before the recorders
-downstream see the result. Same substrate (the stream of things that happen), graded
-power (watch vs. watch-and-act). They stay two traits because the signatures genuinely
-differ — a `Recorder` takes a finished `Event`; an `Interceptor` takes a `Call` plus a
-`Next` continuation it can short-circuit — but it's worth carrying the one-axis picture
-as you read §4.5 and §4.6. See the ordering note in §4.6 for why "interceptor acts,
-then recorder observes" is load-bearing.
+So: nine traits, but really **five concerns** — structure, capability, decision,
+observation, lifecycle. Where two traits serve one concern (`Broker`+`Capability`,
+`Policy`+`Approver`, `Interceptor`+`Recorder`) the split earns its keep for a concrete
+reason — grant-time state, the async approver, the act-vs-watch power difference — not
+for symmetry.
 
 ```
                           a session arrives
@@ -141,10 +154,10 @@ then recorder observes" is load-bearing.
                                 │
                                 ▼
                         ┌──────────────┐
-   the action calls ───►│  Ctx::invoke │  and here the six mediation seams act:
+   the action calls ───►│  Ctx::invoke │  and here the mediation seams act:
                         └──────────────┘
                           [Policy]      allow / deny / escalate      (per session, grant, call)
-                          [Approver]    resolves an escalation       (quorum, timeout)
+                            └[Approver] resolves Policy's Escalate    (quorum, timeout) — not a peer
                           [Interceptor] ┐ observe the event stream:  in-path, acts on a Call (chain)
                           [Recorder]    ┘ ONE axis, two powers       out-of-path, watches every event (fan-out)
                           [Capability]  THE raw side effect          (the thing being mediated)
@@ -236,13 +249,27 @@ Multiple policies **compose most-restrictive-wins**: any `Deny` wins; else any
 `Escalate`; else `Allow`. So you can stack a coarse org policy and a fine per-team
 policy and get the intersection for free.
 
-### 4.4 `Approver` — resolve an escalation
+### 4.4 `Approver` — the resolver *for* Policy's `Escalate` *(not a peer seam)*
 
-**Concept.** When policy returns `Escalate`, the operation parks and an approver
-decides: `Approved { by }` or `Rejected { by, why }`. This is where **N-of-M quorum,
-timeouts, and push-to-a-human** live. The spike blocks synchronously; the product
-approver parks the op, pushes to a UI/chat, and resumes on quorum — same seam,
-async impl.
+**Concept.** `Approver` is not a peer of `Policy` — it's the **resolver for one
+`Policy` outcome**. The unit of "decide whether this proceeds" is a single concept
+that lives in `Policy`: it returns `Allow`, `Deny`, or `Escalate`. `Escalate` means
+"I've decided this needs a human/quorum" — and `Approver` is *how that deferred
+decision gets answered*. It has no independent trigger: the `gate()` function calls
+`policy` first, and *only* on `Escalate` calls `approver.decide()`, in the same breath.
+So "decide, possibly by asking someone" is one responsibility, expressed as two traits.
+
+Why two traits and not one enum variant carrying the resolver: an approver is
+**stateful and composed separately** (the `Quorum` holds its members and threshold,
+wired once at the composition root), and it's the seam that **goes async** — the
+product approver parks the op, pushes to a UI/chat, and resumes on quorum. Folding it
+into `Decision::Escalate` would force `Policy` to carry the approval machinery and
+would bake a synchronous resolver into policy's return type, right where async needs
+room. So: one *concept* (with `Policy`), kept as its own *trait* for state + the async
+future. `Approver` resolves; it doesn't decide.
+
+This is where **N-of-M quorum, timeouts, and push-to-a-human** live. The spike blocks
+synchronously; the product approver is async — same seam, different impl.
 
 **Plug it here.**
 
@@ -635,9 +662,9 @@ reg.add_with_priority::<dyn Interceptor>(arc, 10);    // …with ordering
 let all: Vec<Arc<dyn Policy>> = reg.all::<dyn Policy>();
 ```
 
-"Open" is the important word: the eight seams are just the points the *kernel*
-reserves. A plugin can `add` to a **point the kernel has never heard of** — its own
-trait — and other plugins can read it. New extension points cost nothing.
+"Open" is the important word: the kernel's seam traits (§4) are just the points the
+*kernel* reserves. A plugin can `add` to a **point the kernel has never heard of** —
+its own trait — and other plugins can read it. New extension points cost nothing.
 
 ### A plugin — two phases
 
