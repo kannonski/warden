@@ -1,0 +1,105 @@
+# warden — composition & the plugin model (§7 of DESIGN.md)
+# How a real Warden is ASSEMBLED (build-time), the complement to architecture.d2's
+# runtime-flow view. Plugins contribute to an open registry of extension points;
+# load() runs two phases, then composes single-provider points into one Warden.
+#
+# Render:  d2 docs/composition.d2 docs/composition.svg
+
+direction: down
+
+vars: {
+  d2-config: {
+    layout-engine: elk
+    theme-id: 200
+    pad: 40
+  }
+}
+
+title: "warden — composition: many plugins → one governed Warden" {
+  near: top-center
+  shape: text
+  style.font-size: 26
+  style.bold: true
+  style.font-color: "#cba6f7"
+}
+
+# ── the plugins you write ──────────────────────────────────────────────────────
+plugins: "Plugins you write  (each: Manifest + contribute + optional assemble)" {
+  style.fill: transparent
+  style.stroke-dash: 3
+  style.font-color: "#cba6f7"
+
+  p_pty:   "pty\nprovides cap:pty" { style.fill: "#3a2f5c"; style.font-color: white }
+  p_rt:    "local-runtime\nprovides runtime:local" { style.fill: "#3a2f5c"; style.font-color: white }
+  p_pol:   "identity-policy\nprovides policy:identity" { style.fill: "#3a2f5c"; style.font-color: white }
+  p_appr:  "auto-approver\nprovides approver" { style.fill: "#3a2f5c"; style.font-color: white }
+  p_rec:   "record\nprovides recorder" { style.fill: "#3a2f5c"; style.font-color: white }
+  p_x:     "…your plugin\nmay DEFINE a new point\n(e.g. Detector)\nrequires: recorder" { style.fill: "#4a3a2a"; style.font-color: "#f9e2af"; style.stroke-dash: 3 }
+}
+
+# ── the open registry ──────────────────────────────────────────────────────────
+registry: "Registry  —  open, type-keyed  (a point = ANY Send+Sync trait)" {
+  style.fill: "#181825"
+  style.stroke: "#89b4fa"
+  style.font-color: "#89b4fa"
+  style.bold: true
+
+  reserved: "reserved points (the 8 seams)\n\nBroker  ·  Runtime  ·  Policy\nApprover  ·  Interceptor  ·  Recorder\nSessionHook  ·  (Transport)" {
+    style.fill: "#2a3550"; style.font-color: "#89b4fa"
+  }
+  open: "plugin-defined points\n\nany new trait a plugin adds;\nother plugins read it\n(new points cost nothing)" {
+    style.fill: "#4a3a2a"; style.font-color: "#f9e2af"; style.stroke-dash: 3
+  }
+}
+
+# ── load(): two phases + validation ────────────────────────────────────────────
+load: "load(plugins)  →  Result<Loaded, LoadError>" {
+  direction: down
+  style.fill: "#1e1e2e"
+  style.stroke: "#cba6f7"
+  style.stroke-width: 3
+  style.font-color: "#cba6f7"
+  style.bold: true
+
+  v: "0 · validate requires\nevery `requires` provided by someone?\n(order-independent → the whole dep check)\nelse MissingRequirement" { style.fill: "#45293a"; style.font-color: "#f38ba8" }
+  c: "1 · contribute (ALL plugins)\nWRITES ONLY → load order can't\naffect correctness" { style.fill: "#2a3550"; style.font-color: "#89b4fa" }
+  a: "2 · assemble (ALL plugins)\nregistry complete → read points,\nadd DERIVED ones" { style.fill: "#2a3550"; style.font-color: "#89b4fa" }
+  k: "3 · compose reserved points\ninto the single values the kernel wants" { style.fill: "#294539"; style.font-color: "#a6e3a1"; style.bold: true }
+
+  v -> c -> a -> k: { style.stroke: "#6c7086" }
+}
+
+# ── the composition rules (how many → one, safely) ─────────────────────────────
+compose: "How MANY providers become ONE  (the safe default is baked in)" {
+  style.fill: transparent
+  style.stroke-dash: 3
+  style.font-color: "#a6e3a1"
+
+  r_pol:  "Policy[]  →  most-restrictive-wins\nany Deny wins; else any Escalate; else Allow" { style.fill: "#294539"; style.font-color: "#a6e3a1" }
+  r_appr: "Approver[]  →  all-must-approve\nfail-CLOSED if none configured" { style.fill: "#294539"; style.font-color: "#a6e3a1" }
+  r_rec:  "Recorder[]  →  fan-out\nsame event to every sink" { style.fill: "#294539"; style.font-color: "#a6e3a1" }
+  r_int:  "Interceptor[]  →  one priority-ordered chain" { style.fill: "#294539"; style.font-color: "#a6e3a1" }
+  r_rt:   "Runtime[]  →  name map\nDUPLICATE name = hard error" { style.fill: "#294539"; style.font-color: "#a6e3a1" }
+}
+
+# ── the result ─────────────────────────────────────────────────────────────────
+warden: "Loaded { warden, plugins[], points[] }\n\na governed Warden +\nan AUDITABLE fact of how it's configured\n(loaded.describe() → startup banner)" {
+  shape: rectangle
+  style.fill: "#3a2f5c"
+  style.font-color: white
+  style.bold: true
+  style.stroke: "#cba6f7"
+  style.stroke-width: 2
+}
+
+# ── flows ──────────────────────────────────────────────────────────────────────
+plugins.p_pty  -> registry.reserved: "add::<dyn Broker>" { style.stroke: "#6c7086" }
+plugins.p_rt   -> registry.reserved: "add::<dyn Runtime>" { style.stroke: "#6c7086" }
+plugins.p_pol  -> registry.reserved: "add::<dyn Policy>" { style.stroke: "#6c7086" }
+plugins.p_appr -> registry.reserved: "add::<dyn Approver>" { style.stroke: "#6c7086" }
+plugins.p_rec  -> registry.reserved: "add::<dyn Recorder>" { style.stroke: "#6c7086" }
+plugins.p_x    -> registry.open: "defines + adds" { style.stroke: "#f9e2af"; style.stroke-dash: 3 }
+
+registry -> load: "load() reads it" { style.stroke: "#cba6f7"; style.stroke-width: 2 }
+load.k -> compose: "reserved points →" { style.stroke: "#a6e3a1"; style.stroke-width: 2 }
+compose -> warden: "→ one Warden" { style.stroke: "#a6e3a1"; style.stroke-width: 2 }

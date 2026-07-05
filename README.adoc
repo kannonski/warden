@@ -29,6 +29,15 @@ The most complete thing built on it so far is *kedi*, a governed web terminal â€
 the browser at native-feeling latency, with every session recordable, replayable, and killable.
 See link:crates/kedi/README.adoc[crates/kedi].
 
+[TIP]
+====
+*New here? Start with the design.* link:docs/DESIGN.md[docs/DESIGN.md] explains the
+whole thing from the one idea outward â€” the chokepoint, the eight seams and what to plug where, the
+event stream, the run loop, the plugin model, and kedi as the worked example. Two diagrams:
+link:docs/architecture.svg[the runtime flow] (a call crossing the door) and
+link:docs/composition.svg[the plugin model] (how a `Warden` is assembled).
+====
+
 == Try kedi
 
 // Demo: drop a screen capture at docs/demo.gif and uncomment the next line.

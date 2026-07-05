@@ -562,6 +562,12 @@ not only on the victim's next keystroke.
 
 ## 7. Composition & plugins
 
+![warden composition](composition.svg)
+
+> Source: [`composition.d2`](composition.d2). Where §0's diagram is the *runtime*
+> flow, this is the *build-time* assembly: plugins → registry → `load()`'s two
+> phases → the composition rules → one `Warden`.
+
 §4 showed *what* the seams are. This is *how a real `Warden` gets built* from them —
 the job of `warden-host`.
 
