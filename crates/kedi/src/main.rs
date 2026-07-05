@@ -333,12 +333,29 @@ fn parse_config() -> Config {
         }
     }
 
+    // `--dev` shifts both ports to a dev pair so a dev instance never collides with a prod one
+    // (prod keeps 8788/4433). Applied here, before the main loop, so an explicit --http-port/
+    // --wt-port still overrides it. Only shifts a port left at its default — a port set by the
+    // config file is respected (the file is the deployment's own choice).
+    if args.iter().any(|a| a == "--dev") {
+        if c.http_port == 8788 {
+            c.http_port = 8790;
+        }
+        if c.wt_port == 4433 {
+            c.wt_port = 4435;
+        }
+    }
+
     let mut i = 0;
     while i < args.len() {
         if args[i] == "--open" {
             c.open = true;
             i += 1;
             continue;
+        }
+        if args[i] == "--dev" {
+            i += 1;
+            continue; // handled above; skip so it isn't an "unknown arg"
         }
         let val = args.get(i + 1).cloned();
         match args[i].as_str() {
@@ -364,7 +381,7 @@ fn parse_config() -> Config {
             }
             other => {
                 eprintln!(
-                    "kedi: unknown arg `{other}` (use --open/--config/--host/--bind/--http-port/--wt-port/--shell/--deny/--record/--name)"
+                    "kedi: unknown arg `{other}` (use --open/--dev/--config/--host/--bind/--http-port/--wt-port/--shell/--deny/--record/--name)"
                 );
                 std::process::exit(2);
             }
