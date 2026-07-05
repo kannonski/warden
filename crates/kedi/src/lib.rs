@@ -121,8 +121,8 @@ pub struct RecordControl {
 /// A warden wired for the terminal use case, **composed from plugins** (pty capability, in-process
 /// runtime, identity policy, auto-approver, opt-in toggleable recorder) — each a one-liner via the
 /// [`plugin`](warden_host::plugin) closure adapter. Adding a governance layer to kedi is a new
-/// plugin here, not an edit to the kernel: e.g. a handoff plugin contributing a `SessionHook` + a
-/// `Policy`, or a DLP plugin defining a `Detector` point + an `Interceptor`.
+/// plugin here, not an edit to the kernel: e.g. a DLP plugin defining a `Detector` point + an
+/// `Interceptor`, or a handoff plugin defining its own session-lifecycle point + a `Policy`.
 ///
 /// Known cost of "everything is recorded" (measured, engine_throughput_bulk): output lands in the
 /// audit log hex-encoded (×2 write amplification), and under a bulk flood the async recorder drains

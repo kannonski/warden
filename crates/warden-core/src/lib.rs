@@ -267,13 +267,12 @@ pub trait Recorder: Send + Sync {
     fn record(&self, ev: Event);
 }
 
-/// The session-lifecycle layer. The kernel fires these at the session's open/close boundary
-/// (attach/detach land here once handoff exists). A plugin that tracks or governs *sessions* rather
-/// than *calls* — persistence, quotas, idle-timeout, handoff — hooks here. Default: no-ops.
-pub trait SessionHook: Send + Sync {
-    fn on_open(&self, _session: &SessionCtx) {}
-    fn on_close(&self, _session: &SessionCtx, _outcome: &Result<()>) {}
-}
+// NOTE: there was a `SessionHook` seam here (on_open/on_close). It was parked — removed as a
+// reserved kernel seam — because it had no real implementation (only a test counter), and a seam is
+// a contract the kernel must keep stable: an unproven one is a liability, not an asset. The
+// open/close *boundary* still exists in `run_full` (it records SessionOpened / SessionClosed via the
+// SessionGuard); session-level governance (quotas, idle-timeout, handoff) will attach there when a
+// real user forces the hook's shape. See docs/boundary.md.
 
 /// How an action executes. Impls: an in-process demo (here), a WASM component host, a native process.
 pub trait Runtime: Send + Sync {
@@ -625,7 +624,6 @@ pub struct Warden {
     brokers: Vec<Arc<dyn Broker>>,
     runtimes: HashMap<&'static str, Arc<dyn Runtime>>,
     recorder: Arc<dyn Recorder>,
-    session_hooks: Vec<Arc<dyn SessionHook>>,
     live: Mutex<HashMap<u64, LiveSession>>,
     next_cap: AtomicU64,
 }
@@ -698,16 +696,9 @@ impl Warden {
             brokers,
             runtimes,
             recorder,
-            session_hooks: Vec::new(),
             live: Mutex::new(HashMap::new()),
             next_cap: AtomicU64::new(0),
         }
-    }
-
-    /// Attach session-lifecycle hooks (the composition root / plugin host wires these).
-    pub fn with_session_hooks(mut self, hooks: Vec<Arc<dyn SessionHook>>) -> Self {
-        self.session_hooks = hooks;
-        self
     }
 
     /// Kill a live session: record the kill in its stream and refuse every later capability call.
@@ -805,19 +796,10 @@ impl Warden {
             recorder: recorder.clone(),
             id,
         };
-        // session-lifecycle layer: fire on_open, run, fire on_close (with the outcome)
-        let sctx = SessionCtx {
-            id,
-            identity: session.identity.clone(),
-        };
-        for h in &self.session_hooks {
-            h.on_open(&sctx);
-        }
-        let result = self.drive(session, runtime, recorder.clone(), killed, input);
-        for h in &self.session_hooks {
-            h.on_close(&sctx, &result);
-        }
-        result
+        // The open/close boundary: SessionOpened is recorded above, SessionClosed by the guard on
+        // exit. Session-level governance (quotas, idle-timeout, handoff) will attach here when a real
+        // user forces its shape — the parked SessionHook seam lived here (see docs/boundary.md).
+        self.drive(session, runtime, recorder.clone(), killed, input)
     }
 
     fn drive(

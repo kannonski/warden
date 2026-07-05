@@ -21,10 +21,10 @@ at that single chokepoint.
 
 The shape is the point: a sans-IO kernel (`warden-core`, zero dependencies) whose behavior lives
 entirely in *extension seams* — `Capability` + its `Broker`, `Policy` (with `Approver` resolving its
-escalations), `Interceptor` and `Recorder` (one observer axis, two powers), `Runtime`, `Transport`,
-and the `SessionHook` lifecycle. Nine traits, five concerns — not nine equal peers (see the design
-doc). Everything else is a pluggable implementation; adding a feature means writing a *plugin*, not
-editing the kernel (see <<Plugins>>).
+escalations), `Interceptor` and `Recorder` (one observer axis, two powers), and `Runtime`. Six
+kernel seams, four concerns — not a flat list of equal peers (`Transport` is a host concern, not a
+kernel seam; see the design doc). Everything else is a pluggable implementation; adding a feature
+means writing a *plugin*, not editing the kernel (see <<Plugins>>).
 
 The most complete thing built on it so far is *kedi*, a governed web terminal — your real shell in
 the browser at native-feeling latency, with every session recordable, replayable, and killable.
@@ -166,12 +166,12 @@ let warden = load(vec![
     plugin(Manifest::new("audit").provides(&["recorder"]), |reg| {
         reg.add::<dyn Recorder>(Arc::new(MyRecorder));
     }),
-    // …a policy plugin, a capability broker plugin, a SessionHook plugin, …
+    // …a policy plugin, a capability broker plugin, a runtime plugin, …
 ])?.warden;
 ----
 
-For a cross-layer feature (say, session handoff = a `SessionHook` + a `Policy` + an `Approver`
-sharing state), implement the `Plugin` trait directly so one object owns all its hooks.
+For a cross-layer feature (say, DLP = a `Detector` point + an `Interceptor` + a `Policy` sharing
+state), implement the `Plugin` trait directly so one object owns all its contributions.
 
 == Measured
 

@@ -94,8 +94,8 @@ change.
 
 The rest of this document builds outward from the chokepoint:
 
-- **§4 The seams** — the extension points that make everything else pluggable (nine
-  traits, five concerns).
+- **§4 The seams** — the extension points that make everything else pluggable (six
+  kernel seams, four concerns).
 - **§5 The event stream** — what "records" actually produces, and how replay/rewind
   fall out of it.
 - **§6 Sessions & the run loop** — grant → run → mediate → revoke, and the drop
@@ -114,12 +114,13 @@ The rest of this document builds outward from the chokepoint:
 
 The kernel defines the flow (§2). It defines almost no behavior. Every place where a
 real decision or a real side effect happens is a **trait** — a seam you plug an
-implementation into. There are nine traits, but they are **not nine equal peers** —
-and being honest about that is half of understanding the design. They fall out like
-this:
+implementation into. But they are **not a flat list of equal peers** — and being
+honest about that is half of understanding the design. Six of them are the kernel's
+mediation seams; two more (`Transport`, `SessionHook`) stepped out of that list for
+reasons worth stating. The six fall out like this:
 
-- **Two structural seams** — `Transport` (how sessions arrive) and `Runtime` (how the
-  action executes). The pipeline's ingress and execution ends.
+- **Execution** — `Runtime` (how the action executes: in-process, WASM, native). The
+  one clean structural seam.
 - **The capability axis** — `Capability` (the mediated resource) plus `Broker` (the
   grant-time factory that constructs one, holding any ambient state a grant needs — a
   vault, a pty system). The main extension axis.
@@ -134,21 +135,32 @@ this:
   `Interceptor` takes a `Call` plus a `Next` it can short-circuit — but read §4.5/§4.6
   as one idea. (The ordering "interceptor acts, then recorder observes" is
   load-bearing — see §4.6.)
-- **The lifecycle seam** — `SessionHook`, fired at session open/close.
 
-So: nine traits, but really **five concerns** — structure, capability, decision,
-observation, lifecycle. Where two traits serve one concern (`Broker`+`Capability`,
-`Policy`+`Approver`, `Interceptor`+`Recorder`) the split earns its keep for a concrete
+**Two seams stepped out of this list, on purpose** (see [boundary.md](boundary.md)):
+
+- `Transport` (how sessions arrive) is a **host concern, not a kernel seam.** kedi —
+  the flagship — drives its own accept loop and never touches the trait; only the demo
+  bin uses it. The kernel's contract is "give me a session"; *getting* the session is
+  the host's job. The trait still exists for hosts that want a uniform accept-loop, but
+  it isn't a peer of the seams above.
+- `SessionHook` was a session-open/close lifecycle seam, now **parked** (removed): it
+  had no real implementation, and a seam is a contract the kernel must keep stable — an
+  unproven one is a liability. The open/close *boundary* still exists in `run_full`;
+  session-level governance (quotas, idle-timeout, handoff) will attach there when a real
+  user forces its shape (§6).
+
+So: **six kernel seams, four concerns** — capability, decision, observation, execution.
+Where two traits serve one concern (`Broker`+`Capability`, `Policy`+`Approver`,
+`Interceptor`+`Recorder`) the split earns its keep for a concrete
 reason — grant-time state, the async approver, the act-vs-watch power difference — not
 for symmetry.
 
 ```
-                          a session arrives
+   host concern ─────────────────────────────────────────────────────────────┐
+     Transport?  a ready session arrives (kedi drives its own loop; §4.8)       │
+   ════════════════════════════ the kernel ══════════════════════════════════════
                                 │
-            ┌───────────────────┴────────────────────┐
-   [Transport]  how sessions arrive     [Runtime]  how the action executes
-   loopback / QUIC / gateway            in-process / WASM / native process
-            └───────────────────┬────────────────────┘
+                          [Runtime]  how the action executes   (in-process / WASM / native)
                                 │  for each capability the action asked for:
                           [Broker]  turns a request into a live Capability
                                 │
@@ -161,7 +173,8 @@ for symmetry.
                           [Interceptor] ┐ observe the event stream:  in-path, acts on a Call (chain)
                           [Recorder]    ┘ ONE axis, two powers       out-of-path, watches every event (fan-out)
                           [Capability]  THE raw side effect          (the thing being mediated)
-                          [SessionHook] open / close lifecycle       (persistence, quotas, handoff)
+
+   (SessionHook = parked; the open/close boundary lives in run_full. See §4.9.)
 ```
 
 Each seam below: **the concept**, **what a real impl looks like**, and **plug it
@@ -367,7 +380,7 @@ plugin(Manifest::new("local-runtime").provides(&["runtime:local"]), |reg| {
 Two runtimes with the **same name** is a **hard load error** (`DuplicateRuntime`) —
 one would silently shadow the other, so composition fails loudly instead.
 
-### 4.8 `Transport` — how sessions arrive
+### 4.8 `Transport` — how sessions arrive *(a host concern, not a kernel seam)*
 
 **Concept.** `accept()` blocks until a client has delivered a full request, then
 hands the kernel an `Incoming` (the session to run, which named runtime runs it, an
@@ -380,26 +393,27 @@ sees bytes.** A transport can also deliver a *control verb* like `Kill`.
 asks for a warden by name, the gateway splices the two — no inbound ports on the
 warden). kedi's transport is WebTransport (HTTP/3) from the browser.
 
-**Plug it here.** In the current spike the transport is wired by the composition
-root / front-end (kedi drives its own WebTransport loop into `run_incoming`), rather
-than as a registry point — noted here as the one seam not yet expressed as a plugin.
+**Not a peer seam.** Unlike the seams above, `Transport` isn't wired through
+`warden-host` and isn't a registry point — and the flagship consumer proves why:
+**kedi drives its own async accept loop and never touches the `Transport` trait**;
+only the demo bin uses it. The kernel's real contract is *"give me a ready session"*
+(`run_incoming` / `run_session`); *how* the session arrives is the host's business.
+The trait remains useful for a host that wants a uniform accept-loop (the demo bin),
+but it's a host-side convenience, not one of the mediation seams. See
+[boundary.md](boundary.md).
 
-### 4.9 `SessionHook` — the lifecycle layer *(the ninth seam)*
+### 4.9 `SessionHook` — *parked* (was the lifecycle seam)
 
-**Concept.** Not on the call path — on the *session* path. `on_open(session)` and
-`on_close(session, outcome)` fire at the session boundary. This is where things that
-govern **sessions rather than calls** live: persistence, quotas, idle-timeout, and
-the planned user-to-user **session handoff**. Default: no-ops.
+There was a `SessionHook` seam here — `on_open(session)` / `on_close(session,
+outcome)`, for governing **sessions rather than calls** (quotas, idle-timeout,
+handoff). It has been **removed**: the only implementation was a test counter, and a
+reserved seam is a contract the kernel commits to keep stable — carrying an unproven
+one is a liability, not an asset.
 
-**Plug it here.**
-
-```rust
-plugin(Manifest::new("quotas").provides(&["session-hook"]), |reg| {
-    reg.add::<dyn SessionHook>(Arc::new(QuotaTracker::new()));
-})
-```
-
-Multiple hooks all fire, in registration order.
+The open/close **boundary** it hooked still exists in `run_full` (that's where
+`SessionOpened` is recorded and, via `SessionGuard`, `SessionClosed`). Session-level
+governance will attach there — as a real seam whose shape is forced by a real
+implementation, not guessed in advance. See §6 and [boundary.md](boundary.md).
 
 ### The "what to plug where" cheat-sheet
 
@@ -411,11 +425,11 @@ Multiple hooks all fire, in registration order.
 | log / mask / meter / rate-limit every call | `Interceptor` | priority-ordered chain |
 | persist / ship / mirror the audit trail | `Recorder` | fan-out |
 | run actions a new way (new sandbox, new ABI) | `Runtime` (unique name) | name lookup |
-| accept sessions over a new wire | `Transport` | (front-end wired, for now) |
-| govern sessions (quota, timeout, handoff) | `SessionHook` | all fire |
+| accept sessions over a new wire | `Transport` (host-side, not a registry seam — §4.8) | host wires it |
+| govern sessions (quota, timeout, handoff) | *parked* — will re-enter at the `run_full` boundary (§4.9) | — |
 
-The key property: **adding any row is writing an impl + one registry line. None of
-it edits the kernel.** That's what §7 makes concrete.
+The key property: **adding any of the seam rows is writing an impl + one registry
+line. None of it edits the kernel.** That's what §7 makes concrete.
 
 ---
 
@@ -538,9 +552,8 @@ every exit — including the ugly ones (a denied grant, a panic).
     │
     ├─ set up the recorder      Tee(durable, observer)  if there's a live client
     ├─ register as LIVE         (so kill / live_sessions can see it)
-    ├─ record SessionOpened
+    ├─ record SessionOpened          ◄── the open boundary (session-level governance attaches here)
     ├─ arm SessionGuard ────────────────────── fires on EVERY exit below ↓
-    ├─ session_hooks.on_open()
     │
     │   drive():
     │     ├─ gate: policy.on_session      allow / deny / escalate→approve
@@ -555,8 +568,8 @@ every exit — including the ugly ones (a denied grant, a panic).
     │     ├─ ctx.revoke_all()              revoke FIRST…
     │     └─ join the output pumps         …THEN join (ordering matters — see 6.4)
     │
-    ├─ session_hooks.on_close(outcome)
     └─ SessionGuard drops ──► remove from live registry + record SessionClosed
+                              ◄── the close boundary (session-level governance attaches here)
 ```
 
 ### 6.2 The gate — one path for allow / deny / escalate
@@ -721,7 +734,7 @@ println!("{}", loaded.describe());   // auditable: exactly how this warden gover
    - recorders → **fan-out**
    - interceptors → one **priority-ordered** chain
    - brokers → the broker list; runtimes → the name map (**duplicate name = hard
-     error**); session hooks → all wired
+     error**)
 4. hand back a `Loaded { warden, plugins, points }` — where `plugins` and the
    per-point contribution counts are an **auditable fact**: "here is exactly how this
    warden is configured to govern," printable for a startup banner or the audit panel.
@@ -738,10 +751,10 @@ and fail-closed are the conservative choices, on purpose.
 ### Cross-layer plugins
 
 The examples in §4 each touch one seam via the `plugin()` helper. When a feature
-spans several seams that must **share state** — say session handoff = a
-`SessionHook` + a `Policy` + an `Approver` over one shared handoff table — you
-implement the `Plugin` trait directly on one struct, so a single object owns all its
-hooks and their shared state. That's the case the two-phase trait exists for.
+spans several seams that must **share state** — say a DLP feature = a `Detector` point
+(its own) + an `Interceptor` + a `Policy` over one shared detector set — you implement
+the `Plugin` trait directly on one struct, so a single object owns all its
+contributions and their shared state. That's the case the two-phase trait exists for.
 
 ---
 
@@ -821,9 +834,9 @@ plugins:
 | `auto-approver` | `Approver` | demo: approves (real deployments swap in quorum) |
 | `record` | `Recorder` | opt-in, toggleable, hash-chained file recorder |
 
-Adding a governance layer to kedi is a **new plugin here, not a kernel edit** — a
-handoff plugin contributing a `SessionHook` + `Policy`, or a DLP plugin defining a
-`Detector` point + an `Interceptor`. That extensibility is the point of §7, shown on
+Adding a governance layer to kedi is a **new plugin here, not a kernel edit** — a DLP
+plugin defining a `Detector` point + an `Interceptor`, or a policy plugin that keys on
+`call.mutates` for a read-only tier. That extensibility is the point of §7, shown on
 a live product.
 
 ### 9.3 The wire — browser to warden
@@ -910,14 +923,13 @@ tier is a swap, not a redesign.
   is deferred. The `Interceptor` seam and its per-stream stateful masker exist and are
   exercised by the `warden` demo bin — kedi's governance today is *recorded +
   replayable + killable*, not *masked*.
-- **Transport isn't a plugin point yet.** The other seams compose via `warden-host`;
-  the `Transport` is still wired by the front-end/composition root (§4.8).
-- **The kernel over-reaches into the outer loop.** `warden-core` claims to be sans-IO
-  but `run_full` spawns OS threads for output pumps (a concurrency policy), `Transport`
-  is bypassed by kedi (which drives its own accept loop), and `SessionHook` has no real
-  user. These are one boundary error — the kernel owning ingress/scheduling/lifecycle
-  that belong to the host. Mapped in [boundary.md](boundary.md), with the target
-  boundary and the sequence to reach it. Not yet fixed.
+- **The kernel still over-reaches into the outer loop — one step done, one left.**
+  Three smells were one boundary error (the kernel owning ingress/scheduling/lifecycle
+  that belong to the host), mapped in [boundary.md](boundary.md). *Done:* `Transport`
+  reframed as a host concern (§4.8) and `SessionHook` parked (§4.9). *Remaining:*
+  `run_full` still spawns OS threads for the output pumps — a concurrency policy the
+  host should own. Fixing it (the kernel hands the host a unit of work instead of
+  spawning) lands with the sync→async move, which touches the same code.
 
 ---
 

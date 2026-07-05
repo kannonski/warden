@@ -267,46 +267,7 @@ fn policies_compose_deny_wins() {
     );
 }
 
-// ── 3. session-lifecycle hooks fire (the new seam) ─────────────────────────────────────────────
-
-#[test]
-fn session_hooks_fire_on_open_and_close() {
-    #[derive(Default)]
-    struct Counting {
-        opened: AtomicUsize,
-        closed: AtomicUsize,
-    }
-    impl SessionHook for Counting {
-        fn on_open(&self, _: &SessionCtx) {
-            self.opened.fetch_add(1, Ordering::SeqCst);
-        }
-        fn on_close(&self, _: &SessionCtx, _: &WResult<()>) {
-            self.closed.fetch_add(1, Ordering::SeqCst);
-        }
-    }
-    struct HookPlugin(Arc<Counting>);
-    impl Plugin for HookPlugin {
-        fn manifest(&self) -> Manifest {
-            Manifest::new("hook")
-        }
-        fn contribute(&self, reg: &mut Registry) {
-            reg.add::<dyn SessionHook>(self.0.clone());
-        }
-    }
-
-    let counter = Arc::new(Counting::default());
-    let loaded = load(vec![
-        Box::new(EchoPlugin),
-        Box::new(LocalRuntimePlugin),
-        Box::new(HookPlugin(counter.clone())),
-    ])
-    .unwrap();
-    run_echo(&loaded.warden, "carol", b"x").unwrap();
-    assert_eq!(counter.opened.load(Ordering::SeqCst), 1);
-    assert_eq!(counter.closed.load(Ordering::SeqCst), 1);
-}
-
-// ── 4. THE openness proof: a plugin DEFINES a point; others contribute; a third consumes it ─────
+// ── 3. THE openness proof: a plugin DEFINES a point; others contribute; a third consumes it ─────
 // `Detector` is not a kernel seam. The host never heard of it. Yet one plugin defines + consumes it
 // in `assemble`, and two unrelated plugins extend it — with zero kernel/host changes. This is the
 // "categories are just samples" property made concrete.

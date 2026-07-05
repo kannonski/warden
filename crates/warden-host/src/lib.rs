@@ -9,7 +9,7 @@
 //! 1. **Extension points are types; the registry is open.** An extension point is any
 //!    `Send + Sync + 'static` trait. A [`Registry`] maps each point's type to the contributions
 //!    registered against it. The kernel *reserves* the handful of points its own flow consumes
-//!    (`Policy`, `Approver`, `Interceptor`, `Recorder`, `Broker`, `Runtime`, `SessionHook`) and
+//!    (`Policy`, `Approver`, `Interceptor`, `Recorder`, `Broker`, `Runtime`) and
 //!    reads those after load — but the registry itself is open: a plugin may **define a brand-new
 //!    point** (its own trait) that other plugins contribute to and it consumes, none of which the
 //!    kernel or the host ever enumerated. The category list is not closed.
@@ -30,7 +30,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use warden_core::{
     ApprovalRequest, Approver, Broker, Call, Decision, Event, Interceptor, Policy, Recorder,
-    Runtime, SessionCtx, SessionHook, Verdict, Warden,
+    Runtime, SessionCtx, Verdict, Warden,
 };
 
 // ── the open, type-keyed registry ─────────────────────────────────────────────────────────────
@@ -131,9 +131,9 @@ impl Manifest {
     }
 }
 
-/// A cross-layer extension bundle. One plugin can touch many layers (a Broker + a Policy + a
-/// SessionHook, sharing state) and define its own points. Register hooks in [`contribute`] (add
-/// primitives) and [`assemble`] (add points derived from other plugins' contributions).
+/// A cross-layer extension bundle. One plugin can touch many layers (a Broker + a Policy + an
+/// Interceptor, sharing state) and define its own points. Register contributions in [`contribute`]
+/// (add primitives) and [`assemble`] (add points derived from other plugins' contributions).
 ///
 /// Most plugins wrap a single contribution — for those, skip the trait and use the [`plugin`]
 /// closure adapter.
@@ -370,8 +370,6 @@ pub fn load(plugins: Vec<Box<dyn Plugin>>) -> Result<Loaded, LoadError> {
             });
         }
     }
-    let hooks = reg.all::<dyn SessionHook>();
-
     let points = [
         ("policy", reg.count::<dyn Policy>()),
         ("approver", reg.count::<dyn Approver>()),
@@ -379,7 +377,6 @@ pub fn load(plugins: Vec<Box<dyn Plugin>>) -> Result<Loaded, LoadError> {
         ("recorder", reg.count::<dyn Recorder>()),
         ("broker", brokers.len()),
         ("runtime", runtimes.len()),
-        ("session_hook", hooks.len()),
     ]
     .into_iter()
     .map(|(point, contributions)| PointCount {
@@ -388,8 +385,7 @@ pub fn load(plugins: Vec<Box<dyn Plugin>>) -> Result<Loaded, LoadError> {
     })
     .collect();
 
-    let warden = Warden::new(policy, approver, interceptors, brokers, runtimes, recorder)
-        .with_session_hooks(hooks);
+    let warden = Warden::new(policy, approver, interceptors, brokers, runtimes, recorder);
 
     Ok(Loaded {
         warden,
