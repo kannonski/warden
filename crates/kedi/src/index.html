@@ -148,6 +148,10 @@
   .cm-item:hover { background:#20202e; color:var(--focus); }
   .cm-item .cm-k { color:var(--dim); font-size:11px; }
   #overlay { position:absolute; inset:0; display:none; place-items:center; text-align:center; z-index:9999; background:rgba(11,14,20,.7); color:var(--dim); }
+  #toast { position:fixed; left:50%; bottom:22px; transform:translateX(-50%) translateY(12px); z-index:10001;
+           background:rgba(24,24,37,.95); color:var(--fg); border:1px solid var(--edge); border-radius:9px;
+           padding:8px 14px; font-size:12px; max-width:80vw; opacity:0; pointer-events:none; transition:opacity .18s, transform .18s; }
+  #toast.show { opacity:1; transform:translateX(-50%) translateY(0); }
   #overlay button { background:var(--panel); border:1px solid var(--cyan); color:var(--cyan); border-radius:7px; padding:6px 16px; font:inherit; cursor:pointer; margin-top:10px; }
 </style>
 </head>
@@ -758,16 +762,20 @@ async function makePane() {
   // drag a file (or files) onto the terminal → type its path at the prompt. Browsers hide the real
   // filesystem path for security, so we prefer a text/uri-list `file://` URI (most Linux file
   // managers send it → the true absolute path) and fall back to the bare filename otherwise.
-  termEl.addEventListener("dragover", (e) => { e.preventDefault(); e.stopPropagation(); pane.floatwin?.classList.add("dropping"); });
-  termEl.addEventListener("dragleave", (e) => { e.stopPropagation(); pane.floatwin?.classList.remove("dropping"); });
-  termEl.addEventListener("drop", (e) => {
+  // NB: xterm.js renders a hidden textarea + canvases inside `termEl` that would otherwise eat the
+  // drop, so we listen in the CAPTURE phase on the whole pane wrapper — beating xterm's internals —
+  // and must preventDefault on EVERY dragover (else the browser rejects the drop and navigates).
+  wrapper.addEventListener("dragenter", (e) => { e.preventDefault(); pane.floatwin?.classList.add("dropping"); }, true);
+  wrapper.addEventListener("dragover", (e) => { e.preventDefault(); if (e.dataTransfer) e.dataTransfer.dropEffect = "copy"; }, true);
+  wrapper.addEventListener("dragleave", (e) => { if (!wrapper.contains(e.relatedTarget)) pane.floatwin?.classList.remove("dropping"); }, true);
+  wrapper.addEventListener("drop", (e) => {
     e.preventDefault(); e.stopPropagation();
     pane.floatwin?.classList.remove("dropping");
     // a dragged image (from a browser/app) drops as a file → save-and-type-path too
     const img = e.dataTransfer && [...(e.dataTransfer.files || [])].find((f) => f.type.startsWith("image/"));
     if (img) { sendImage(pane, img); return; }
     dropPaths(pane, e.dataTransfer);
-  });
+  }, true);
   // Ctrl+V of an image: the native paste event carries clipboard items even though xterm handles keys
   termEl.addEventListener("paste", (e) => {
     const items = e.clipboardData && e.clipboardData.items;
@@ -1077,20 +1085,42 @@ const shquote = (s) => "'" + s.replace(/'/g, "'\\''") + "'";
 // full path of a raw File for security). Multiple files → space-separated.
 function dropPaths(pane, dt) {
   if (!dt) return;
+  const toPath = (u) => {
+    u = u.trim();
+    try { return u.startsWith("file://") ? decodeURIComponent(new URL(u).pathname) : decodeURIComponent(u); }
+    catch (_) { return u; }
+  };
   let paths = [];
+  // text/uri-list (freedesktop standard — Nautilus/Dolphin/Thunar send it)
   const uris = dt.getData("text/uri-list");
-  if (uris) {
-    paths = uris.split(/\r?\n/).filter((l) => l && !l.startsWith("#")).map((u) => {
-      try { return u.startsWith("file://") ? decodeURIComponent(new URL(u).pathname) : u; }
-      catch (_) { return u; }
-    });
+  if (uris) paths = uris.split(/\r?\n/).filter((l) => l && !l.startsWith("#")).map(toPath);
+  // text/x-moz-url (Firefox / some GTK apps): alternating URL / title lines
+  if (!paths.length) {
+    const moz = dt.getData("text/x-moz-url") || dt.getData("text/x-moz-url-data");
+    if (moz) paths = moz.split(/\r?\n/).filter((l, i) => l && i % 2 === 0).map(toPath);
   }
+  // text/plain: often a file:// URI or a bare path
   if (!paths.length) {
     const txt = dt.getData("text/plain");
-    if (txt && txt.trim()) paths = txt.split(/\r?\n/).filter(Boolean);
+    if (txt && txt.trim()) paths = txt.split(/\r?\n/).filter(Boolean).map(toPath);
   }
+  // last resort: a raw File (browsers give only the basename here, not the directory)
   if (!paths.length && dt.files && dt.files.length) paths = [...dt.files].map((f) => f.name);
-  if (paths.length) pane.send({ input: paths.map(shquote).join(" ") + " " });
+  if (paths.length) {
+    pane.send({ input: paths.map(shquote).join(" ") + " " });
+  } else {
+    // nothing extractable — surface what the drag DID carry so the failure is diagnosable, not silent
+    const types = (dt.types ? [...dt.types] : []).join(", ") || "(none)";
+    console.warn("[kedi] drop carried no usable path; dataTransfer types:", types);
+    overlayFlash(`drop carried no path — types: ${types}`);
+  }
+}
+// brief non-blocking toast in the corner (for drop diagnostics / small notices)
+function overlayFlash(msg) {
+  let t = $("toast");
+  if (!t) { t = document.createElement("div"); t.id = "toast"; document.body.appendChild(t); }
+  t.textContent = msg; t.classList.add("show");
+  clearTimeout(overlayFlash._t); overlayFlash._t = setTimeout(() => t.classList.remove("show"), 3500);
 }
 
 // Send a clipboard/dropped image blob to the pty's `paste-image` op (base64 in JSON); the server
