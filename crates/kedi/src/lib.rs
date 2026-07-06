@@ -18,6 +18,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use tokio::sync::mpsc::{UnboundedSender, unbounded_channel};
 use warden_caps::dstask::{DSTASK, DsTaskBroker};
 use warden_caps::pty::{PTY, PtyBroker};
+use warden_core::Broker as _; // brings .grant() into scope for grant_declared_caps
 use warden_core::{
     Action, ActionSource, ApprovalRequest, Approver, Call, CapRequest, Ctx, Decision, Event,
     Incoming, InputFrame, Policy, Recorder, Result as WResult, Runtime, Session, SessionCtx,
@@ -88,29 +89,47 @@ impl Runtime for LocalRuntime {
     }
 }
 
-/// Grants an `app` capability (a WASM-TUI plugin) with a `dstask` sub-capability attached, so a
-/// plugin like deck can reach the task store through `host.invoke("dstask", …)` — governed. (The
-/// stock `AppBroker` grants apps with no sub-caps; kedi wants its plugins to have dstask. A later
-/// step reads each plugin's requested caps from a manifest instead of granting dstask to all.)
-struct AppWithDsTaskBroker;
+/// Grants an `app` capability by **plugin name** (`req.arg` = the name). The broker reads the plugin
+/// registry, resolves the name → its .wasm + declared cap kinds, grants exactly those sub-caps, and
+/// builds the `AppCap`. This is the whole "no rebuild" story: what a plugin is and may reach comes
+/// from `plugins.toml` at grant time, not from kedi's source.
+struct AppBroker;
 #[async_trait::async_trait]
-impl warden_core::Broker for AppWithDsTaskBroker {
+impl warden_core::Broker for AppBroker {
     fn handles(&self, req: &CapRequest) -> bool {
         req.kind == APP
     }
     async fn grant(&self, req: &CapRequest) -> WResult<Box<dyn warden_core::Capability>> {
-        // the app's world: a dstask capability (the default CLI). `req.arg` is the .wasm path.
-        let dstask = DsTaskBroker
-            .grant(&CapRequest {
-                kind: DSTASK,
-                arg: String::new(),
-            })
-            .await?;
+        let (path, kinds) = resolve_plugin(&req.arg)
+            .ok_or_else(|| WardenError::Cap(format!("no plugin `{}` in plugins.toml", req.arg)))?;
         Ok(Box::new(warden_wasm::AppCap::spawn(
-            &req.arg,
-            vec![dstask],
+            &path,
+            grant_declared_caps(&kinds).await,
         )?))
     }
+}
+
+/// Grant the sub-capabilities a plugin declared (by kind name) in its manifest. Unknown kinds are
+/// skipped (the plugin's `host.invoke` on them is refused — the sandbox stance). This is the one
+/// place kedi decides what a plugin may reach: extend the match to expose more caps to plugins.
+async fn grant_declared_caps(kinds: &[String]) -> Vec<Box<dyn warden_core::Capability>> {
+    let mut caps: Vec<Box<dyn warden_core::Capability>> = Vec::new();
+    for k in kinds {
+        let granted = match k.as_str() {
+            "dstask" => DsTaskBroker
+                .grant(&CapRequest {
+                    kind: DSTASK,
+                    arg: String::new(),
+                })
+                .await
+                .ok(),
+            _ => None, // an undeclared/unknown kind isn't granted
+        };
+        if let Some(c) = granted {
+            caps.push(c);
+        }
+    }
+    caps
 }
 
 /// Forwards a session's pty output to the WebTransport stream; the rest of the event stream
@@ -178,10 +197,10 @@ pub fn terminal_warden(
             reg.add::<dyn warden_core::Broker>(Arc::new(PtyBroker));
         }),
         // WASM-TUI plugin panes: a pane whose capability is an `app` (a kedi:app component) instead
-        // of a pty. Same governed machinery; the "shell" is a WASM app, granted a dstask cap so a
-        // plugin like deck can reach the task store through host.invoke.
+        // of a pty. The broker resolves a plugin *name* through plugins.toml at grant time and grants
+        // its declared caps — so plugins are added by editing the registry, never by rebuilding kedi.
         plugin(Manifest::new("app").provides(&["cap:app"]), |reg| {
-            reg.add::<dyn warden_core::Broker>(Arc::new(AppWithDsTaskBroker));
+            reg.add::<dyn warden_core::Broker>(Arc::new(AppBroker));
         }),
         plugin(
             Manifest::new("local-runtime").provides(&["runtime:local"]),
@@ -295,11 +314,15 @@ pub fn wt_server(
     Endpoint::server(config)
 }
 
-/// Resolve a plugin name → an installed `kedi:app` `.wasm` component. Looks in the plugin dir
-/// (`$KEDI_PLUGIN_DIR`, else `$XDG_CONFIG_HOME/kedi/plugins`, else `~/.config/kedi/plugins`);
-/// returns `None` if there's no such component, so an unknown app just falls back to a shell pane.
-fn resolve_app(name: &str) -> Option<String> {
-    let dir = std::env::var("KEDI_PLUGIN_DIR")
+// ── plugins: discovered at runtime, no rebuild ──────────────────────────────────────────────────
+// A plugin is a `kedi:app` .wasm plus a `[[plugin]]` block in the plugin dir's `plugins.toml`
+// declaring its name, icon, and the capabilities it requests. kedi reads the registry per connection
+// (so edits take effect without a restart), lists plugins to the browser launcher (`/plugins`), and
+// grants each app exactly the caps it declares. Adding a plugin = drop a .wasm + a toml block.
+
+/// The plugin dir: `$KEDI_PLUGIN_DIR`, else `$XDG_CONFIG_HOME/kedi/plugins`, else `~/.config/kedi/plugins`.
+fn plugin_dir() -> std::path::PathBuf {
+    std::env::var("KEDI_PLUGIN_DIR")
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|_| {
             let cfg = std::env::var("XDG_CONFIG_HOME")
@@ -309,9 +332,82 @@ fn resolve_app(name: &str) -> Option<String> {
                         .join(".config")
                 });
             cfg.join("kedi/plugins")
-        });
-    let p = dir.join(format!("{name}.wasm"));
-    p.exists().then(|| p.to_string_lossy().into_owned())
+        })
+}
+
+/// One entry from `plugins.toml`.
+#[derive(serde::Deserialize, Clone)]
+struct PluginEntry {
+    name: String,
+    /// the .wasm filename (relative to the plugin dir), defaulting to `<name>.wasm`
+    #[serde(default)]
+    wasm: String,
+    #[serde(default)]
+    icon: String,
+    /// capability kinds this plugin may use (e.g. ["dstask"]); kedi grants exactly these
+    #[serde(default)]
+    caps: Vec<String>,
+}
+
+#[derive(serde::Deserialize, Default)]
+struct PluginRegistry {
+    #[serde(default, rename = "plugin")]
+    plugins: Vec<PluginEntry>,
+}
+
+/// Read `<plugin_dir>/plugins.toml` (missing/invalid → no plugins). Fills `wasm` defaults.
+fn load_registry() -> Vec<PluginEntry> {
+    let path = plugin_dir().join("plugins.toml");
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        return Vec::new();
+    };
+    let mut reg: PluginRegistry = toml::from_str(&text).unwrap_or_default();
+    for p in &mut reg.plugins {
+        if p.wasm.trim().is_empty() {
+            p.wasm = format!("{}.wasm", p.name);
+        }
+    }
+    reg.plugins
+}
+
+/// The installed plugins as JSON (name + icon) for the browser launcher (`/plugins`).
+pub fn plugins_json() -> String {
+    let items: Vec<String> = load_registry()
+        .iter()
+        .filter(|p| plugin_dir().join(&p.wasm).exists())
+        .map(|p| {
+            format!(
+                "{{\"name\":{},\"icon\":{}}}",
+                json_str(&p.name),
+                json_str(&p.icon)
+            )
+        })
+        .collect();
+    format!("[{}]", items.join(","))
+}
+
+/// Resolve a plugin name → (its .wasm path, its declared cap kinds). `None` if it isn't a registered,
+/// present plugin — so an unknown app name falls back to a shell pane.
+fn resolve_plugin(name: &str) -> Option<(String, Vec<String>)> {
+    let p = load_registry().into_iter().find(|p| p.name == name)?;
+    let path = plugin_dir().join(&p.wasm);
+    path.exists()
+        .then(|| (path.to_string_lossy().into_owned(), p.caps))
+}
+
+/// minimal JSON string escaper (name/icon are short, controlled strings)
+fn json_str(s: &str) -> String {
+    let mut o = String::from("\"");
+    for c in s.chars() {
+        match c {
+            '"' => o.push_str("\\\""),
+            '\\' => o.push_str("\\\\"),
+            c if c.is_control() => {}
+            c => o.push(c),
+        }
+    }
+    o.push('"');
+    o
 }
 
 /// A control message from the browser on a pane's stream.
@@ -474,7 +570,7 @@ async fn pane_session(
     let mut tmp = [0u8; 4096];
     let mut identity = String::from("browser");
     let mut pending: Vec<InputFrame> = Vec::new();
-    let mut app_path: Option<String> = None; // Some → this pane is a WASM app, not a shell
+    let mut app_name: Option<String> = None; // Some(name) → this pane is a WASM plugin, not a shell
     'intro: loop {
         match recv.read(&mut tmp).await {
             Ok(Some(n)) if n > 0 => {
@@ -483,8 +579,13 @@ async fn pane_session(
                     let line: Vec<u8> = buf.drain(..=p).collect();
                     match parse_msg(&line[..line.len() - 1]) {
                         // an {"app":"name"} frame selects a plugin pane; it can arrive before or with
-                        // the hello, so record it and keep reading until the hello ends the intro.
-                        Some(ClientMsg::App(name)) => app_path = resolve_app(&name),
+                        // the hello. Keep the name only if it's a registered, present plugin — else
+                        // fall through to a shell pane.
+                        Some(ClientMsg::App(name)) => {
+                            if resolve_plugin(&name).is_some() {
+                                app_name = Some(name);
+                            }
+                        }
                         Some(ClientMsg::Hello(who)) if !who.trim().is_empty() => {
                             identity = who;
                             break 'intro;
@@ -545,10 +646,11 @@ async fn pane_session(
             })
         })),
     };
-    let request = match &app_path {
-        Some(path) => CapRequest {
+    let request = match &app_name {
+        // an app pane: the broker resolves this plugin name through plugins.toml at grant time
+        Some(name) => CapRequest {
             kind: APP,
-            arg: path.clone(),
+            arg: name.clone(),
         },
         None => CapRequest {
             kind: PTY,
@@ -709,10 +811,15 @@ mod tests {
             eprintln!("skip: build guest-app first (cargo build --release --target wasm32-wasip2)");
             return;
         }
-        // point the plugin dir at a temp dir holding the hello component as `demo.wasm`
+        // point the plugin dir at a temp dir holding the hello component as `demo.wasm` + a registry
         let dir = std::env::temp_dir().join("kedi-app-pane-test");
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::copy(hello, dir.join("demo.wasm")).unwrap();
+        std::fs::write(
+            dir.join("plugins.toml"),
+            "[[plugin]]\nname = \"demo\"\ncaps = [\"dstask\"]\n",
+        )
+        .unwrap();
         // SAFETY: single-threaded test setup before any threads read the env
         unsafe { std::env::set_var("KEDI_PLUGIN_DIR", &dir) };
 

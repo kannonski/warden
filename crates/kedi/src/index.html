@@ -871,6 +871,29 @@ function spawnApp(name, x, y) {
   spawnFloat(x ?? 40 + o, y ?? 30 + o, 760, 480, name);
 }
 
+// the app launcher: fetch the installed plugins from /plugins (read from plugins.toml server-side,
+// fresh each time → no restart to see a new plugin) and show them as a clickable menu. Reuses the
+// context-menu chrome. Empty → a hint about the registry.
+async function openLauncher(x, y) {
+  let plugins = [];
+  try { plugins = await (await fetch("/plugins")).json(); } catch (_) {}
+  const m = $("ctxmenu");
+  m.innerHTML = "";
+  if (!plugins.length) {
+    const it = document.createElement("div"); it.className = "cm-item";
+    it.innerHTML = "<span>no plugins</span><span class='cm-k'>edit plugins.toml</span>";
+    m.appendChild(it);
+  }
+  for (const p of plugins) {
+    const it = document.createElement("div"); it.className = "cm-item";
+    it.innerHTML = "<span></span><span class='cm-k'></span>";
+    it.firstChild.textContent = `${p.icon || "▸"}  ${p.name}`;
+    it.addEventListener("click", () => { hideCtx(); spawnApp(p.name, x, y); });
+    m.appendChild(it);
+  }
+  m.style.cssText = `display:block;left:${x}px;top:${y}px`;
+}
+
 // ── snapping (drag-to-edge + keyboard) ──
 function snapRegion(name) {
   const c = $("canvas"), W = c.clientWidth, H = c.clientHeight, h = Math.round(W / 2), v = Math.round(H / 2);
@@ -1037,7 +1060,7 @@ $("canvas").addEventListener("contextmenu", (e) => {
   const x = e.clientX - r.left, y = e.clientY - r.top;
   const items = [
     ["new terminal here", "dbl-click", () => spawnFloat(Math.max(0, x - 100), Math.max(0, y - 60), 760, 480)],
-    ["run app: hello", "", () => spawnApp("hello", x, y)], // a WASM-TUI plugin pane (step 2 proof)
+    ["apps ▸", "", () => openLauncher(x, y)], // WASM-TUI plugins, discovered from the registry
     ["arrange grid", "C-S-g", tileGrid],
     ["audit", "", openAudit],
     ["settings", "C-S-,", () => toggleSettings(true)],

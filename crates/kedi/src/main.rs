@@ -104,6 +104,10 @@ fn serve_one(mut stream: TcpStream, pages: &Pages) {
             ),
             "application/json",
         )
+    } else if path.starts_with("/plugins") {
+        // GET /plugins — the installed WASM-TUI plugins (name + icon) from plugins.toml, for the
+        // launcher. Read fresh each request → drop a plugin in and it appears, no restart.
+        (kedi::plugins_json(), "application/json")
     } else if path.starts_with("/rec") {
         // GET /rec → current state; POST /rec?on=1|0 → flip the recording switch from the UI
         use std::sync::atomic::Ordering;
