@@ -14,6 +14,18 @@ pub struct Model {
     pub input: String,
     pub filter: String,
     pub status: String,
+    /// note editor (Mode::Note): the note as lines, plus a (row, col) cursor and the id being edited.
+    pub note: NoteEdit,
+}
+
+/// The in-place note editor's buffer + cursor. `lines` is never empty (at least one blank line so the
+/// cursor always has a home). `row`/`col` are char offsets, both clamped to the buffer on every edit.
+#[derive(Default)]
+pub struct NoteEdit {
+    pub id: i64,
+    pub lines: Vec<String>,
+    pub row: usize,
+    pub col: usize,
 }
 
 #[derive(PartialEq, Eq, Clone, Copy)]
@@ -23,6 +35,91 @@ pub enum Mode {
     Filter,
     Note,
     Modify,
+}
+
+impl NoteEdit {
+    /// Load `text` into the editor for task `id`, cursor at the end (where you resume writing).
+    pub fn open(&mut self, id: i64, text: &str) {
+        self.id = id;
+        self.lines = if text.is_empty() {
+            vec![String::new()]
+        } else {
+            text.split('\n').map(str::to_string).collect()
+        };
+        self.row = self.lines.len() - 1;
+        self.col = self.lines[self.row].chars().count();
+    }
+
+    /// The buffer as one string (what we save back). Trailing blank lines are kept as the user left
+    /// them — dstask normalizes its own whitespace.
+    pub fn text(&self) -> String {
+        self.lines.join("\n")
+    }
+
+    fn cur_len(&self) -> usize {
+        self.lines[self.row].chars().count()
+    }
+
+    /// Split the current line at the cursor into two lines; cursor moves to the start of the new line.
+    pub fn newline(&mut self) {
+        let rest: String = self.lines[self.row].chars().skip(self.col).collect();
+        let head: String = self.lines[self.row].chars().take(self.col).collect();
+        self.lines[self.row] = head;
+        self.lines.insert(self.row + 1, rest);
+        self.row += 1;
+        self.col = 0;
+    }
+
+    pub fn insert(&mut self, c: char) {
+        let line = &mut self.lines[self.row];
+        let byte = line.char_indices().nth(self.col).map(|(b, _)| b).unwrap_or(line.len());
+        line.insert(byte, c);
+        self.col += 1;
+    }
+
+    /// Delete the char before the cursor; at column 0, join with the previous line.
+    pub fn backspace(&mut self) {
+        if self.col > 0 {
+            let line = &mut self.lines[self.row];
+            let byte = line.char_indices().nth(self.col - 1).map(|(b, _)| b).unwrap_or(0);
+            line.remove(byte);
+            self.col -= 1;
+        } else if self.row > 0 {
+            let cur = self.lines.remove(self.row);
+            self.row -= 1;
+            self.col = self.cur_len();
+            self.lines[self.row].push_str(&cur);
+        }
+    }
+
+    pub fn left(&mut self) {
+        if self.col > 0 {
+            self.col -= 1;
+        } else if self.row > 0 {
+            self.row -= 1;
+            self.col = self.cur_len();
+        }
+    }
+    pub fn right(&mut self) {
+        if self.col < self.cur_len() {
+            self.col += 1;
+        } else if self.row + 1 < self.lines.len() {
+            self.row += 1;
+            self.col = 0;
+        }
+    }
+    pub fn up(&mut self) {
+        if self.row > 0 {
+            self.row -= 1;
+            self.col = self.col.min(self.cur_len());
+        }
+    }
+    pub fn down(&mut self) {
+        if self.row + 1 < self.lines.len() {
+            self.row += 1;
+            self.col = self.col.min(self.cur_len());
+        }
+    }
 }
 
 pub fn clampi(v: isize, n: usize) -> usize {
@@ -50,6 +147,7 @@ impl Model {
             input: String::new(),
             filter: String::new(),
             status: String::new(),
+            note: NoteEdit::default(),
         };
         m.reload();
         m

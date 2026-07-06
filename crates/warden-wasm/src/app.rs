@@ -329,26 +329,47 @@ mod tests {
 
     // A mock "dstask"-kind capability returning a fixed two-task JSON — so the invoke path is tested
     // hermetically (no real dstask CLI). Proves: guest host.invoke → chokepoint → this cap → back.
-    struct MockDsTask;
+    // Mutating ops (note-set, done, …) are recorded so tests can assert what the guest sent.
+    #[derive(Clone, Default)]
+    struct MockDsTask {
+        calls: std::sync::Arc<std::sync::Mutex<Vec<(String, Vec<u8>)>>>,
+    }
     #[async_trait]
     impl Capability for MockDsTask {
         fn kind(&self) -> CapKind {
             CapKind("dstask")
         }
         fn ops(&self) -> &'static [OpSpec] {
-            &[OpSpec {
-                op: "list",
-                doc: "mock",
-                mutates: false,
-            }]
+            &[
+                OpSpec { op: "list", doc: "mock", mutates: false },
+                OpSpec { op: "note-set", doc: "mock", mutates: true },
+                OpSpec { op: "note", doc: "mock", mutates: true },
+                OpSpec { op: "add", doc: "mock", mutates: true },
+                OpSpec { op: "modify", doc: "mock", mutates: true },
+                OpSpec { op: "done", doc: "mock", mutates: true },
+                OpSpec { op: "start", doc: "mock", mutates: true },
+                OpSpec { op: "stop", doc: "mock", mutates: true },
+                OpSpec { op: "list-resolved", doc: "mock", mutates: false },
+                OpSpec { op: "today", doc: "mock", mutates: false },
+            ]
         }
-        async fn perform(&self, op: &str, _input: &[u8]) -> Result<Vec<u8>> {
-            assert_eq!(op, "list");
-            // two pending tasks (bucket into NEXT / TODAY) with the fields deck reads
-            Ok(br#"[
-              {"uuid":"a","id":1,"summary":"write the report","status":"pending","priority":"P2","tags":[],"project":"work","notes":"","resolved":"0001-01-01T00:00:00Z"},
-              {"uuid":"b","id":2,"summary":"call the plumber","status":"pending","priority":"P2","tags":["now"],"project":"home","notes":"","resolved":"0001-01-01T00:00:00Z"}
-            ]"#.to_vec())
+        async fn perform(&self, op: &str, input: &[u8]) -> Result<Vec<u8>> {
+            self.calls.lock().unwrap().push((op.to_string(), input.to_vec()));
+            match op {
+                // two pending tasks (bucket into NEXT / TODAY) with the fields deck reads
+                "list" => Ok(br#"[
+                  {"uuid":"a","id":1,"summary":"write the report","status":"pending","priority":"P2","tags":[],"project":"work","notes":"","resolved":"0001-01-01T00:00:00Z"},
+                  {"uuid":"b","id":2,"summary":"call the plumber","status":"pending","priority":"P2","tags":["now"],"project":"home","notes":"","resolved":"0001-01-01T00:00:00Z"}
+                ]"#.to_vec()),
+                // resolved tasks (id 0, as dstask reports them): one stamped "today", one older. Only
+                // the today one should land in DONE.
+                "list-resolved" => Ok(br#"[
+                  {"uuid":"c","id":0,"summary":"shipped it","status":"resolved","priority":"P2","tags":[],"project":"work","notes":"","resolved":"2026-07-06T09:00:00+02:00"},
+                  {"uuid":"d","id":0,"summary":"ancient history","status":"resolved","priority":"P2","tags":[],"project":"work","notes":"","resolved":"2026-01-01T09:00:00+02:00"}
+                ]"#.to_vec()),
+                "today" => Ok(b"2026-07-06".to_vec()),
+                _ => Ok(Vec::new()),
+            }
         }
         fn revoke(&self) {}
     }
@@ -360,7 +381,7 @@ mod tests {
             return;
         };
         // grant the app a dstask capability; the guest calls host.invoke("dstask","list") on init
-        let cap = AppCap::spawn(&path, vec![Box::new(MockDsTask)]).expect("spawn app with caps");
+        let cap = AppCap::spawn(&path, vec![Box::new(MockDsTask::default())]).expect("spawn app with caps");
         let mut frames = cap.output().expect("output");
         let first = frames.next().await.expect("frame after init");
         let text = String::from_utf8_lossy(&first);
@@ -389,7 +410,7 @@ mod tests {
             );
             return;
         };
-        let cap = AppCap::spawn(&path, vec![Box::new(MockDsTask)]).expect("spawn deck");
+        let cap = AppCap::spawn(&path, vec![Box::new(MockDsTask::default())]).expect("spawn deck");
         let mut frames = cap.output().expect("output");
         // resize to a real board size so ratatui has room to lay out the columns
         cap.perform("resize", b"120x40").await.expect("resize");
@@ -419,5 +440,49 @@ mod tests {
             latest.contains("call the pl"),
             "TODAY task (call the plumber) missing"
         );
+        // DONE = resolved-today only: "shipped it" (resolved 2026-07-06, matches the mock `today`) is
+        // in; "ancient history" (resolved January) is filtered out. This is the reappearing-done fix.
+        assert!(
+            latest.contains("shipped it"),
+            "DONE task resolved today (shipped it) missing"
+        );
+        assert!(
+            !latest.contains("ancient history"),
+            "DONE showed a task NOT resolved today (the reappearing-done bug): {latest:?}"
+        );
+    }
+
+    // The note editor end to end: N opens the in-place editor on the cursor card, typed keys build a
+    // multi-line buffer, Esc saves it via the `note-set` op. Assert the guest sent the full blob (with
+    // the id on the first line and a newline from Enter) through the governed capability.
+    #[tokio::test]
+    async fn deck_note_editor_saves_via_note_set() {
+        let Some(path) = deck_wasm() else {
+            eprintln!("skip: build guest-deck first (cargo build --release --target wasm32-wasip2)");
+            return;
+        };
+        let mock = MockDsTask::default();
+        let calls = mock.calls.clone();
+        let cap = AppCap::spawn(&path, vec![Box::new(mock)]).expect("spawn deck");
+        let _frames = cap.output().expect("output");
+        cap.perform("resize", b"120x40").await.expect("resize");
+
+        // cursor starts on the first (TODAY) card. Open the note editor, type "hi", Enter, "there".
+        for k in ["N", "h", "i", "\r", "t", "h", "e", "r", "e"] {
+            cap.perform("key", k.as_bytes()).await.expect("key");
+        }
+        // Esc saves; give the worker a beat to run note-set + the reload's list.
+        cap.perform("key", b"\x1b").await.expect("esc");
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+        let recorded = calls.lock().unwrap().clone();
+        let note_set = recorded
+            .iter()
+            .find(|(op, _)| op == "note-set")
+            .unwrap_or_else(|| panic!("no note-set recorded; calls were: {:?}",
+                recorded.iter().map(|(o, _)| o).collect::<Vec<_>>()));
+        let payload = String::from_utf8_lossy(&note_set.1);
+        // the TODAY card is id 2 ("call the plumber", +now); the blob is "<id>\nhi\nthere".
+        assert_eq!(payload, "2\nhi\nthere", "note-set payload wrong: {payload:?}");
     }
 }

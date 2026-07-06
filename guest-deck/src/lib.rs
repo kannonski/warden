@@ -13,6 +13,7 @@ mod task;
 mod view;
 
 use crate::kedi::app::host;
+use crate::task::Task;
 use model::{Mode, Model};
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
@@ -67,10 +68,10 @@ impl Guest for Deck {
         STATE.with(|s| {
             let mut guard = s.borrow_mut();
             let Some(st) = guard.as_mut() else { return };
-            if st.model.mode == Mode::Nav {
-                keep = on_nav_key(&mut st.model, k);
-            } else {
-                on_input_key(&mut st.model, k);
+            match st.model.mode {
+                Mode::Nav => keep = on_nav_key(&mut st.model, k),
+                Mode::Note => on_note_key(&mut st.model, k),
+                _ => on_input_key(&mut st.model, k),
             }
             if keep {
                 paint(st);
@@ -114,7 +115,8 @@ fn on_nav_key(m: &mut Model, k: Key) -> bool {
         // drag the card across columns (retag / resolve based on the target)
         Key::Text('H') => drag(m, -1),
         Key::Text('L') => drag(m, 1),
-        // do
+        // do — actions below act on the cursor card by id, which resolved (DONE) cards don't have
+        // (dstask reports id 0 for them), so `actionable` gates them out.
         Key::Text('d') => {
             if let Some(id) = cur_id(m) {
                 dstask_do(m, "done", &id.to_string(), "✓ done");
@@ -122,7 +124,7 @@ fn on_nav_key(m: &mut Model, k: Key) -> bool {
         }
         Key::Text('n') => {
             // toggle today (+now / -now)
-            if let Some(t) = m.selected() {
+            if let Some(t) = actionable(m) {
                 let (op, args, msg) = if t.has_tag("now") {
                     ("modify", format!("{} -now", t.id), "○ off today")
                 } else {
@@ -132,7 +134,7 @@ fn on_nav_key(m: &mut Model, k: Key) -> bool {
             }
         }
         Key::Text('s') => {
-            if let Some(t) = m.selected() {
+            if let Some(t) = actionable(m) {
                 let (op, id, msg) = if t.status == "active" {
                     ("stop", t.id, "⏸ stopped")
                 } else {
@@ -144,13 +146,9 @@ fn on_nav_key(m: &mut Model, k: Key) -> bool {
         // input modes
         Key::Text('a') => enter_mode(m, Mode::Add),
         Key::Text('/') => enter_mode(m, Mode::Filter),
-        Key::Text('N') => {
-            if m.selected().is_some() {
-                enter_mode(m, Mode::Note);
-            }
-        }
+        Key::Text('N') => open_note_editor(m),
         Key::Text('m') => {
-            if m.selected().is_some() {
+            if actionable(m).is_some() {
                 enter_mode(m, Mode::Modify);
             }
         }
@@ -196,6 +194,52 @@ fn enter_mode(m: &mut Model, mode: Mode) {
     m.input.clear();
 }
 
+/// Open the in-place note editor for the selected card. The note blob is already in the loaded task
+/// (dstask's `list` JSON carries `notes`), so we edit that directly — no extra capability round-trip.
+/// No selection → no-op.
+fn open_note_editor(m: &mut Model) {
+    let Some(t) = actionable(m) else { return }; // resolved cards have id 0 → note-set can't target them
+    let (id, text) = (t.id, t.notes.clone());
+    m.note.open(id, &text);
+    m.mode = Mode::Note;
+}
+
+/// Note-editor keys: a real multi-line editor. Esc saves the whole blob back (note-set), Ctrl+C
+/// discards. Everything else edits the buffer in place; the detail pane renders it live.
+fn on_note_key(m: &mut Model, k: Key) {
+    match k {
+        Key::Escape => {
+            let (id, body) = (m.note.id, m.note.text());
+            m.mode = Mode::Nav;
+            let payload = format!("{id}\n{body}");
+            match host::invoke("dstask", "note-set", payload.as_bytes()) {
+                Ok(_) => {
+                    m.reload();
+                    m.status = "📝 note saved".into();
+                }
+                Err(e) => m.status = format!("⚠ {e}"),
+            }
+        }
+        Key::Text('\u{3}') => {
+            // Ctrl+C — discard, back to nav without saving
+            m.mode = Mode::Nav;
+            m.status = "note discarded".into();
+        }
+        Key::Enter => m.note.newline(),
+        Key::Backspace => m.note.backspace(),
+        Key::Left => m.note.left(),
+        Key::Right => m.note.right(),
+        Key::Up => m.note.up(),
+        Key::Down => m.note.down(),
+        Key::Tab => {
+            m.note.insert(' ');
+            m.note.insert(' ');
+        }
+        Key::Text(c) if !c.is_control() => m.note.insert(c),
+        _ => {}
+    }
+}
+
 fn commit_input(m: &mut Model) {
     let text = m.input.trim().to_string();
     let mode = m.mode;
@@ -211,11 +255,8 @@ fn commit_input(m: &mut Model) {
                 dstask_do(m, "modify", &format!("{id} {text}"), "✎ modified");
             }
         }
-        Mode::Note => {
-            if let Some(id) = cur_id(m) {
-                dstask_do(m, "note", &format!("{id} {text}"), "📝 noted");
-            }
-        }
+        // Note never reaches commit_input — the editor handles its own keys in on_note_key.
+        Mode::Note => {}
         Mode::Filter => {
             m.filter = text;
             m.card = model::clampi(m.card as isize, m.visn());
@@ -225,14 +266,20 @@ fn commit_input(m: &mut Model) {
     }
 }
 
+/// The selected card, but only if it's actionable — resolved (DONE) cards aren't: dstask reports them
+/// with id 0, so any by-id op would hit the wrong task. Guards all the mutating nav keys.
+fn actionable(m: &Model) -> Option<&Task> {
+    m.selected().filter(|t| t.status != "resolved")
+}
+
 fn cur_id(m: &Model) -> Option<i64> {
-    m.selected().map(|t| t.id)
+    actionable(m).map(|t| t.id)
 }
 
 /// Drag the selected card `d` columns over: derive the dstask change from the target column
 /// (TODAY → +now, WAITING → +waiting, NEXT → clear both, DONE → resolve). Mirrors deck's H/L.
 fn drag(m: &mut Model, d: isize) {
-    let Some(t) = m.selected() else { return };
+    let Some(t) = actionable(m) else { return }; // can't drag a resolved card (no id)
     let (id, from) = (t.id, m.col);
     let to = model::clampi(from as isize + d, m.cols.len());
     if to == from {

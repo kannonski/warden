@@ -43,11 +43,10 @@ impl Task {
             _ => "",
         }
     }
-    pub fn resolved_today(&self) -> bool {
-        // dstask stamps resolved as an RFC3339 date; "today" = same YYYY-MM-DD as now. We don't have
-        // a clock in the sandbox, so treat any resolved task as DONE-column material and let the host
-        // filter by recency later; for now "resolved and not the zero date" counts.
-        self.status == "resolved" && !self.resolved.starts_with("0001")
+    /// Was this resolved on `today` (a `YYYY-MM-DD` string the host supplies — the sandbox has no
+    /// clock)? dstask stamps `resolved` as a local RFC3339 timestamp, so a date-prefix match is "today".
+    pub fn resolved_today(&self, today: &str) -> bool {
+        !today.is_empty() && self.resolved.starts_with(today)
     }
 }
 
@@ -58,23 +57,24 @@ pub struct Column {
     pub cards: Vec<Task>,
 }
 
-/// Load all tasks via the dstask capability and bucket them into columns:
-///   TODAY (+now) · NEXT (actionable pool, P3 hidden) · WAITING (+waiting) · DONE (resolved).
-/// Returns the four columns. On a capability error, returns empty columns (the UI shows the error).
+/// Load tasks via the dstask capability and bucket them into columns:
+///   TODAY (+now) · NEXT (actionable pool, P3 hidden) · WAITING (+waiting) · DONE (resolved today).
+///
+/// The DONE column is fed from a SEPARATE `list-resolved` op: the bare `list` returns only open tasks
+/// (pending/paused), never resolved ones — so DONE has to come from `dstask show-resolved`, filtered
+/// to today by a date the host supplies (`today` op — the sandbox has no clock). Without this, DONE
+/// was always empty and resolved cards appeared to "come back" on reload.
+/// On a capability error, returns empty columns (the UI shows the error).
 pub fn load() -> Result<Vec<Column>, String> {
     let json = host::invoke("dstask", "list", &[])?;
-    let tasks: Vec<Task> = serde_json::from_slice(&json).map_err(|e| format!("parse dstask json: {e}"))?;
+    let open: Vec<Task> = serde_json::from_slice(&json).map_err(|e| format!("parse dstask json: {e}"))?;
 
     let mut today = Vec::new();
     let mut next = Vec::new();
     let mut waiting = Vec::new();
-    let mut done = Vec::new();
-    for t in tasks {
+    for t in open {
         if t.status == "resolved" {
-            if t.resolved_today() {
-                done.push(t);
-            }
-            continue;
+            continue; // open list shouldn't carry these, but be defensive
         }
         if t.has_tag("now") {
             today.push(t);
@@ -85,6 +85,23 @@ pub fn load() -> Result<Vec<Column>, String> {
             next.push(t);
         }
     }
+
+    // DONE: resolved tasks stamped today. `today`/`list-resolved` failing is non-fatal — better an
+    // empty DONE than no board — so we fall back to empty rather than propagate the error.
+    let today_date = host::invoke("dstask", "today", &[])
+        .map(|b| String::from_utf8_lossy(&b).trim().to_string())
+        .unwrap_or_default();
+    let done = host::invoke("dstask", "list-resolved", &[])
+        .ok()
+        .and_then(|b| serde_json::from_slice::<Vec<Task>>(&b).ok())
+        .map(|resolved| {
+            resolved
+                .into_iter()
+                .filter(|t| t.resolved_today(&today_date))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+
     Ok(vec![
         Column { title: "TODAY", accent: 212, cards: today },
         Column { title: "NEXT", accent: 117, cards: next },

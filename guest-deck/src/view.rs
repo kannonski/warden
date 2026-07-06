@@ -77,23 +77,29 @@ fn render_board(f: &mut Frame, m: &Model, area: Rect) {
     }
 }
 
-/// One card = two lines: `id summary` and an indented meta line (project · state).
+/// One card = two lines: `id summary` and an indented meta line (project · state). Resolved (DONE)
+/// cards have no dstask id, so they lead with a ✓ instead of the id number.
 fn card_item<'a>(t: &'a crate::task::Task, w: usize) -> ListItem<'a> {
     let sum_w = w.saturating_sub(6).max(4);
     let mut meta = t.project.clone();
     if !t.state().is_empty() {
         meta = format!("{meta} · {}", t.state());
     }
+    let resolved = t.status == "resolved";
     let sum_style = if t.status == "active" {
         Style::default().fg(Color::Indexed(213)).add_modifier(Modifier::BOLD)
+    } else if resolved {
+        Style::default().fg(DIM)
     } else {
         Style::default().fg(Color::Reset)
     };
+    let lead = if resolved {
+        Span::styled("  ✓ ", Style::default().fg(Color::Indexed(120)))
+    } else {
+        Span::styled(format!("{:>3} ", t.id), Style::default().fg(ID))
+    };
     ListItem::new(vec![
-        Line::from(vec![
-            Span::styled(format!("{:>3} ", t.id), Style::default().fg(ID)),
-            Span::styled(trunc(&t.summary, sum_w), sum_style),
-        ]),
+        Line::from(vec![lead, Span::styled(trunc(&t.summary, sum_w), sum_style)]),
         Line::from(Span::styled(
             format!("    {}", trunc(&meta, w.saturating_sub(4))),
             Style::default().fg(DIM),
@@ -102,6 +108,10 @@ fn card_item<'a>(t: &'a crate::task::Task, w: usize) -> ListItem<'a> {
 }
 
 fn render_detail(f: &mut Frame, m: &Model, area: Rect) {
+    if m.mode == Mode::Note {
+        render_note_editor(f, m, area);
+        return;
+    }
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
@@ -134,13 +144,54 @@ fn render_detail(f: &mut Frame, m: &Model, area: Rect) {
     f.render_widget(Paragraph::new(body).block(block).wrap(Wrap { trim: false }), area);
 }
 
+/// The in-place note editor: the note buffer with a block cursor at (row, col), scrolled so the
+/// cursor stays visible. Accent border + "editing note" title so it reads as a distinct mode.
+fn render_note_editor(f: &mut Frame, m: &Model, area: Rect) {
+    let ne = &m.note;
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(SEL))
+        .title(Span::styled(" editing note ", Style::default().fg(SEL).add_modifier(Modifier::BOLD)));
+
+    // vertical scroll: keep the cursor row inside the visible window (area minus the 2 border rows).
+    let view_h = area.height.saturating_sub(2).max(1) as usize;
+    let top = ne.row.saturating_sub(view_h.saturating_sub(1));
+
+    let mut lines: Vec<Line> = Vec::with_capacity(view_h);
+    for (i, raw) in ne.lines.iter().enumerate().skip(top).take(view_h) {
+        if i == ne.row {
+            lines.push(cursor_line(raw, ne.col));
+        } else {
+            lines.push(Line::from(Span::styled(raw.clone(), Style::default().fg(Color::Reset))));
+        }
+    }
+    f.render_widget(Paragraph::new(lines).block(block).wrap(Wrap { trim: false }), area);
+}
+
+/// One editor line with a reversed block cursor at char offset `col` (drawn on the char there, or a
+/// trailing space when the cursor sits past the end of the line).
+fn cursor_line(s: &str, col: usize) -> Line<'static> {
+    let chars: Vec<char> = s.chars().collect();
+    let cur = Style::default().add_modifier(Modifier::REVERSED);
+    let plain = Style::default().fg(Color::Reset);
+    let before: String = chars.iter().take(col).collect();
+    let at: String = chars.get(col).map(|c| c.to_string()).unwrap_or_else(|| " ".into());
+    let after: String = chars.iter().skip(col + 1).collect();
+    Line::from(vec![
+        Span::styled(before, plain),
+        Span::styled(at, cur),
+        Span::styled(after, plain),
+    ])
+}
+
 fn render_footer(f: &mut Frame, m: &Model, area: Rect) {
     let line = match m.mode {
         Mode::Nav => {
             if !m.status.is_empty() {
                 Line::from(Span::styled(format!("  {}", m.status), Style::default().fg(SEL)))
             } else {
-                let hints = "h/l/j/k move · H/L drag · a add · d done · n today · / filter · q quit";
+                let hints = "hjkl move · HL drag · a add · d done · n today · N note · / filter · q quit";
                 let mut spans = vec![Span::styled(format!("  {hints}"), Style::default().fg(DIM))];
                 if !m.filter.is_empty() {
                     spans.insert(0, Span::styled(format!("⦿ {}  ", m.filter), Style::default().fg(SEL)));
@@ -148,13 +199,23 @@ fn render_footer(f: &mut Frame, m: &Model, area: Rect) {
                 Line::from(spans)
             }
         }
+        Mode::Note => {
+            // the note editor is multi-line (rendered in the detail pane); the footer is just the hint.
+            Line::from(vec![
+                Span::styled("  note ▸ ", Style::default().fg(SEL).add_modifier(Modifier::BOLD)),
+                Span::styled(
+                    format!("#{}  ", m.note.id),
+                    Style::default().fg(Color::Indexed(117)),
+                ),
+                Span::styled("enter newline · esc save · ^c discard", Style::default().fg(DIM)),
+            ])
+        }
         mode => {
             let (label, hint) = match mode {
                 Mode::Add => ("add", "enter add · esc cancel"),
                 Mode::Filter => ("filter", "enter apply · esc clear"),
-                Mode::Note => ("note", "enter save · esc cancel"),
                 Mode::Modify => ("modify", "+tag -tag P1 project:x · enter · esc"),
-                Mode::Nav => unreachable!(),
+                Mode::Note | Mode::Nav => unreachable!(),
             };
             Line::from(vec![
                 Span::styled(format!("  {label} ▸ "), Style::default().fg(SEL).add_modifier(Modifier::BOLD)),
