@@ -32,6 +32,11 @@ pub const APP: CapKind = CapKind("app");
 
 const OPS: &[OpSpec] = &[
     OpSpec {
+        op: "input",
+        doc: "deliver a keystroke to the app (utf-8; alias of `key`, so a pane's attach loop is cap-agnostic)",
+        mutates: true,
+    },
+    OpSpec {
         op: "key",
         doc: "deliver a keystroke to the app (utf-8 bytes; see the key mapping)",
         mutates: true,
@@ -121,7 +126,9 @@ impl Capability for AppCap {
             }
         };
         match op {
-            "key" => {
+            // `input` is the pty's op name; accept it as an alias for `key` so a kedi pane's attach
+            // loop drives a pty or an app identically (it just forwards `input` frames).
+            "key" | "input" => {
                 let s = std::str::from_utf8(input)
                     .map_err(|e| WardenError::Cap(format!("key utf8: {e}")))?;
                 send(AppMsg::Key(s.to_string()))

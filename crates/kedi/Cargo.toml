@@ -17,6 +17,7 @@ tokio-stream = "0.1"
 warden-core = { path = "../warden-core" }
 warden-host = { path = "../warden-host" }
 warden-caps = { path = "../warden-caps" }
+warden-wasm = { path = "../warden-wasm" }
 warden-record = { path = "../warden-record" }
 wtransport = "0.7"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "io-util"] }

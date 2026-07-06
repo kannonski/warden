@@ -3,11 +3,14 @@
 //! Browser ↔ kedi is **QUIC via WebTransport** (HTTP/3): the only way a browser speaks QUIC. A tiny
 //! HTTP server hands out the xterm.js page (with the self-signed cert's SHA-256 for the browser's
 //! `serverCertificateHashes`); the terminal I/O rides a WebTransport bidi stream. Each connection
-//! opens a warden **`pty` capability**, so the shell's output is streamed and recorded exactly like
-//! any governed capability — and the browser's live view IS that governed stream.
+//! opens a warden capability — a **`pty`** (a shell) or, for a plugin pane, an **`app`** (a WASM-TUI
+//! component; send `{"app":"name"}` before the hello). Either way its output is streamed and recorded
+//! exactly like any governed capability — the browser's live view IS that governed stream, and the
+//! attach loop drives both the same way.
 //!
 //! Wire on the bidi stream: client→server is newline JSON control (`{"input":"…"}` /
-//! `{"resize":[cols,rows]}`); server→client is the raw pty output bytes → `term.write()`.
+//! `{"resize":[cols,rows]}` / optional `{"app":"name"}`); server→client is the raw output bytes →
+//! `term.write()` (a shell's bytes, or a WASM app's rendered frames).
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -20,6 +23,7 @@ use warden_core::{
     SessionId, Verdict, Warden, WardenError,
 };
 use warden_host::{Manifest, plugin};
+use warden_wasm::{APP, AppBroker};
 use wtransport::{Endpoint, Identity, ServerConfig};
 
 // DLP (output masking) intentionally NOT wired here. The spike's literal-secret masker was a demo
@@ -147,6 +151,11 @@ pub fn terminal_warden(
         plugin(Manifest::new("pty").provides(&["cap:pty"]), |reg| {
             reg.add::<dyn warden_core::Broker>(Arc::new(PtyBroker));
         }),
+        // WASM-TUI plugin panes: a pane whose capability is an `app` (a kedi:app component) instead
+        // of a pty. Same governed machinery; the "shell" is a WASM app.
+        plugin(Manifest::new("app").provides(&["cap:app"]), |reg| {
+            reg.add::<dyn warden_core::Broker>(Arc::new(AppBroker));
+        }),
         plugin(
             Manifest::new("local-runtime").provides(&["runtime:local"]),
             |reg| {
@@ -259,11 +268,33 @@ pub fn wt_server(
     Endpoint::server(config)
 }
 
+/// Resolve a plugin name → an installed `kedi:app` `.wasm` component. Looks in the plugin dir
+/// (`$KEDI_PLUGIN_DIR`, else `$XDG_CONFIG_HOME/kedi/plugins`, else `~/.config/kedi/plugins`);
+/// returns `None` if there's no such component, so an unknown app just falls back to a shell pane.
+fn resolve_app(name: &str) -> Option<String> {
+    let dir = std::env::var("KEDI_PLUGIN_DIR")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| {
+            let cfg = std::env::var("XDG_CONFIG_HOME")
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(|_| {
+                    std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default())
+                        .join(".config")
+                });
+            cfg.join("kedi/plugins")
+        });
+    let p = dir.join(format!("{name}.wasm"));
+    p.exists().then(|| p.to_string_lossy().into_owned())
+}
+
 /// A control message from the browser on a pane's stream.
 enum ClientMsg {
     /// The client's introduction, first line on the stream: the *claimed* identity for this
     /// session (attribution, not authentication).
     Hello(String),
+    /// Open this pane as a WASM app (a `kedi:app` plugin) by name, instead of a shell. Sent with (or
+    /// just after) the hello. The name resolves to an installed `.wasm` component (see `app_path`).
+    App(String),
     Frame(InputFrame),
     /// The kill button: record an attributed kill + terminate this pane's session.
     Kill(String),
@@ -275,6 +306,17 @@ fn parse_msg(line: &[u8]) -> Option<ClientMsg> {
         // sanitize: printable, bounded — it lands in the audit record
         let who: String = w.chars().filter(|c| !c.is_control()).take(48).collect();
         return Some(ClientMsg::Hello(who));
+    }
+    if let Some(name) = v.get("app").and_then(|x| x.as_str()) {
+        // a plugin name: [a-z0-9_-], bounded — resolved to an installed .wasm by `app_path`
+        let name: String = name
+            .chars()
+            .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
+            .take(64)
+            .collect();
+        if !name.is_empty() {
+            return Some(ClientMsg::App(name));
+        }
     }
     if let Some(s) = v.get("input").and_then(|x| x.as_str()) {
         return Some(ClientMsg::Frame(InputFrame {
@@ -405,6 +447,7 @@ async fn pane_session(
     let mut tmp = [0u8; 4096];
     let mut identity = String::from("browser");
     let mut pending: Vec<InputFrame> = Vec::new();
+    let mut app_path: Option<String> = None; // Some → this pane is a WASM app, not a shell
     'intro: loop {
         match recv.read(&mut tmp).await {
             Ok(Some(n)) if n > 0 => {
@@ -412,6 +455,9 @@ async fn pane_session(
                 while let Some(p) = buf.iter().position(|&b| b == b'\n') {
                     let line: Vec<u8> = buf.drain(..=p).collect();
                     match parse_msg(&line[..line.len() - 1]) {
+                        // an {"app":"name"} frame selects a plugin pane; it can arrive before or with
+                        // the hello, so record it and keep reading until the hello ends the intro.
+                        Some(ClientMsg::App(name)) => app_path = resolve_app(&name),
                         Some(ClientMsg::Hello(who)) if !who.trim().is_empty() => {
                             identity = who;
                             break 'intro;
@@ -433,11 +479,18 @@ async fn pane_session(
     // Async now — it *awaits* the next input frame (no polling → no typing latency), and a short
     // ticker rides alongside via `select!` so the loop still tears down promptly when the shell
     // exits (Ctrl-D) or an operator kills the session, not only on the next keystroke.
+    // A pane hosts EITHER a shell (pty) or a WASM app — the same attach loop drives both, because it
+    // grabs whichever single capability the session was granted and forwards `input`/`resize` frames
+    // (an app accepts `input` as an alias for a keystroke). `app_path` selects the app: `None` → a
+    // pty running `command`; `Some(path)` → an `app` capability on that .wasm component.
     let action = Action {
         name: "attach".into(),
         source: ActionSource::InProcess(warden_core::action_fn(|ctx: &Ctx| {
             Box::pin(async move {
-                let pty = ctx.cap(PTY).ok_or(WardenError::Cap("no pty".into()))?;
+                // the session holds exactly one capability (pty or app) — take it kind-agnostically
+                let cap = ctx
+                    .first_cap()
+                    .ok_or(WardenError::Cap("no capability granted".into()))?;
                 let mut input = ctx
                     .take_input()
                     .ok_or(WardenError::Cap("no input channel".into()))?;
@@ -447,18 +500,17 @@ async fn pane_session(
                     tokio::select! {
                         frame = input.next() => match frame {
                             Some(frame) => {
-                                let out = ctx.invoke(pty, &frame.op, frame.data).await?;
-                                // `paste-image` writes the image to a file and returns its path; type
-                                // that path at the prompt (as a governed `input`) so the user can act
-                                // on it. Every step still crosses the chokepoint.
+                                let out = ctx.invoke(cap, &frame.op, frame.data).await?;
+                                // pty-only: `paste-image` writes the image and returns its path; type
+                                // it at the prompt. (An app never sends this op.) Still chokepointed.
                                 if frame.op == "paste-image" && !out.is_empty() {
-                                    ctx.invoke(pty, "input", out).await?;
+                                    ctx.invoke(cap, "input", out).await?;
                                 }
                             }
                             None => break, // client gone (input stream closed)
                         },
                         _ = tick.tick() => {
-                            if ctx.finished(pty) || ctx.killed() { break; }
+                            if ctx.finished(cap) || ctx.killed() { break; }
                         }
                     }
                 }
@@ -466,13 +518,20 @@ async fn pane_session(
             })
         })),
     };
+    let request = match &app_path {
+        Some(path) => CapRequest {
+            kind: APP,
+            arg: path.clone(),
+        },
+        None => CapRequest {
+            kind: PTY,
+            arg: command,
+        },
+    };
     let session = Session {
         id: SessionId(sid),
         identity,
-        requests: vec![CapRequest {
-            kind: PTY,
-            arg: command,
-        }],
+        requests: vec![request],
         action,
     };
     // if the session ends in an error (e.g. policy deny), tell the human why before the pane closes
@@ -531,7 +590,8 @@ async fn pane_session(
                     warden_kill.kill(SessionId(sid), &by);
                     return;
                 }
-                Some(ClientMsg::Hello(_)) | None => {} // late hello: identity is set at open, ignore
+                // late hello/app are ignored — identity and pane kind are fixed at open
+                Some(ClientMsg::Hello(_)) | Some(ClientMsg::App(_)) | None => {}
             }
         }
         match recv.read(&mut tmp).await {
@@ -606,6 +666,80 @@ mod tests {
         assert!(
             out.contains("hello world"),
             "expected the echoed line over WebTransport, got: {out:?}"
+        );
+    }
+
+    // Step 2 proof: a pane requested as a WASM app renders the guest's frames over WebTransport —
+    // the whole plugin path end to end (client `{"app":..}` → app capability → frames → browser),
+    // governed exactly like the pty pane above. Skips if the hello component isn't built.
+    #[tokio::test]
+    async fn webtransport_app_pane_streams_wasm_frames() {
+        let hello = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../guest-app/target/wasm32-wasip2/release/kedi_app_hello.wasm"
+        );
+        if !std::path::Path::new(hello).exists() {
+            eprintln!("skip: build guest-app first (cargo build --release --target wasm32-wasip2)");
+            return;
+        }
+        // point the plugin dir at a temp dir holding the hello component as `demo.wasm`
+        let dir = std::env::temp_dir().join("kedi-app-pane-test");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::copy(hello, dir.join("demo.wasm")).unwrap();
+        // SAFETY: single-threaded test setup before any threads read the env
+        unsafe { std::env::set_var("KEDI_PLUGIN_DIR", &dir) };
+
+        let warden = Arc::new(
+            terminal_warden("/tmp/kedi-app-test.jsonl", true, vec![])
+                .unwrap()
+                .0,
+        );
+        let (identity, hash) = wt_identity("localhost");
+        let endpoint = wt_server(identity, "127.0.0.1:0".parse().unwrap()).unwrap();
+        let port = endpoint.local_addr().unwrap().port();
+        tokio::spawn(serve(endpoint, warden, "cat".into()));
+
+        let client = Endpoint::client(
+            ClientConfig::builder()
+                .with_bind_default()
+                .with_server_certificate_hashes([wtransport::tls::Sha256Digest::new(hash)])
+                .build(),
+        )
+        .unwrap();
+        let step = std::time::Duration::from_secs(6);
+        let conn = tokio::time::timeout(
+            step,
+            client.connect(format!("https://127.0.0.1:{port}/pty")),
+        )
+        .await
+        .expect("connect timed out")
+        .unwrap();
+        let (mut send, mut recv) =
+            tokio::time::timeout(step, async { conn.open_bi().await.unwrap().await.unwrap() })
+                .await
+                .expect("open_bi timed out");
+
+        // open this pane as the `demo` WASM app (before the hello), then introduce
+        send.write_all(b"{\"app\":\"demo\"}\n").await.unwrap();
+        send.write_all(b"{\"hello\":\"carol\"}\n").await.unwrap();
+
+        let got: std::sync::Arc<std::sync::Mutex<Vec<u8>>> = Default::default();
+        let got2 = got.clone();
+        let _ = tokio::time::timeout(std::time::Duration::from_millis(800), async move {
+            let mut tmp = [0u8; 4096];
+            loop {
+                match recv.read(&mut tmp).await {
+                    Ok(Some(n)) if n > 0 => got2.lock().unwrap().extend_from_slice(&tmp[..n]),
+                    _ => break,
+                }
+            }
+        })
+        .await;
+
+        let out = String::from_utf8_lossy(&got.lock().unwrap()).into_owned();
+        assert!(
+            out.contains("hello from a kedi WASM app"),
+            "expected the WASM app's frame over WebTransport, got: {out:?}"
         );
     }
 

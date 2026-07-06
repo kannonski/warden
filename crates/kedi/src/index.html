@@ -700,7 +700,7 @@ function zoom(dir) {
   if (!$("settings").classList.contains("hide")) syncSettingsForm();
 }
 
-async function makePane() {
+async function makePane(app) {
   const wrapper = document.createElement("div"); wrapper.className = "pane";
   const bar = document.createElement("div"); bar.className = "panebar";
   const title = document.createElement("span"); title.className = "ptitle";
@@ -791,6 +791,7 @@ async function makePane() {
 
   const stream = await wt.createBidirectionalStream();
   pane.writer = stream.writable.getWriter();
+  if (app) { pane.app = app; pane.send({ app }); } // a plugin pane: request the WASM app before hello
   pane.send({ hello: WHO }); // introduce the claimed identity — first line on the stream
   const reader = stream.readable.getReader();
   (async () => {
@@ -830,8 +831,8 @@ function closePane(p) {
 }
 
 // ── float windows ──
-function spawnFloat(x, y, w, h) {
-  makePane().then((pane) => {
+function spawnFloat(x, y, w, h, app) {
+  makePane(app).then((pane) => {
     const win = document.createElement("div");
     win.className = "floatwin";
     win.style.cssText = `left:${x}px;top:${y}px;width:${w}px;height:${h}px;z-index:${++zTop}`;
@@ -863,6 +864,12 @@ function spawnFloat(x, y, w, h) {
   });
 }
 function spawnFloatCascade() { const o = (cascade++ % 6) * 30; spawnFloat(40 + o, 30 + o, 760, 480); }
+// open a floating pane hosting a WASM-TUI plugin (kedi:app) by name; falls back to a shell pane
+// server-side if the app isn't installed. `x`/`y` optional (cascades if absent).
+function spawnApp(name, x, y) {
+  const o = (cascade++ % 6) * 30;
+  spawnFloat(x ?? 40 + o, y ?? 30 + o, 760, 480, name);
+}
 
 // ── snapping (drag-to-edge + keyboard) ──
 function snapRegion(name) {
@@ -1030,6 +1037,7 @@ $("canvas").addEventListener("contextmenu", (e) => {
   const x = e.clientX - r.left, y = e.clientY - r.top;
   const items = [
     ["new terminal here", "dbl-click", () => spawnFloat(Math.max(0, x - 100), Math.max(0, y - 60), 760, 480)],
+    ["run app: hello", "", () => spawnApp("hello", x, y)], // a WASM-TUI plugin pane (step 2 proof)
     ["arrange grid", "C-S-g", tileGrid],
     ["audit", "", openAudit],
     ["settings", "C-S-,", () => toggleSettings(true)],

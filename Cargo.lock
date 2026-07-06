@@ -1256,6 +1256,7 @@ dependencies = [
  "warden-core",
  "warden-host",
  "warden-record",
+ "warden-wasm",
  "wtransport",
 ]
 
