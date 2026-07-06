@@ -16,6 +16,21 @@ thread_local! {
     static KEYS: RefCell<u32> = const { RefCell::new(0) };
 }
 
+/// Count tasks by calling the governed `dstask` capability through `host.invoke`. Proves the whole
+/// chain: guest → host.invoke → warden chokepoint → DsTaskCap → the dstask CLI → JSON back. If the
+/// capability wasn't granted (a plain app pane), invoke returns Err and we show "no dstask".
+fn dstask_count() -> String {
+    match host::invoke("dstask", "list", &[]) {
+        Ok(json) => {
+            let text = String::from_utf8_lossy(&json);
+            // count top-level task objects without a JSON dep: number of `"uuid":` keys
+            let n = text.matches("\"uuid\":").count();
+            format!("dstask: {n} tasks (via a governed capability)")
+        }
+        Err(e) => format!("dstask: {e}"),
+    }
+}
+
 /// Paint the screen: clear, home the cursor, draw a centered-ish greeting. ANSI only — the host
 /// forwards this string straight to the pane (it becomes one governed `Event::Output` frame).
 fn paint() {
@@ -26,6 +41,7 @@ fn paint() {
     let title = "🐱  hello from a kedi WASM app";
     let sub = format!("running in a governed pane · {cols}×{rows} · keys: {keys}");
     let hint = "press any key (counts) · q or Esc to close";
+    let tasks = dstask_count();
     // rough vertical centering
     let top = (rows / 2).saturating_sub(2);
     for _ in 0..top {
@@ -34,6 +50,7 @@ fn paint() {
     let pad = |t: &str| " ".repeat((cols as usize).saturating_sub(t.chars().count()) / 2);
     s.push_str(&format!("\x1b[1;35m{}{title}\x1b[0m\r\n", pad(title)));
     s.push_str(&format!("\x1b[2m{}{sub}\x1b[0m\r\n\r\n", pad(&sub)));
+    s.push_str(&format!("\x1b[32m{}{tasks}\x1b[0m\r\n\r\n", pad(&tasks)));
     s.push_str(&format!("\x1b[36m{}{hint}\x1b[0m", pad(hint)));
     host::render(&s);
 }

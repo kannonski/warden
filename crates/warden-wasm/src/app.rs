@@ -66,12 +66,14 @@ pub struct AppCap {
     exited: Arc<AtomicBool>,           // set when the guest quit (on-key/on-tick returned false)
 }
 
-/// wasmtime store data: WASI (the component's std needs it) + the frame sender + a quit flag so the
-/// `host.render`/`host.invoke` callbacks can reach the outside world.
+/// wasmtime store data: WASI (the component's std needs it), the frame sender, and the app's granted
+/// capabilities so `host.invoke` can reach the world through them (governed — each is a real warden
+/// `Capability`, so its `perform` does the mediated op).
 struct Host {
     wasi: WasiCtx,
     table: ResourceTable,
     frames: mpsc::UnboundedSender<Vec<u8>>,
+    caps: Vec<Box<dyn Capability>>,
 }
 
 impl WasiView for Host {
@@ -93,17 +95,21 @@ impl kedi::app::host::Host for Host {
         let _ = self.frames.send(frame.into_bytes());
     }
 
-    // the app's only door to the world. Step 1: deny everything (no capabilities threaded yet) so the
-    // spine is provable in isolation; a later step wires this to `ctx.invoke` (the governed chokepoint).
+    // the app's only door to the world: dispatch to the granted capability of this kind. Each is a
+    // real warden `Capability`, so `perform` does the mediated op (e.g. dstask → the CLI). The
+    // callback is sync (wasmtime is driven sync here), so we block on the async `perform` — same as
+    // the component runtime's host invoke. An ungranted kind is refused, exactly like the sandbox
+    // stance: a capability the app wasn't given simply doesn't exist for it.
     fn invoke(
         &mut self,
         cap: String,
         op: String,
-        _input: Vec<u8>,
+        input: Vec<u8>,
     ) -> std::result::Result<Vec<u8>, String> {
-        Err(format!(
-            "capability `{cap}` op `{op}` not granted (app capability wiring is a later step)"
-        ))
+        let Some(c) = self.caps.iter().find(|c| c.kind().0 == cap) else {
+            return Err(format!("capability `{cap}` not granted"));
+        };
+        futures::executor::block_on(c.perform(&op, &input)).map_err(|e| e.to_string())
     }
 }
 
@@ -162,19 +168,14 @@ impl Capability for AppCap {
     }
 }
 
-/// Grants an `app` capability. The request `arg` is the path to a `kedi:app` `.wasm` component (a
-/// later step resolves a plugin *name* → its installed path, like chatons' home).
-pub struct AppBroker;
-
-#[async_trait]
-impl Broker for AppBroker {
-    fn handles(&self, req: &CapRequest) -> bool {
-        req.kind == APP
-    }
-    async fn grant(&self, req: &CapRequest) -> Result<Box<dyn Capability>> {
-        let path = req.arg.clone();
+impl AppCap {
+    /// Load a `kedi:app` component at `path` and run it, granting it `caps` as its world (the app
+    /// reaches each via `host.invoke(kind, op, input)`). This is how a host wires a plugin to real
+    /// capabilities — e.g. kedi gives the deck plugin a `dstask` cap. `AppBroker` uses the no-caps
+    /// form; a caps-aware host builds the `AppCap` directly.
+    pub fn spawn(path: &str, caps: Vec<Box<dyn Capability>>) -> Result<AppCap> {
         let engine = Engine::default();
-        let component = Component::from_file(&engine, &path)
+        let component = Component::from_file(&engine, path)
             .map_err(|e| WardenError::Cap(format!("load app {path}: {e}")))?;
 
         let (frames_tx, frames_rx) = mpsc::unbounded_channel::<Vec<u8>>();
@@ -183,7 +184,7 @@ impl Broker for AppBroker {
         let exited_worker = exited.clone();
 
         // the wasm worker: sync wasmtime driving the component; keys in via msg_rx, frames out via
-        // frames_tx (captured in the Host). Ends when the guest quits or the sender is dropped.
+        // frames_tx, granted caps in the Host. Ends when the guest quits or the sender is dropped.
         std::thread::spawn(move || {
             let mut linker: Linker<Host> = Linker::new(&engine);
             if wasmtime_wasi::add_to_linker_sync(&mut linker).is_err() {
@@ -196,6 +197,7 @@ impl Broker for AppBroker {
                 wasi: WasiCtxBuilder::new().inherit_stderr().build(),
                 table: ResourceTable::new(),
                 frames: frames_tx,
+                caps,
             };
             let mut store = Store::new(&engine, host);
             let Ok(bindings) = App::instantiate(&mut store, &component, &linker) else {
@@ -221,11 +223,26 @@ impl Broker for AppBroker {
             exited_worker.store(true, Ordering::SeqCst);
         });
 
-        Ok(Box::new(AppCap {
+        Ok(AppCap {
             tx: Mutex::new(Some(msg_tx)),
             output: Mutex::new(Some(frames_rx)),
             exited,
-        }))
+        })
+    }
+}
+
+/// Grants an `app` capability with **no** sub-capabilities (the app can render + take keys, but
+/// `host.invoke` finds nothing granted). The request `arg` is the path to a `kedi:app` `.wasm`
+/// component. A host that wants to grant the app real capabilities builds [`AppCap::spawn`] directly.
+pub struct AppBroker;
+
+#[async_trait]
+impl Broker for AppBroker {
+    fn handles(&self, req: &CapRequest) -> bool {
+        req.kind == APP
+    }
+    async fn grant(&self, req: &CapRequest) -> Result<Box<dyn Capability>> {
+        Ok(Box::new(AppCap::spawn(&req.arg, Vec::new())?))
     }
 }
 
@@ -308,5 +325,45 @@ mod tests {
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
         assert!(cap.finished(), "app should have quit on `q`");
+    }
+
+    // A mock "dstask"-kind capability returning a fixed two-task JSON — so the invoke path is tested
+    // hermetically (no real dstask CLI). Proves: guest host.invoke → chokepoint → this cap → back.
+    struct MockDsTask;
+    #[async_trait]
+    impl Capability for MockDsTask {
+        fn kind(&self) -> CapKind {
+            CapKind("dstask")
+        }
+        fn ops(&self) -> &'static [OpSpec] {
+            &[OpSpec {
+                op: "list",
+                doc: "mock",
+                mutates: false,
+            }]
+        }
+        async fn perform(&self, op: &str, _input: &[u8]) -> Result<Vec<u8>> {
+            assert_eq!(op, "list");
+            Ok(br#"[{"uuid":"a","summary":"one"},{"uuid":"b","summary":"two"}]"#.to_vec())
+        }
+        fn revoke(&self) {}
+    }
+
+    #[tokio::test]
+    async fn app_reaches_a_granted_capability_via_host_invoke() {
+        let Some(path) = hello_wasm() else {
+            eprintln!("skip: build guest-app first");
+            return;
+        };
+        // grant the app a dstask capability; the guest calls host.invoke("dstask","list") on init
+        let cap = AppCap::spawn(&path, vec![Box::new(MockDsTask)]).expect("spawn app with caps");
+        let mut frames = cap.output().expect("output");
+        let first = frames.next().await.expect("frame after init");
+        let text = String::from_utf8_lossy(&first);
+        // the guest counts "uuid" keys → 2 tasks, rendered via the governed capability
+        assert!(
+            text.contains("dstask: 2 tasks"),
+            "app did not reach the dstask capability: {text:?}"
+        );
     }
 }

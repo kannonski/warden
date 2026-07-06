@@ -16,6 +16,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use tokio::sync::mpsc::{UnboundedSender, unbounded_channel};
+use warden_caps::dstask::{DSTASK, DsTaskBroker};
 use warden_caps::pty::{PTY, PtyBroker};
 use warden_core::{
     Action, ActionSource, ApprovalRequest, Approver, Call, CapRequest, Ctx, Decision, Event,
@@ -23,7 +24,7 @@ use warden_core::{
     SessionId, Verdict, Warden, WardenError,
 };
 use warden_host::{Manifest, plugin};
-use warden_wasm::{APP, AppBroker};
+use warden_wasm::APP;
 use wtransport::{Endpoint, Identity, ServerConfig};
 
 // DLP (output masking) intentionally NOT wired here. The spike's literal-secret masker was a demo
@@ -84,6 +85,31 @@ impl Runtime for LocalRuntime {
                 "kedi runs in-process attach actions".into(),
             )),
         }
+    }
+}
+
+/// Grants an `app` capability (a WASM-TUI plugin) with a `dstask` sub-capability attached, so a
+/// plugin like deck can reach the task store through `host.invoke("dstask", …)` — governed. (The
+/// stock `AppBroker` grants apps with no sub-caps; kedi wants its plugins to have dstask. A later
+/// step reads each plugin's requested caps from a manifest instead of granting dstask to all.)
+struct AppWithDsTaskBroker;
+#[async_trait::async_trait]
+impl warden_core::Broker for AppWithDsTaskBroker {
+    fn handles(&self, req: &CapRequest) -> bool {
+        req.kind == APP
+    }
+    async fn grant(&self, req: &CapRequest) -> WResult<Box<dyn warden_core::Capability>> {
+        // the app's world: a dstask capability (the default CLI). `req.arg` is the .wasm path.
+        let dstask = DsTaskBroker
+            .grant(&CapRequest {
+                kind: DSTASK,
+                arg: String::new(),
+            })
+            .await?;
+        Ok(Box::new(warden_wasm::AppCap::spawn(
+            &req.arg,
+            vec![dstask],
+        )?))
     }
 }
 
@@ -152,9 +178,10 @@ pub fn terminal_warden(
             reg.add::<dyn warden_core::Broker>(Arc::new(PtyBroker));
         }),
         // WASM-TUI plugin panes: a pane whose capability is an `app` (a kedi:app component) instead
-        // of a pty. Same governed machinery; the "shell" is a WASM app.
+        // of a pty. Same governed machinery; the "shell" is a WASM app, granted a dstask cap so a
+        // plugin like deck can reach the task store through host.invoke.
         plugin(Manifest::new("app").provides(&["cap:app"]), |reg| {
-            reg.add::<dyn warden_core::Broker>(Arc::new(AppBroker));
+            reg.add::<dyn warden_core::Broker>(Arc::new(AppWithDsTaskBroker));
         }),
         plugin(
             Manifest::new("local-runtime").provides(&["runtime:local"]),
