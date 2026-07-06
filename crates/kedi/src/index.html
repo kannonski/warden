@@ -18,6 +18,7 @@
     --bg:#1e1e2e; --panel:#181825; --edge:#313244; --fg:#cdd6f4; --dim:#6c7086;
     --cyan:#89dceb; --green:#a6e3a1; --red:#f38ba8; --focus:#cba6f7;
     --term-bg:#1e1e2e; /* the active theme's terminal background — set by applySettings() */
+    --term-glow:#f5e0dc; /* CRT glow tint (theme cursor colour) — set by applySettings() */
   }
   * { box-sizing:border-box; }
   html,body { height:100%; margin:0; }
@@ -115,8 +116,28 @@
   .taskchip .tdot { width:7px; height:7px; border-radius:50%; background:var(--green); flex:0 0 auto; }
   .taskchip .tlabel { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
   @keyframes chipIn { from { opacity:0; transform:translateY(8px); } to { opacity:1; transform:translateY(0); } }
-  .paneterm { flex:1 1 auto; min-height:0; min-width:0; }
+  .paneterm { flex:1 1 auto; min-height:0; min-width:0; position:relative; }
   .paneterm .xterm { height:100%; width:100%; }
+
+  /* ── CRT / phosphor look (body.crt; off by default, toggled in settings) ──
+     Three cheap, static layers, all pure CSS so there's no per-frame JS cost:
+     1) a soft glow on the rendered text (drop-shadow tinted to --term-glow),
+     2) faint horizontal scanlines, 3) a corner vignette. The scanlines+vignette
+     ride on a pointer-events:none overlay so they never touch input or the
+     canvas's own compositing; the glow is light enough not to fuzz the text. */
+  body.crt .paneterm .xterm-screen,
+  body.crt .paneterm canvas {
+    filter: drop-shadow(0 0 0.6px var(--term-glow)) drop-shadow(0 0 2px color-mix(in srgb, var(--term-glow) 45%, transparent));
+  }
+  body.crt .paneterm::after {
+    content:""; position:absolute; inset:0; pointer-events:none; z-index:5; border-radius:inherit;
+    background:
+      repeating-linear-gradient(to bottom, rgba(0,0,0,0) 0, rgba(0,0,0,0) 2px, rgba(0,0,0,.10) 3px),
+      radial-gradient(120% 120% at 50% 50%, transparent 62%, rgba(0,0,0,.28) 100%);
+    mix-blend-mode:multiply;
+  }
+  body.crt .paneterm { animation: crt-flicker 5.5s ease-in-out infinite; }
+  @keyframes crt-flicker { 0%,100% { opacity:1; } 47% { opacity:1; } 48% { opacity:.97; } 49% { opacity:1; } }
   .xterm-viewport::-webkit-scrollbar { width:9px; }
   .xterm-viewport::-webkit-scrollbar-thumb { background:#45475a; border-radius:6px; border:2px solid transparent; background-clip:padding-box; }
   .xterm-viewport::-webkit-scrollbar-thumb:hover { background:#585b70; }
@@ -358,6 +379,9 @@
       <button data-v="linux">Linux</button>
     </div>
 
+    <label for="set-crt">CRT glow</label>
+    <label class="switch"><input type="checkbox" id="set-crt"><span></span></label>
+
     <div class="sec">terminal</div>
     <label for="set-font">font size <span id="set-font-val" class="valtag"></span></label>
     <input type="range" id="set-font" min="8" max="28" step="1">
@@ -454,6 +478,7 @@ const DEFAULT_SETTINGS = {
   scrollback: 10000,
   layout: "floating",     // floating | tab
   winControls: "auto",    // auto | mac | win | linux — window-button flavor
+  crt: false,             // CRT/phosphor look: glow + scanlines + vignette (off by default)
 };
 
 // Best-effort OS guess for the "auto" window-control flavor. userAgentData is the modern signal;
@@ -498,6 +523,9 @@ function applySettings() {
   applyPlatform();
   const t = THEMES[SETTINGS.theme];
   document.documentElement.style.setProperty("--term-bg", t.term.background);
+  // CRT glow tint follows the theme's cursor (falls back to foreground)
+  document.documentElement.style.setProperty("--term-glow", t.term.cursor || t.term.foreground);
+  document.body.classList.toggle("crt", SETTINGS.crt); // phosphor look — pure CSS, all panes at once
   const o = xtermOpts();
   for (const p of allPanes()) Object.assign(p.term.options, o);
   if (typeof au !== "undefined" && au.term) Object.assign(au.term.options, { theme: o.theme, fontFamily: o.fontFamily });
@@ -1104,6 +1132,7 @@ function syncSettingsForm() {
   $("set-font").value = SETTINGS.fontSize; $("set-font-val").textContent = SETTINGS.fontSize + "px";
   $("set-family").value = SETTINGS.fontFamily;
   $("set-blink").checked = SETTINGS.cursorBlink;
+  $("set-crt").checked = SETTINGS.crt;
   $("set-lh").value = SETTINGS.lineHeight; $("set-lh-val").textContent = SETTINGS.lineHeight.toFixed(2);
   $("set-ls").value = SETTINGS.letterSpacing; $("set-ls-val").textContent = SETTINGS.letterSpacing;
   $("set-scroll").value = SETTINGS.scrollback; $("set-scroll-val").textContent = SETTINGS.scrollback.toLocaleString();
@@ -1120,6 +1149,7 @@ $("set-theme").addEventListener("change", (e) => setOpt("theme", e.target.value)
 $("set-font").addEventListener("input", (e) => setOpt("fontSize", Number(e.target.value)));
 $("set-family").addEventListener("change", (e) => setOpt("fontFamily", e.target.value.trim() || FONT));
 $("set-blink").addEventListener("change", (e) => setOpt("cursorBlink", e.target.checked));
+$("set-crt").addEventListener("change", (e) => setOpt("crt", e.target.checked));
 $("set-lh").addEventListener("input", (e) => setOpt("lineHeight", Number(e.target.value)));
 $("set-ls").addEventListener("input", (e) => setOpt("letterSpacing", Number(e.target.value)));
 $("set-scroll").addEventListener("input", (e) => setOpt("scrollback", Number(e.target.value)));
