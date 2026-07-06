@@ -25,6 +25,9 @@ use warden_core::{
 
 pub const PTY: CapKind = CapKind("pty");
 
+/// Monotonic counter for pasted-image filenames (`paste-1.png`, `paste-2.png`, …), process-wide.
+static PASTE_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 struct PtyCap {
     master: Mutex<Box<dyn MasterPty + Send>>,
     writer: Mutex<Box<dyn Write + Send>>,
@@ -87,6 +90,11 @@ const OPS: &[OpSpec] = &[
         doc: "block until the shell exits; returns its exit code",
         mutates: false,
     },
+    OpSpec {
+        op: "paste-image",
+        doc: "write a clipboard image (data = `ext\\n<bytes>`) to ~/.cache/kedi and return its path",
+        mutates: true,
+    },
 ];
 
 #[async_trait]
@@ -141,6 +149,29 @@ impl Capability for PtyCap {
                     .wait()
                     .map_err(|e| WardenError::Cap(format!("pty wait: {e}")))?;
                 Ok(status.exit_code().to_string().into_bytes())
+            }
+            "paste-image" => {
+                // data is `ext\n<raw image bytes>`. Write it under ~/.cache/kedi with a monotonic
+                // name and return the absolute path (the attach loop types it at the prompt). A real
+                // side effect on a governed capability — so it's recorded/killable like any op.
+                let nl = input
+                    .iter()
+                    .position(|&b| b == b'\n')
+                    .ok_or_else(|| WardenError::Cap("paste-image: missing ext header".into()))?;
+                let ext = std::str::from_utf8(&input[..nl])
+                    .map_err(|_| WardenError::Cap("paste-image: bad ext".into()))?;
+                let bytes = &input[nl + 1..];
+                let dir = std::path::PathBuf::from(
+                    std::env::var("HOME").unwrap_or_else(|_| "/tmp".into()),
+                )
+                .join(".cache/kedi");
+                std::fs::create_dir_all(&dir)
+                    .map_err(|e| WardenError::Cap(format!("paste-image mkdir: {e}")))?;
+                let n = PASTE_SEQ.fetch_add(1, Ordering::Relaxed) + 1;
+                let path = dir.join(format!("paste-{n}.{ext}"));
+                std::fs::write(&path, bytes)
+                    .map_err(|e| WardenError::Cap(format!("paste-image write: {e}")))?;
+                Ok(path.to_string_lossy().into_owned().into_bytes())
             }
             // kernel validates first; this defends the cap in isolation too (see `no_such_op`)
             other => Err(warden_core::no_such_op(PTY, other)),

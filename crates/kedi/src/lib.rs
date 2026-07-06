@@ -293,7 +293,53 @@ fn parse_msg(line: &[u8]) -> Option<ClientMsg> {
     if let Some(k) = v.get("kill") {
         return Some(ClientMsg::Kill(k.as_str().unwrap_or("browser").to_string()));
     }
+    // {"pasteImage":"<base64>","ext":"png"} — a clipboard image. The pty capability writes it to a
+    // file and returns the path (typed at the prompt by the attach loop). Data is `ext\n<raw bytes>`.
+    if let Some(b64) = v.get("pasteImage").and_then(|x| x.as_str()) {
+        let bytes = b64_decode(b64)?;
+        let ext = v
+            .get("ext")
+            .and_then(|x| x.as_str())
+            .filter(|e| e.chars().all(|c| c.is_ascii_alphanumeric()))
+            .unwrap_or("png");
+        let mut data = format!("{ext}\n").into_bytes();
+        data.extend_from_slice(&bytes);
+        return Some(ClientMsg::Frame(InputFrame {
+            op: "paste-image".into(),
+            data,
+        }));
+    }
     None
+}
+
+/// Minimal, dependency-free base64 decoder (standard alphabet, ignores whitespace/padding). The
+/// clipboard image arrives base64 in JSON; this turns it back into the raw bytes the pty op writes.
+fn b64_decode(s: &str) -> Option<Vec<u8>> {
+    fn val(c: u8) -> Option<u32> {
+        match c {
+            b'A'..=b'Z' => Some((c - b'A') as u32),
+            b'a'..=b'z' => Some((c - b'a' + 26) as u32),
+            b'0'..=b'9' => Some((c - b'0' + 52) as u32),
+            b'+' => Some(62),
+            b'/' => Some(63),
+            _ => None,
+        }
+    }
+    let mut out = Vec::new();
+    let mut acc = 0u32;
+    let mut bits = 0u32;
+    for &c in s.as_bytes() {
+        if c == b'=' || c.is_ascii_whitespace() {
+            continue;
+        }
+        acc = (acc << 6) | val(c)?;
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            out.push((acc >> bits) as u8);
+        }
+    }
+    Some(out)
 }
 
 /// Accept WebTransport sessions forever.
@@ -400,7 +446,15 @@ async fn pane_session(
                 loop {
                     tokio::select! {
                         frame = input.next() => match frame {
-                            Some(frame) => { ctx.invoke(pty, &frame.op, frame.data).await?; }
+                            Some(frame) => {
+                                let out = ctx.invoke(pty, &frame.op, frame.data).await?;
+                                // `paste-image` writes the image to a file and returns its path; type
+                                // that path at the prompt (as a governed `input`) so the user can act
+                                // on it. Every step still crosses the chokepoint.
+                                if frame.op == "paste-image" && !out.is_empty() {
+                                    ctx.invoke(pty, "input", out).await?;
+                                }
+                            }
                             None => break, // client gone (input stream closed)
                         },
                         _ = tick.tick() => {

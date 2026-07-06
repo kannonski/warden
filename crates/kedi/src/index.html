@@ -52,6 +52,7 @@
               transition: box-shadow .14s ease, opacity .14s ease, border-color .14s ease;
               animation: winIn .12s ease-out; }
   .floatwin.focused { opacity:1; border-color:var(--focus); box-shadow:0 10px 30px rgba(0,0,0,.55), 0 0 0 1px var(--focus); }
+  .floatwin.dropping { border-color:var(--green); box-shadow:0 0 0 2px var(--green), 0 10px 30px rgba(0,0,0,.55); } /* file/image drag hovering */
   .floatwin.animate { transition: left .14s ease, top .14s ease, width .14s ease, height .14s ease, box-shadow .14s ease; }
   .floatwin.closing { opacity:0; transform:scale(.985); transition: opacity .1s ease, transform .1s ease; }
   .floatwin.stowed { display:none; }  /* minimized → lives in the taskbar (when that setting is on) */
@@ -753,6 +754,28 @@ async function makePane() {
   termEl.addEventListener("contextmenu", (e) => { e.preventDefault(); e.stopPropagation(); pasteInto(pane); });
   termEl.addEventListener("mousedown", (e) => { if (e.button === 1) e.preventDefault(); }); // no autoscroll
   termEl.addEventListener("auxclick", (e) => { if (e.button === 1) { e.preventDefault(); pasteInto(pane); } });
+
+  // drag a file (or files) onto the terminal → type its path at the prompt. Browsers hide the real
+  // filesystem path for security, so we prefer a text/uri-list `file://` URI (most Linux file
+  // managers send it → the true absolute path) and fall back to the bare filename otherwise.
+  termEl.addEventListener("dragover", (e) => { e.preventDefault(); e.stopPropagation(); pane.floatwin?.classList.add("dropping"); });
+  termEl.addEventListener("dragleave", (e) => { e.stopPropagation(); pane.floatwin?.classList.remove("dropping"); });
+  termEl.addEventListener("drop", (e) => {
+    e.preventDefault(); e.stopPropagation();
+    pane.floatwin?.classList.remove("dropping");
+    // a dragged image (from a browser/app) drops as a file → save-and-type-path too
+    const img = e.dataTransfer && [...(e.dataTransfer.files || [])].find((f) => f.type.startsWith("image/"));
+    if (img) { sendImage(pane, img); return; }
+    dropPaths(pane, e.dataTransfer);
+  });
+  // Ctrl+V of an image: the native paste event carries clipboard items even though xterm handles keys
+  termEl.addEventListener("paste", (e) => {
+    const items = e.clipboardData && e.clipboardData.items;
+    if (!items) return;
+    for (const it of items) {
+      if (it.type.startsWith("image/")) { e.preventDefault(); e.stopPropagation(); sendImage(pane, it.getAsFile()); return; }
+    }
+  }, true);
   term.attachCustomKeyEventHandler((e) => keyHandler(e, pane));
   term.onData((d) => pane.send({ input: d }));
   term.onResize(({ cols, rows }) => { pane.send({ resize: [cols, rows] }); size.textContent = `${cols}×${rows}`; });
@@ -1030,7 +1053,56 @@ $("search-input").addEventListener("keydown", (e) => {
   else if (e.key === "Escape") { e.preventDefault(); toggleSearch(false); }
 });
 function copySel(p) { const s = p.term.getSelection(); if (s) navigator.clipboard.writeText(s).catch(() => {}); }
-function pasteInto(p) { navigator.clipboard.readText().then((t) => t && p.send({ input: t })).catch(() => {}); }
+function pasteInto(p) {
+  // try an image on the clipboard first (→ save-and-type-path via the pty op); else paste text
+  if (navigator.clipboard.read) {
+    navigator.clipboard.read().then(async (items) => {
+      for (const it of items) {
+        const type = it.types.find((t) => t.startsWith("image/"));
+        if (type) { const blob = await it.getType(type); sendImage(p, blob); return; }
+      }
+      navigator.clipboard.readText().then((t) => t && p.send({ input: t })).catch(() => {});
+    }).catch(() => { navigator.clipboard.readText().then((t) => t && p.send({ input: t })).catch(() => {}); });
+  } else {
+    navigator.clipboard.readText().then((t) => t && p.send({ input: t })).catch(() => {});
+  }
+}
+
+// shell-quote a path so spaces/specials survive being typed at the prompt (single-quote wrap; any
+// embedded single quote becomes '\'' ). Keeps a dropped "/home/okkan/my file.txt" intact.
+const shquote = (s) => "'" + s.replace(/'/g, "'\\''") + "'";
+
+// A dropped file → its path at the prompt. Prefer a text/uri-list `file://` URI (real absolute path
+// from the file manager); fall back to text/plain, then to the bare filename (browsers withhold the
+// full path of a raw File for security). Multiple files → space-separated.
+function dropPaths(pane, dt) {
+  if (!dt) return;
+  let paths = [];
+  const uris = dt.getData("text/uri-list");
+  if (uris) {
+    paths = uris.split(/\r?\n/).filter((l) => l && !l.startsWith("#")).map((u) => {
+      try { return u.startsWith("file://") ? decodeURIComponent(new URL(u).pathname) : u; }
+      catch (_) { return u; }
+    });
+  }
+  if (!paths.length) {
+    const txt = dt.getData("text/plain");
+    if (txt && txt.trim()) paths = txt.split(/\r?\n/).filter(Boolean);
+  }
+  if (!paths.length && dt.files && dt.files.length) paths = [...dt.files].map((f) => f.name);
+  if (paths.length) pane.send({ input: paths.map(shquote).join(" ") + " " });
+}
+
+// Send a clipboard/dropped image blob to the pty's `paste-image` op (base64 in JSON); the server
+// writes it under ~/.cache/kedi and types the path back at the prompt.
+function sendImage(pane, blob) {
+  const ext = (blob.type.split("/")[1] || "png").replace(/[^a-z0-9]/gi, "") || "png";
+  blob.arrayBuffer().then((buf) => {
+    let bin = ""; const b = new Uint8Array(buf);
+    for (let i = 0; i < b.length; i++) bin += String.fromCharCode(b[i]);
+    pane.send({ pasteImage: btoa(bin), ext });
+  }).catch(() => {});
+}
 
 // ── audit: one governance surface (live sessions · timeline · reconstruction) ──
 // The record is the source of truth. While open we poll /record?since=N incrementally, fold events
