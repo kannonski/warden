@@ -217,7 +217,8 @@ impl DsTaskCap {
     }
 }
 
-/// Grants the `dstask` capability. `req.arg` optionally overrides the binary (empty → `dstask`).
+/// Grants the `dstask` capability. `req.arg` optionally overrides the binary (empty → resolve
+/// `dstask` on the host).
 pub struct DsTaskBroker;
 
 #[async_trait]
@@ -227,12 +228,43 @@ impl Broker for DsTaskBroker {
     }
     async fn grant(&self, req: &CapRequest) -> Result<Box<dyn Capability>> {
         let bin = if req.arg.trim().is_empty() {
-            "dstask".to_string()
+            resolve_dstask()
         } else {
             req.arg.clone()
         };
         Ok(Box::new(DsTaskCap { bin }))
     }
+}
+
+/// Find the `dstask` binary as an ABSOLUTE path. kedi may be launched from a desktop/systemd context
+/// whose `PATH` lacks the user's package dirs (e.g. linuxbrew), so `Command::new("dstask")` fails with
+/// ENOENT. We search `$PATH` plus common install locations and return the first hit; if none, fall
+/// back to the bare name so PATH resolution still gets a chance (and the error stays legible).
+fn resolve_dstask() -> String {
+    let mut dirs: Vec<std::path::PathBuf> = Vec::new();
+    if let Ok(path) = std::env::var("PATH") {
+        dirs.extend(std::env::split_paths(&path));
+    }
+    // common spots not always on a login-less PATH
+    for extra in [
+        "/home/linuxbrew/.linuxbrew/bin",
+        "/opt/homebrew/bin",
+        "/usr/local/bin",
+    ] {
+        dirs.push(std::path::PathBuf::from(extra));
+    }
+    if let Some(home) = std::env::var_os("HOME") {
+        for sub in [".local/bin", "go/bin", ".linuxbrew/bin"] {
+            dirs.push(std::path::Path::new(&home).join(sub));
+        }
+    }
+    for dir in dirs {
+        let cand = dir.join("dstask");
+        if cand.is_file() {
+            return cand.to_string_lossy().into_owned();
+        }
+    }
+    "dstask".to_string() // last resort — let the OS try PATH, and surface a clear ENOENT if absent
 }
 
 #[cfg(test)]
@@ -242,6 +274,19 @@ mod tests {
     // Both tests set the process-global DSTASK_GIT_REPO; serialize them so parallel test threads
     // don't clobber each other's env / store.
     static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// When dstask is installed, resolve it to an absolute existing path (not the bare fallback) — so
+    /// kedi works even when launched with a PATH that lacks the user's package dirs.
+    #[test]
+    fn resolve_dstask_finds_an_absolute_path() {
+        if std::process::Command::new("dstask").arg("version").output().is_err() {
+            eprintln!("skip: dstask not installed");
+            return;
+        }
+        let bin = resolve_dstask();
+        assert_ne!(bin, "dstask", "should resolve to an absolute path, not the bare fallback");
+        assert!(std::path::Path::new(&bin).is_file(), "resolved path is not a file: {bin}");
+    }
 
     /// note-set must REPLACE the whole note blob (not append), via the editor-script + fake-pty trick.
     /// Skips gracefully if `dstask` isn't installed. Runs against a throwaway store so it can't touch
