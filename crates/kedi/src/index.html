@@ -55,8 +55,14 @@
   .floatwin.focused { opacity:1; border-color:var(--focus); box-shadow:0 10px 30px rgba(0,0,0,.55), 0 0 0 1px var(--focus); }
   .floatwin.animate { transition: left .14s ease, top .14s ease, width .14s ease, height .14s ease, box-shadow .14s ease; }
   .floatwin.closing { opacity:0; transform:scale(.985); transition: opacity .1s ease, transform .1s ease; }
-  .floatwin.stowed { display:none; }  /* minimized → lives in the taskbar */
+  .floatwin.stowed { display:none; }  /* minimized → lives in the taskbar (when that setting is on) */
   .floatwin.stowing { opacity:0; transform:scale(.92) translateY(28px); transition:opacity .13s ease, transform .13s ease; }
+  /* minified in place ("window shade"): collapse to the title bar, hide the terminal body. The bar's
+     click handler expands it again. min-height override lets it shrink below the normal floor. */
+  .floatwin.shaded { min-height:0 !important; }
+  .floatwin.shaded .paneterm, .floatwin.shaded .grip { display:none; }
+  .floatwin.shaded .panebar { cursor:pointer; }
+  .floatwin.shaded .ptitle::after { content:" ▸"; color:var(--dim); } /* affordance: click to expand */
   @keyframes winIn { from { opacity:0; transform:scale(.985); } to { opacity:1; transform:scale(1); } }
 
   .pane { flex:1 1 0; min-width:0; min-height:0; display:flex; flex-direction:column; background:var(--term-bg); overflow:hidden; }
@@ -382,6 +388,9 @@
     <label for="set-crt">CRT glow</label>
     <label class="switch"><input type="checkbox" id="set-crt"><span></span></label>
 
+    <label for="set-taskbar">minimize to taskbar</label>
+    <label class="switch"><input type="checkbox" id="set-taskbar"><span></span></label>
+
     <div class="sec">terminal</div>
     <label for="set-font">font size <span id="set-font-val" class="valtag"></span></label>
     <input type="range" id="set-font" min="8" max="28" step="1">
@@ -479,6 +488,7 @@ const DEFAULT_SETTINGS = {
   layout: "floating",     // floating | tab
   winControls: "auto",    // auto | mac | win | linux — window-button flavor
   crt: false,             // CRT/phosphor look: glow + scanlines + vignette (off by default)
+  taskbar: false,         // minimize → taskbar dock (on) vs. collapse-to-title in place (off, default)
 };
 
 // Best-effort OS guess for the "auto" window-control flavor. userAgentData is the modern signal;
@@ -641,6 +651,38 @@ function renderTabs() {
   strip.appendChild(add);
 }
 function fitAll() { for (const p of allPanes()) { try { p.fit.fit(); } catch (_) {} p.send({ resize: [p.term.cols, p.term.rows] }); } }
+
+// On a browser resize, scale every floating window's position + size PROPORTIONALLY to the canvas,
+// so the layout is preserved (a window at 50% width stays at 50% width). Skips tab mode (windows
+// fill the canvas there), snapped/maximized windows (CSS sizes them), and shaded windows' heights
+// (they're collapsed to the title bar). Then refits terminals to their new sizes.
+let _lastCanvas = null;
+function scaleWindowsToCanvas() {
+  const c = $("canvas");
+  const nw = c.clientWidth, nh = c.clientHeight;
+  if (!nw || !nh) return;
+  const prev = _lastCanvas;
+  _lastCanvas = { w: nw, h: nh };
+  if (SETTINGS.layout === "tab" || !prev || (prev.w === nw && prev.h === nh)) { fitAll(); return; }
+  const rx = nw / prev.w, ry = nh / prev.h;
+  for (const p of allPanes()) {
+    const win = p.floatwin;
+    if (!win || win.classList.contains("stowed") || win._snap) continue; // snapped/maxed: CSS owns size
+    const x = parseFloat(win.style.left) || 0, y = parseFloat(win.style.top) || 0;
+    const w = parseFloat(win.style.width) || win.offsetWidth;
+    win.style.left = Math.max(0, Math.round(x * rx)) + "px";
+    win.style.top = Math.max(0, Math.round(y * ry)) + "px";
+    win.style.width = Math.max(200, Math.round(w * rx)) + "px";
+    if (!p.shaded) {
+      const h = parseFloat(win.style.height) || win.offsetHeight;
+      win.style.height = Math.max(130, Math.round(h * ry)) + "px";
+    } else if (p._fullHeight) {
+      // keep the remembered full height proportional too, so expanding after resize is consistent
+      p._fullHeight = Math.max(130, Math.round((parseFloat(p._fullHeight) || 480) * ry)) + "px";
+    }
+  }
+  fitAll();
+}
 // Tidy the shell's raw OSC title: drop a "user@host: " prefix, collapse an absolute home dir to ~,
 // and fall back to the pane id when the shell sets no title at all (e.g. `zsh -f`).
 function fmtTitle(raw, pane) {
@@ -770,15 +812,18 @@ function spawnFloat(x, y, w, h) {
     win.appendChild(pane.wrapper);
     pane.floatwin = win;
     const bar = pane.bar;
-    const min = document.createElement("button"); min.className = "wc min"; min.title = "minimize to taskbar";
+    const min = document.createElement("button"); min.className = "wc min"; min.title = "minimize";
     const max = document.createElement("button"); max.className = "wc max"; max.title = "maximize / restore";
     const cls = document.createElement("button"); cls.className = "wc close"; cls.title = "close";
     const wcg = document.createElement("div"); wcg.className = "wcgroup"; wcg.append(min, max, cls);
     bar.append(wcg); // no per-window kill — closing is close; kill (attributed) lives in the audit panel
     min.addEventListener("click", (e) => { e.stopPropagation(); minimizePane(pane); });
-    max.addEventListener("click", (e) => { e.stopPropagation(); snapWin(win, pane, "max"); });
+    max.addEventListener("click", (e) => { e.stopPropagation(); if (pane.shaded) unshadePane(pane); else snapWin(win, pane, "max"); });
     cls.addEventListener("click", (e) => { e.stopPropagation(); closePane(pane); });
-    bar.addEventListener("dblclick", (e) => { if (!e.target.closest(".wc")) snapWin(win, pane, "max"); }); // double-click title = maximize
+    // title-bar click: a shaded (minified) window expands on a single click; otherwise double-click
+    // toggles maximize. (A shaded window's body is hidden, so the click can only hit the bar.)
+    bar.addEventListener("click", (e) => { if (pane.shaded && !e.target.closest(".wc")) { e.stopPropagation(); unshadePane(pane); } });
+    bar.addEventListener("dblclick", (e) => { if (!pane.shaded && !e.target.closest(".wc")) snapWin(win, pane, "max"); });
 
     const grip = document.createElement("div"); grip.className = "grip"; win.appendChild(grip);
     $("canvas").appendChild(win);
@@ -818,11 +863,40 @@ function snapWin(win, pane, name) {
 }
 function restoreWin(win, pane) { if (win._restore) { applyGeom(win, pane, win._restore); win._restore = null; win._snap = null; } }
 
-// ── taskbar (minimize/restore) ──
+// ── minimize: two modes ──
+// Default is "minify" — collapse the window to its title bar IN PLACE (macOS window-shade); click
+// the bar to expand. If the `taskbar` setting is on, minimize stows to the bottom dock instead.
 function taskbarSync() { $("taskbar").classList.toggle("show", !!$("taskbar").querySelector(".taskchip")); }
 function minimizePane(pane) {
   const win = pane.floatwin;
-  if (!win || pane.stowed || pane.closing) return;
+  if (!win || pane.stowed || pane.shaded || pane.closing) return;
+  if (SETTINGS.taskbar) { stowToTaskbar(pane); return; }
+  shadePane(pane); // default: collapse to the title bar in place
+}
+// collapse-to-title in place: remember the full height, drop to the panebar's height.
+function shadePane(pane) {
+  const win = pane.floatwin;
+  pane.shaded = true;
+  pane._fullHeight = win.style.height || win.offsetHeight + "px";
+  win.classList.add("animate", "shaded");
+  win.style.height = pane.bar.offsetHeight + "px";
+  if (focused === pane) {
+    const rest = allPanes().filter((p) => p !== pane && !p.stowed && !p.shaded);
+    focused = null;
+    if (rest.length) setFocus(rest[rest.length - 1]);
+  }
+}
+function unshadePane(pane) {
+  const win = pane.floatwin;
+  pane.shaded = false;
+  win.classList.add("animate");
+  win.classList.remove("shaded");
+  win.style.height = pane._fullHeight || "480px";
+  win.style.zIndex = ++zTop;
+  requestAnimationFrame(() => { try { pane.fit.fit(); } catch (_) {} pane.send({ resize: [pane.term.cols, pane.term.rows] }); setFocus(pane); });
+}
+function stowToTaskbar(pane) {
+  const win = pane.floatwin;
   pane.stowed = true;
   win.classList.add("stowing");
   setTimeout(() => { win.classList.remove("stowing"); win.classList.add("stowed"); }, 130);
@@ -1133,6 +1207,7 @@ function syncSettingsForm() {
   $("set-family").value = SETTINGS.fontFamily;
   $("set-blink").checked = SETTINGS.cursorBlink;
   $("set-crt").checked = SETTINGS.crt;
+  $("set-taskbar").checked = SETTINGS.taskbar;
   $("set-lh").value = SETTINGS.lineHeight; $("set-lh-val").textContent = SETTINGS.lineHeight.toFixed(2);
   $("set-ls").value = SETTINGS.letterSpacing; $("set-ls-val").textContent = SETTINGS.letterSpacing;
   $("set-scroll").value = SETTINGS.scrollback; $("set-scroll-val").textContent = SETTINGS.scrollback.toLocaleString();
@@ -1150,6 +1225,7 @@ $("set-font").addEventListener("input", (e) => setOpt("fontSize", Number(e.targe
 $("set-family").addEventListener("change", (e) => setOpt("fontFamily", e.target.value.trim() || FONT));
 $("set-blink").addEventListener("change", (e) => setOpt("cursorBlink", e.target.checked));
 $("set-crt").addEventListener("change", (e) => setOpt("crt", e.target.checked));
+$("set-taskbar").addEventListener("change", (e) => { SETTINGS.taskbar = e.target.checked; saveSettings(); syncSettingsForm(); });
 $("set-lh").addEventListener("input", (e) => setOpt("lineHeight", Number(e.target.value)));
 $("set-ls").addEventListener("input", (e) => setOpt("letterSpacing", Number(e.target.value)));
 $("set-scroll").addEventListener("input", (e) => setOpt("scrollback", Number(e.target.value)));
@@ -1213,7 +1289,8 @@ async function boot() {
   setState("connected", true);
   setLayout(SETTINGS.layout); applySettings(); // restore saved theme / font / cursor / layout
   spawnFloatCascade(); // open with one terminal; draw or Ctrl+Shift+N for more
-  window.addEventListener("resize", fitAll);
+  _lastCanvas = { w: $("canvas").clientWidth, h: $("canvas").clientHeight };
+  window.addEventListener("resize", scaleWindowsToCanvas);
   wt.closed.finally(() => { setState("disconnected", false); overlay("connection lost — sessions ended (no persistence, by design).<br><button onclick='location.reload()'>reconnect</button>"); });
 }
 boot();
