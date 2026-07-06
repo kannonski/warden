@@ -111,7 +111,7 @@ design; recording is opt-in. Full guide: link:crates/kedi/README.adoc[crates/ked
 | `warden-wasm`
 | The wasm `Runtime` impls, both routing every guest call into the same `Ctx::invoke` chokepoint.
   `WasmRuntime`: minimal core-module ABI, self-contained. `ComponentRuntime`: the real ABI —
-  component model + `wit/warden.wit`, where a capability is a *resource handle* (the guest holds
+  component model + `wit/action/warden.wit`, where a capability is a *resource handle* (the guest holds
   an opaque handle; the file grant, pinned binary, or signing key stays host-side and never enters
   guest memory) and WASI is granted empty — the `caps` interface is the guest's only door.
 
@@ -140,8 +140,10 @@ design; recording is opt-in. Full guide: link:crates/kedi/README.adoc[crates/ked
   38µs engine round-trip. link:crates/kedi/README.adoc[Full README].
 |===
 
-`wit/warden.wit` is the action contract; `guest/` is the demo action (a Rust component built
-against it).
+`wit/action/warden.wit` is the headless action contract; `guest/` is the demo action (a Rust
+component built against it). `wit/app/app.wit` is the interactive `kedi:app` contract for WASM-TUI
+plugins (a pane hosting a ratatui-style app as a governed capability — see
+link:docs/plugins-wasm-tui.md[the plugin design]); `guest-app/` is the hello proof.
 
 [#Plugins]
 == Plugins

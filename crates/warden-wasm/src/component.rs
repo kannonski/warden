@@ -12,7 +12,7 @@ use wasmtime::component::{Component, Linker, Resource, ResourceTable};
 use wasmtime_wasi::{WasiCtx, WasiCtxBuilder, WasiView};
 
 wasmtime::component::bindgen!({
-    path: "../../wit",
+    path: "../../wit/action",
     world: "action",
     with: { "warden:action/caps/capability": CapEntry },
 });

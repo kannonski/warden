@@ -15,7 +15,9 @@
 //!   preopened dirs, no net, no env — stdout only, for demo prints): the `caps` interface is the
 //!   guest's only door to the world, so least-privilege is structural.
 
+mod app;
 mod component;
+pub use app::{APP, AppBroker, AppCap};
 pub use component::ComponentRuntime;
 
 use async_trait::async_trait;

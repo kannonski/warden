@@ -18,3 +18,10 @@ futures = { workspace = true }
 warden-core = { path = "../warden-core" }
 wasmtime = "27"
 wasmtime-wasi = "27"
+# for the interactive WASM-TUI app capability (AppCap): its rendered frames stream out via a tokio
+# channel bridged to an async Stream, exactly like the pty capability does.
+tokio = { workspace = true }
+tokio-stream = "0.1"
+
+[dev-dependencies]
+tokio = { workspace = true }

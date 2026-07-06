@@ -3,7 +3,7 @@
 //! This guest holds capability *handles* — the signing key, the file grant, everything real stays
 //! host-side. Its WASI is empty (no fs, no net, no env); `caps` is the only door to the world.
 
-wit_bindgen::generate!({ path: "../wit", world: "action" });
+wit_bindgen::generate!({ path: "../wit/action", world: "action" });
 
 use crate::warden::action::caps;
 

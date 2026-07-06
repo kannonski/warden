@@ -366,7 +366,7 @@ variant(s) it supports. A *new runtime over an existing code form* needs no kern
 change — that's the swappability.
 
 **Real impls.** in-process (demo/tests), `WasmRuntime` (minimal core-module ABI),
-`ComponentRuntime` (the real one: WASM component model + `wit/warden.wit`, where a
+`ComponentRuntime` (the real one: WASM component model + `wit/action/warden.wit`, where a
 capability is an opaque *resource handle* the guest holds but whose backing resource
 never enters guest memory, and WASI is granted empty — the `caps` interface is the
 guest's only door).

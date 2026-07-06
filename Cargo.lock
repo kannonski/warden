@@ -2676,6 +2676,8 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "futures",
+ "tokio",
+ "tokio-stream",
  "warden-core",
  "wasmtime",
  "wasmtime-wasi",

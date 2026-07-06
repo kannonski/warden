@@ -1,0 +1,53 @@
+// kedi:app — the contract for an interactive WASM-TUI plugin (a ratatui-style app in a pane).
+//
+// Where `warden:action` (warden.wit) is a headless run-to-completion guest, an app is a long-lived
+// interactive one: the host drives it with keys and resizes; the app paints by *calling* `render`
+// with a full screen of ANSI (one ratatui buffer flush = one frame). The app's only door to the
+// world is `invoke` — the same governed chokepoint as `warden:action` (policy · record · kill on
+// the host side, empty WASI) — so a plugin can read a file or hit the network only through a
+// capability the warden granted. Least-privilege is structural, exactly as for actions.
+package kedi:app@0.1.0;
+
+interface types {
+    /// A key delivered to the app. Mirrors the host's terminal key set; `other` carries a raw code
+    /// for keys the first cut doesn't name (function keys land here until the variant grows).
+    variant key {
+        text(char),
+        enter,
+        backspace,
+        tab,
+        escape,
+        up,
+        down,
+        left,
+        right,
+        other(u32),
+    }
+}
+
+interface host {
+    /// One rendered screen, as ANSI/UTF-8 (a ratatui backend flushes the cell buffer to this). The
+    /// host forwards it to the pane — in kedi, it becomes an `Event::Output` chunk streamed to the
+    /// browser and recorded, governed exactly like a pty's output.
+    render: func(frame: string);
+
+    /// The app's ONLY door to the world: perform one op on a granted capability by kind. Crosses the
+    /// warden chokepoint host-side (recorded, policy-gated, refused after a kill). `none`-equivalent
+    /// failures come back as `err`. Same shape as the action world's `capability.invoke`.
+    invoke: func(cap: string, op: string, input: list<u8>) -> result<list<u8>, string>;
+}
+
+world app {
+    use types.{key};
+    import host;
+
+    /// Called once at start with the pane's size. The app should paint its first frame here.
+    export init: func(cols: u32, rows: u32);
+    /// A keystroke. Return false to close the pane (the app is done).
+    export on-key: func(k: key) -> bool;
+    /// The pane was resized; repaint at the new size.
+    export on-resize: func(cols: u32, rows: u32);
+    /// A periodic tick (host-driven cadence) for time-based UIs (a countdown, a clock). Return false
+    /// to close. The host calls this only if the app opts in via the manifest; default: not called.
+    export on-tick: func() -> bool;
+}
