@@ -279,13 +279,23 @@ mod tests {
     /// kedi works even when launched with a PATH that lacks the user's package dirs.
     #[test]
     fn resolve_dstask_finds_an_absolute_path() {
-        if std::process::Command::new("dstask").arg("version").output().is_err() {
+        if std::process::Command::new("dstask")
+            .arg("version")
+            .output()
+            .is_err()
+        {
             eprintln!("skip: dstask not installed");
             return;
         }
         let bin = resolve_dstask();
-        assert_ne!(bin, "dstask", "should resolve to an absolute path, not the bare fallback");
-        assert!(std::path::Path::new(&bin).is_file(), "resolved path is not a file: {bin}");
+        assert_ne!(
+            bin, "dstask",
+            "should resolve to an absolute path, not the bare fallback"
+        );
+        assert!(
+            std::path::Path::new(&bin).is_file(),
+            "resolved path is not a file: {bin}"
+        );
     }
 
     /// note-set must REPLACE the whole note blob (not append), via the editor-script + fake-pty trick.
@@ -294,14 +304,25 @@ mod tests {
     #[tokio::test]
     async fn note_set_replaces_the_whole_blob() {
         let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        if std::process::Command::new("dstask").arg("version").output().is_err() {
+        if std::process::Command::new("dstask")
+            .arg("version")
+            .output()
+            .is_err()
+        {
             eprintln!("skip: dstask not installed");
             return;
         }
         let repo = std::env::temp_dir().join(format!("kedi-dstask-test-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&repo);
         std::fs::create_dir_all(&repo).unwrap();
-        assert!(std::process::Command::new("git").args(["init", "-q"]).current_dir(&repo).status().unwrap().success());
+        assert!(
+            std::process::Command::new("git")
+                .args(["init", "-q"])
+                .current_dir(&repo)
+                .status()
+                .unwrap()
+                .success()
+        );
         // SAFETY: single-threaded test binary section; the child dstask processes read this env.
         unsafe { std::env::set_var("DSTASK_GIT_REPO", &repo) };
 
@@ -310,13 +331,23 @@ mod tests {
 
         // replace the (empty) note on task 1 with a multi-line blob, twice — the second must REPLACE,
         // not stack on the first (the whole point vs. the append-only `note` op).
-        cap.perform("note-set", b"1\nfirst version\nline two").await.unwrap();
-        cap.perform("note-set", b"1\nSECOND VERSION ONLY").await.unwrap();
+        cap.perform("note-set", b"1\nfirst version\nline two")
+            .await
+            .unwrap();
+        cap.perform("note-set", b"1\nSECOND VERSION ONLY")
+            .await
+            .unwrap();
 
         let json = cap.perform("list", b"").await.unwrap();
         let s = String::from_utf8_lossy(&json);
-        assert!(s.contains("SECOND VERSION ONLY"), "note-set didn't land: {s}");
-        assert!(!s.contains("first version"), "note-set appended instead of replacing: {s}");
+        assert!(
+            s.contains("SECOND VERSION ONLY"),
+            "note-set didn't land: {s}"
+        );
+        assert!(
+            !s.contains("first version"),
+            "note-set appended instead of replacing: {s}"
+        );
 
         let _ = std::fs::remove_dir_all(&repo);
     }
@@ -326,14 +357,25 @@ mod tests {
     #[tokio::test]
     async fn list_resolved_and_today() {
         let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        if std::process::Command::new("dstask").arg("version").output().is_err() {
+        if std::process::Command::new("dstask")
+            .arg("version")
+            .output()
+            .is_err()
+        {
             eprintln!("skip: dstask not installed");
             return;
         }
         let repo = std::env::temp_dir().join(format!("kedi-dstask-res-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&repo);
         std::fs::create_dir_all(&repo).unwrap();
-        assert!(std::process::Command::new("git").args(["init", "-q"]).current_dir(&repo).status().unwrap().success());
+        assert!(
+            std::process::Command::new("git")
+                .args(["init", "-q"])
+                .current_dir(&repo)
+                .status()
+                .unwrap()
+                .success()
+        );
         // SAFETY: single-threaded test binary section; child dstask processes read this env.
         unsafe { std::env::set_var("DSTASK_GIT_REPO", &repo) };
 
@@ -343,14 +385,24 @@ mod tests {
 
         let today = String::from_utf8(cap.perform("today", b"").await.unwrap()).unwrap();
         assert_eq!(today.len(), 10, "today should be YYYY-MM-DD, got {today:?}");
-        assert_eq!(today.matches('-').count(), 2, "today format wrong: {today:?}");
+        assert_eq!(
+            today.matches('-').count(),
+            2,
+            "today format wrong: {today:?}"
+        );
 
         let resolved = cap.perform("list-resolved", b"").await.unwrap();
         let s = String::from_utf8_lossy(&resolved);
-        assert!(s.contains("resolve me"), "list-resolved missing the resolved task: {s}");
+        assert!(
+            s.contains("resolve me"),
+            "list-resolved missing the resolved task: {s}"
+        );
         // the resolved timestamp should start with today (we just resolved it). dstask pretty-prints,
         // so match the timestamp value rather than an exact key/colon spacing.
-        assert!(s.contains(&format!("\"{today}")), "resolved not stamped today ({today}): {s}");
+        assert!(
+            s.contains(&format!("\"{today}")),
+            "resolved not stamped today ({today}): {s}"
+        );
 
         let _ = std::fs::remove_dir_all(&repo);
     }

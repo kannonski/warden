@@ -800,30 +800,32 @@ mod tests {
 
     // Step 2 proof: a pane requested as a WASM app renders the guest's frames over WebTransport —
     // the whole plugin path end to end (client `{"app":..}` → app capability → frames → browser),
-    // governed exactly like the pty pane above. Uses the deck component (the canonical app plugin);
-    // skips if it isn't built.
+    // governed exactly like the pty pane above. Uses warden's own in-tree kedi:app fixture (no
+    // dependency on any real plugin); skips if it isn't built.
     #[tokio::test]
     async fn webtransport_app_pane_streams_wasm_frames() {
-        // the deck plugin lives in its own repo (the Go deck's guest-wasm/); locate its built .wasm
-        // via $DECK_WASM, else the deck repo checked out as a sibling of warden. Absent → skip.
-        let deck = std::env::var("DECK_WASM").unwrap_or_else(|_| {
+        // warden's fixture (crates/warden-wasm/tests/fixture); locate the built .wasm via
+        // $FIXTURE_WASM, else the default build path. Absent → skip.
+        let fixture = std::env::var("FIXTURE_WASM").unwrap_or_else(|_| {
             concat!(
                 env!("CARGO_MANIFEST_DIR"),
-                "/../../../deck/guest-wasm/target/wasm32-wasip2/release/kedi_app_deck.wasm"
+                "/../warden-wasm/tests/fixture/target/wasm32-wasip2/release/kedi_app_fixture.wasm"
             )
             .to_string()
         });
-        if !std::path::Path::new(&deck).exists() {
-            eprintln!("skip: build the deck wasm first (cd ../deck/guest-wasm && cargo build --release --target wasm32-wasip2), or set DECK_WASM");
+        if !std::path::Path::new(&fixture).exists() {
+            eprintln!(
+                "skip: build the fixture first (cd ../warden-wasm/tests/fixture && cargo build --release --target wasm32-wasip2), or set FIXTURE_WASM"
+            );
             return;
         }
-        // point the plugin dir at a temp dir holding the deck component as `demo.wasm` + a registry
+        // point the plugin dir at a temp dir holding the fixture as `demo.wasm` + a registry
         let dir = std::env::temp_dir().join("kedi-app-pane-test");
         std::fs::create_dir_all(&dir).unwrap();
-        std::fs::copy(deck, dir.join("demo.wasm")).unwrap();
+        std::fs::copy(fixture, dir.join("demo.wasm")).unwrap();
         std::fs::write(
             dir.join("plugins.toml"),
-            "[[plugin]]\nname = \"demo\"\ncaps = [\"dstask\"]\n",
+            "[[plugin]]\nname = \"demo\"\ncaps = []\n",
         )
         .unwrap();
         // SAFETY: single-threaded test setup before any threads read the env
@@ -859,7 +861,7 @@ mod tests {
                 .await
                 .expect("open_bi timed out");
 
-        // open this pane as the `demo` WASM app (before the hello), then introduce
+        // open this pane as the `demo` WASM app (before the hello frame), then introduce
         send.write_all(b"{\"app\":\"demo\"}\n").await.unwrap();
         send.write_all(b"{\"hello\":\"carol\"}\n").await.unwrap();
 
@@ -877,11 +879,11 @@ mod tests {
         .await;
 
         let out = String::from_utf8_lossy(&got.lock().unwrap()).into_owned();
-        // deck always paints its board chrome (column titles) — proof the app's frames streamed over
-        // WebTransport. (It reaches the real dstask via the granted cap; the board renders regardless.)
+        // the fixture paints "kedi:app fixture" on init — proof the app's frames streamed over
+        // WebTransport, governed exactly like a pty pane.
         assert!(
-            out.contains("TODAY") || out.contains("NEXT"),
-            "expected the deck app's board frame over WebTransport, got: {out:?}"
+            out.contains("kedi:app fixture"),
+            "expected the fixture app's frame over WebTransport, got: {out:?}"
         );
     }
 

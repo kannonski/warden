@@ -274,205 +274,140 @@ mod tests {
     use super::*;
     use futures::StreamExt;
 
-    // A mock "dstask"-kind capability returning a fixed two-task JSON — so the invoke path is tested
-    // hermetically (no real dstask CLI). Proves: guest host.invoke → chokepoint → this cap → back.
-    // Mutating ops (note-set, done, …) are recorded so tests can assert what the guest sent.
+    // A mock capability of kind "probe" that answers `ping` — so the host.invoke path is tested
+    // hermetically. Records its calls so a test can assert the guest reached it. warden's own proof
+    // of the governed invoke path; it depends on no real plugin.
     #[derive(Clone, Default)]
-    struct MockDsTask {
+    struct MockProbe {
         calls: std::sync::Arc<std::sync::Mutex<Vec<(String, Vec<u8>)>>>,
     }
     #[async_trait]
-    impl Capability for MockDsTask {
+    impl Capability for MockProbe {
         fn kind(&self) -> CapKind {
-            CapKind("dstask")
+            CapKind("probe")
         }
         fn ops(&self) -> &'static [OpSpec] {
-            &[
-                OpSpec { op: "list", doc: "mock", mutates: false },
-                OpSpec { op: "note-set", doc: "mock", mutates: true },
-                OpSpec { op: "note", doc: "mock", mutates: true },
-                OpSpec { op: "add", doc: "mock", mutates: true },
-                OpSpec { op: "modify", doc: "mock", mutates: true },
-                OpSpec { op: "done", doc: "mock", mutates: true },
-                OpSpec { op: "start", doc: "mock", mutates: true },
-                OpSpec { op: "stop", doc: "mock", mutates: true },
-                OpSpec { op: "list-resolved", doc: "mock", mutates: false },
-                OpSpec { op: "today", doc: "mock", mutates: false },
-            ]
+            &[OpSpec {
+                op: "ping",
+                doc: "mock — replies `pong`",
+                mutates: false,
+            }]
         }
         async fn perform(&self, op: &str, input: &[u8]) -> Result<Vec<u8>> {
-            self.calls.lock().unwrap().push((op.to_string(), input.to_vec()));
+            self.calls
+                .lock()
+                .unwrap()
+                .push((op.to_string(), input.to_vec()));
             match op {
-                // two pending tasks (bucket into NEXT / TODAY) with the fields deck reads
-                "list" => Ok(br#"[
-                  {"uuid":"a","id":1,"summary":"write the report","status":"pending","priority":"P2","tags":[],"project":"work","notes":"","resolved":"0001-01-01T00:00:00Z"},
-                  {"uuid":"b","id":2,"summary":"call the plumber","status":"pending","priority":"P2","tags":["now"],"project":"home","notes":"","resolved":"0001-01-01T00:00:00Z"}
-                ]"#.to_vec()),
-                // resolved tasks (id 0, as dstask reports them): one stamped "today", one older. Only
-                // the today one should land in DONE.
-                "list-resolved" => Ok(br#"[
-                  {"uuid":"c","id":0,"summary":"shipped it","status":"resolved","priority":"P2","tags":[],"project":"work","notes":"","resolved":"2026-07-06T09:00:00+02:00"},
-                  {"uuid":"d","id":0,"summary":"ancient history","status":"resolved","priority":"P2","tags":[],"project":"work","notes":"","resolved":"2026-01-01T09:00:00+02:00"}
-                ]"#.to_vec()),
-                "today" => Ok(b"2026-07-06".to_vec()),
-                _ => Ok(Vec::new()),
+                "ping" => Ok(b"pong".to_vec()),
+                other => Err(warden_core::no_such_op(CapKind("probe"), other)),
             }
         }
         fn revoke(&self) {}
     }
 
-    // The deck plugin lives in its own repo (the Go deck's `guest-wasm/`), so the tests that exercise
-    // the real plugin locate its built `.wasm`: `$DECK_WASM` if set, else the deck repo checked out
-    // as a sibling of warden. Absent → the test skips (deck isn't required to build warden).
-    fn deck_wasm() -> Option<String> {
-        if let Ok(p) = std::env::var("DECK_WASM") {
+    // warden's in-tree `kedi:app` fixture (crates/warden-wasm/tests/fixture). Locate its built `.wasm`
+    // via $FIXTURE_WASM, else the default build path. Absent → the test skips (build it first).
+    fn fixture_wasm() -> Option<String> {
+        if let Ok(p) = std::env::var("FIXTURE_WASM") {
             return std::path::Path::new(&p).exists().then_some(p);
         }
         let p = concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../../../deck/guest-wasm/target/wasm32-wasip2/release/kedi_app_deck.wasm"
+            "/tests/fixture/target/wasm32-wasip2/release/kedi_app_fixture.wasm"
         );
         std::path::Path::new(p).exists().then(|| p.to_string())
     }
 
-    // The real deck plugin: a ratatui kanban rendered to ANSI, reading tasks through the dstask
-    // capability. Assert the board (column titles + a bucketed task) renders end to end.
+    // The WASM-TUI spine, end to end and plugin-agnostic: the fixture renders on init, a key repaints
+    // (keys: 1), and `q` quits → finished(). Proves init→render, on-key→render, and the quit path.
     #[tokio::test]
-    async fn deck_plugin_renders_a_ratatui_board() {
-        let Some(path) = deck_wasm() else {
+    async fn app_capability_runs_a_wasm_tui_end_to_end() {
+        let Some(path) = fixture_wasm() else {
             eprintln!(
-                "skip: build the deck wasm first (cd ../deck/guest-wasm && cargo build --release --target wasm32-wasip2), or set DECK_WASM"
+                "skip: build the fixture first (cd tests/fixture && cargo build --release --target wasm32-wasip2), or set FIXTURE_WASM"
             );
             return;
         };
-        let cap = AppCap::spawn(&path, vec![Box::new(MockDsTask::default())]).expect("spawn deck");
-        let mut frames = cap.output().expect("output");
-        // resize to a real board size so ratatui has room to lay out the columns
-        cap.perform("resize", b"120x40").await.expect("resize");
-
-        // collect a couple of frames (init + resize repaint) and check the latest
-        let mut latest = String::new();
-        for _ in 0..2 {
-            if let Ok(Some(f)) =
-                tokio::time::timeout(std::time::Duration::from_millis(500), frames.next()).await
-            {
-                latest = String::from_utf8_lossy(&f).into_owned();
-            }
-        }
-        // the ratatui board: all four column titles + the two mock tasks bucketed (one TODAY via
-        // +now, one NEXT). Summaries are width-truncated in the narrow columns, so match a prefix.
-        for want in ["TODAY", "NEXT", "WAITING", "DONE"] {
-            assert!(
-                latest.contains(want),
-                "column {want} missing from board: {latest:?}"
-            );
-        }
-        assert!(
-            latest.contains("write the r"),
-            "NEXT task (write the report) missing"
-        );
-        assert!(
-            latest.contains("call the pl"),
-            "TODAY task (call the plumber) missing"
-        );
-        // DONE = resolved-today only: "shipped it" (resolved 2026-07-06, matches the mock `today`) is
-        // in; "ancient history" (resolved January) is filtered out. This is the reappearing-done fix.
-        assert!(
-            latest.contains("shipped it"),
-            "DONE task resolved today (shipped it) missing"
-        );
-        assert!(
-            !latest.contains("ancient history"),
-            "DONE showed a task NOT resolved today (the reappearing-done bug): {latest:?}"
-        );
-    }
-
-    // The note editor end to end: N opens the in-place editor on the cursor card, typed keys build a
-    // multi-line buffer, Esc saves it via the `note-set` op. Assert the guest sent the full blob (with
-    // the id on the first line and a newline from Enter) through the governed capability.
-    #[tokio::test]
-    async fn deck_note_editor_saves_via_note_set() {
-        let Some(path) = deck_wasm() else {
-            eprintln!("skip: build the deck wasm first (cd ../deck/guest-wasm && cargo build --release --target wasm32-wasip2), or set DECK_WASM");
-            return;
-        };
-        let mock = MockDsTask::default();
-        let calls = mock.calls.clone();
-        let cap = AppCap::spawn(&path, vec![Box::new(mock)]).expect("spawn deck");
-        let _frames = cap.output().expect("output");
-        cap.perform("resize", b"120x40").await.expect("resize");
-
-        // cursor starts on the first (TODAY) card. Open the note editor, type "hi", Enter, "there".
-        for k in ["N", "h", "i", "\r", "t", "h", "e", "r", "e"] {
-            cap.perform("key", k.as_bytes()).await.expect("key");
-        }
-        // Esc saves; give the worker a beat to run note-set + the reload's list.
-        cap.perform("key", b"\x1b").await.expect("esc");
-        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-
-        let recorded = calls.lock().unwrap().clone();
-        let note_set = recorded
-            .iter()
-            .find(|(op, _)| op == "note-set")
-            .unwrap_or_else(|| panic!("no note-set recorded; calls were: {:?}",
-                recorded.iter().map(|(o, _)| o).collect::<Vec<_>>()));
-        let payload = String::from_utf8_lossy(&note_set.1);
-        // the TODAY card is id 2 ("call the plumber", +now); the blob is "<id>\nhi\nthere".
-        assert_eq!(payload, "2\nhi\nthere", "note-set payload wrong: {payload:?}");
-    }
-
-    // Render deck at `WxH` and return the ANSI frame after the resize. Drains the init frame(s) first,
-    // then resizes and takes the LAST frame that arrives (the resize repaint at the requested size).
-    async fn deck_frame_at(path: &str, size: &str) -> String {
-        let cap = AppCap::spawn(path, vec![Box::new(MockDsTask::default())]).expect("spawn deck");
-        let mut frames = cap.output().expect("output");
-        // drain the init frame(s)
-        while tokio::time::timeout(std::time::Duration::from_millis(200), frames.next())
+        // no caps granted → the fixture's probe.invoke is refused, but it still renders.
+        let cap = AppBroker
+            .grant(&CapRequest {
+                kind: APP,
+                arg: path,
+            })
             .await
-            .is_ok()
-        {}
-        cap.perform("resize", size.as_bytes()).await.expect("resize");
-        // take the last frame that shows up after the resize
-        let mut latest = String::new();
-        while let Ok(Some(f)) =
-            tokio::time::timeout(std::time::Duration::from_millis(300), frames.next()).await
-        {
-            latest = String::from_utf8_lossy(&f).into_owned();
+            .expect("grant app");
+        let mut frames = cap.output().expect("app has an output stream");
+
+        let first = frames.next().await.expect("a frame after init");
+        assert!(
+            String::from_utf8_lossy(&first).contains("kedi:app fixture"),
+            "unexpected frame: {:?}",
+            String::from_utf8_lossy(&first)
+        );
+
+        cap.perform("key", b"x").await.expect("key");
+        let after_key = frames.next().await.expect("a frame after a key");
+        assert!(
+            String::from_utf8_lossy(&after_key).contains("keys: 1"),
+            "key count not shown"
+        );
+
+        cap.perform("key", b"q").await.expect("q");
+        for _ in 0..50 {
+            if cap.finished() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
-        latest
+        assert!(cap.finished(), "app should have quit on `q`");
     }
 
-    // Responsive: a narrow pane collapses to a single focused column (with a "N/M" position strip),
-    // not four cramped ones. Assert only the focused column's title shows, plus the strip.
+    // The governed host.invoke path: grant the fixture a `probe` capability; on init it calls
+    // probe.ping and renders the answer. Proves guest host.invoke → chokepoint → granted cap → back.
     #[tokio::test]
-    async fn deck_narrow_shows_single_column() {
-        let Some(path) = deck_wasm() else {
-            eprintln!("skip: build the deck wasm first (cd ../deck/guest-wasm && cargo build --release --target wasm32-wasip2), or set DECK_WASM");
+    async fn app_reaches_a_granted_capability_via_host_invoke() {
+        let Some(path) = fixture_wasm() else {
+            eprintln!(
+                "skip: build the fixture first (cd tests/fixture && cargo build --release --target wasm32-wasip2), or set FIXTURE_WASM"
+            );
             return;
         };
-        let wide = deck_frame_at(&path, "120x40").await;
-        assert!(wide.contains("NEXT") && wide.contains("WAITING"), "wide should show all columns");
+        let probe = MockProbe::default();
+        let calls = probe.calls.clone();
+        let cap = AppCap::spawn(&path, vec![Box::new(probe)]).expect("spawn app with caps");
+        let mut frames = cap.output().expect("output");
 
-        let narrow = deck_frame_at(&path, "48x30").await;
-        // cursor starts in column 0 (TODAY); the others are off-screen in single-column mode.
-        assert!(narrow.contains("TODAY"), "narrow should show the focused column: {narrow:?}");
-        assert!(narrow.contains("1/4"), "narrow should show the column position strip: {narrow:?}");
-        assert!(!narrow.contains("WAITING"), "narrow should NOT show non-focused columns: {narrow:?}");
+        let first = frames.next().await.expect("frame after init");
+        assert!(
+            String::from_utf8_lossy(&first).contains("probe: pong"),
+            "app did not reach the granted capability: {:?}",
+            String::from_utf8_lossy(&first)
+        );
+        assert!(
+            calls.lock().unwrap().iter().any(|(op, _)| op == "ping"),
+            "the probe capability was never invoked"
+        );
     }
 
-    // Responsive: a short pane drops the detail pane so the board keeps its rows. Assert the board
-    // (a column title) still renders and the "detail" pane title does not.
+    // An UNGRANTED capability is refused: with no caps granted, the fixture's probe.invoke returns an
+    // error, which it renders as `probe: err: …`. The sandbox stance — a cap you weren't given doesn't
+    // exist for you.
     #[tokio::test]
-    async fn deck_short_drops_detail_pane() {
-        let Some(path) = deck_wasm() else {
-            eprintln!("skip: build the deck wasm first (cd ../deck/guest-wasm && cargo build --release --target wasm32-wasip2), or set DECK_WASM");
+    async fn app_ungranted_capability_is_refused() {
+        let Some(path) = fixture_wasm() else {
+            eprintln!(
+                "skip: build the fixture first (cd tests/fixture && cargo build --release --target wasm32-wasip2), or set FIXTURE_WASM"
+            );
             return;
         };
-        let tall = deck_frame_at(&path, "120x40").await;
-        assert!(tall.contains("detail"), "tall should show the detail pane");
-
-        let short = deck_frame_at(&path, "120x12").await;
-        assert!(short.contains("TODAY"), "short should still show the board: {short:?}");
-        assert!(!short.contains("detail"), "short should drop the detail pane: {short:?}");
+        let cap = AppCap::spawn(&path, vec![]).expect("spawn app without caps");
+        let mut frames = cap.output().expect("output");
+        let first = frames.next().await.expect("frame after init");
+        let text = String::from_utf8_lossy(&first);
+        assert!(
+            text.contains("probe: err:") && text.contains("not granted"),
+            "ungranted cap should be refused, got: {text:?}"
+        );
     }
 }

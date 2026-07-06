@@ -1,0 +1,26 @@
+# A minimal kedi:app fixture — proves warden's WASM-TUI spine (init → render, on-key → render,
+# host.invoke → a granted capability, on-key `q` → quit) WITHOUT depending on any real plugin.
+# warden components must not depend on deck or any other plugin; this in-tree fixture is warden's
+# own proof of the app-pane path.
+#
+#   cargo build --release --target wasm32-wasip2
+#   → target/wasm32-wasip2/release/kedi_app_fixture.wasm
+#
+# Standalone workspace (a wasm target, separate from the host crates).
+[package]
+name = "kedi-app-fixture"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+wit-bindgen = "0.58"
+
+[profile.release]
+opt-level = "z"
+lto = true
+
+[workspace]
