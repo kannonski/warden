@@ -274,59 +274,6 @@ mod tests {
     use super::*;
     use futures::StreamExt;
 
-    // The hello guest component, built from ../../guest-app. Skips gracefully if it isn't built yet
-    // (so `cargo test` never hard-fails on a missing wasm artifact).
-    fn hello_wasm() -> Option<String> {
-        let p = concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../../guest-app/target/wasm32-wasip2/release/kedi_app_hello.wasm"
-        );
-        std::path::Path::new(p).exists().then(|| p.to_string())
-    }
-
-    #[tokio::test]
-    async fn app_capability_runs_a_wasm_tui_end_to_end() {
-        let Some(path) = hello_wasm() else {
-            eprintln!("skip: build guest-app first (cargo build --release --target wasm32-wasip2)");
-            return;
-        };
-        // grant the app capability on the hello component
-        let cap = AppBroker
-            .grant(&CapRequest {
-                kind: APP,
-                arg: path,
-            })
-            .await
-            .expect("grant app");
-        let mut frames = cap.output().expect("app has an output stream");
-
-        // init paints a first frame; assert the greeting reaches us as a governed frame
-        let first = frames.next().await.expect("a frame after init");
-        let text = String::from_utf8_lossy(&first);
-        assert!(
-            text.contains("hello from a kedi WASM app"),
-            "unexpected frame: {text:?}"
-        );
-
-        // drive it: a key repaints (keys: 1), then `q` quits → finished()
-        cap.perform("key", b"x").await.expect("key");
-        let after_key = frames.next().await.expect("a frame after a key");
-        assert!(
-            String::from_utf8_lossy(&after_key).contains("keys: 1"),
-            "key count not shown"
-        );
-
-        cap.perform("key", b"q").await.expect("q");
-        // give the worker a moment to process the quit
-        for _ in 0..50 {
-            if cap.finished() {
-                break;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-        }
-        assert!(cap.finished(), "app should have quit on `q`");
-    }
-
     // A mock "dstask"-kind capability returning a fixed two-task JSON — so the invoke path is tested
     // hermetically (no real dstask CLI). Proves: guest host.invoke → chokepoint → this cap → back.
     // Mutating ops (note-set, done, …) are recorded so tests can assert what the guest sent.
@@ -374,28 +321,16 @@ mod tests {
         fn revoke(&self) {}
     }
 
-    #[tokio::test]
-    async fn app_reaches_a_granted_capability_via_host_invoke() {
-        let Some(path) = hello_wasm() else {
-            eprintln!("skip: build guest-app first");
-            return;
-        };
-        // grant the app a dstask capability; the guest calls host.invoke("dstask","list") on init
-        let cap = AppCap::spawn(&path, vec![Box::new(MockDsTask::default())]).expect("spawn app with caps");
-        let mut frames = cap.output().expect("output");
-        let first = frames.next().await.expect("frame after init");
-        let text = String::from_utf8_lossy(&first);
-        // the guest counts "uuid" keys → 2 tasks, rendered via the governed capability
-        assert!(
-            text.contains("dstask: 2 tasks"),
-            "app did not reach the dstask capability: {text:?}"
-        );
-    }
-
+    // The deck plugin lives in its own repo (the Go deck's `guest-wasm/`), so the tests that exercise
+    // the real plugin locate its built `.wasm`: `$DECK_WASM` if set, else the deck repo checked out
+    // as a sibling of warden. Absent → the test skips (deck isn't required to build warden).
     fn deck_wasm() -> Option<String> {
+        if let Ok(p) = std::env::var("DECK_WASM") {
+            return std::path::Path::new(&p).exists().then_some(p);
+        }
         let p = concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../../guest-deck/target/wasm32-wasip2/release/kedi_app_deck.wasm"
+            "/../../../deck/guest-wasm/target/wasm32-wasip2/release/kedi_app_deck.wasm"
         );
         std::path::Path::new(p).exists().then(|| p.to_string())
     }
@@ -406,7 +341,7 @@ mod tests {
     async fn deck_plugin_renders_a_ratatui_board() {
         let Some(path) = deck_wasm() else {
             eprintln!(
-                "skip: build guest-deck first (cargo build --release --target wasm32-wasip2)"
+                "skip: build the deck wasm first (cd ../deck/guest-wasm && cargo build --release --target wasm32-wasip2), or set DECK_WASM"
             );
             return;
         };
@@ -458,7 +393,7 @@ mod tests {
     #[tokio::test]
     async fn deck_note_editor_saves_via_note_set() {
         let Some(path) = deck_wasm() else {
-            eprintln!("skip: build guest-deck first (cargo build --release --target wasm32-wasip2)");
+            eprintln!("skip: build the deck wasm first (cd ../deck/guest-wasm && cargo build --release --target wasm32-wasip2), or set DECK_WASM");
             return;
         };
         let mock = MockDsTask::default();
@@ -484,5 +419,60 @@ mod tests {
         let payload = String::from_utf8_lossy(&note_set.1);
         // the TODAY card is id 2 ("call the plumber", +now); the blob is "<id>\nhi\nthere".
         assert_eq!(payload, "2\nhi\nthere", "note-set payload wrong: {payload:?}");
+    }
+
+    // Render deck at `WxH` and return the ANSI frame after the resize. Drains the init frame(s) first,
+    // then resizes and takes the LAST frame that arrives (the resize repaint at the requested size).
+    async fn deck_frame_at(path: &str, size: &str) -> String {
+        let cap = AppCap::spawn(path, vec![Box::new(MockDsTask::default())]).expect("spawn deck");
+        let mut frames = cap.output().expect("output");
+        // drain the init frame(s)
+        while tokio::time::timeout(std::time::Duration::from_millis(200), frames.next())
+            .await
+            .is_ok()
+        {}
+        cap.perform("resize", size.as_bytes()).await.expect("resize");
+        // take the last frame that shows up after the resize
+        let mut latest = String::new();
+        while let Ok(Some(f)) =
+            tokio::time::timeout(std::time::Duration::from_millis(300), frames.next()).await
+        {
+            latest = String::from_utf8_lossy(&f).into_owned();
+        }
+        latest
+    }
+
+    // Responsive: a narrow pane collapses to a single focused column (with a "N/M" position strip),
+    // not four cramped ones. Assert only the focused column's title shows, plus the strip.
+    #[tokio::test]
+    async fn deck_narrow_shows_single_column() {
+        let Some(path) = deck_wasm() else {
+            eprintln!("skip: build the deck wasm first (cd ../deck/guest-wasm && cargo build --release --target wasm32-wasip2), or set DECK_WASM");
+            return;
+        };
+        let wide = deck_frame_at(&path, "120x40").await;
+        assert!(wide.contains("NEXT") && wide.contains("WAITING"), "wide should show all columns");
+
+        let narrow = deck_frame_at(&path, "48x30").await;
+        // cursor starts in column 0 (TODAY); the others are off-screen in single-column mode.
+        assert!(narrow.contains("TODAY"), "narrow should show the focused column: {narrow:?}");
+        assert!(narrow.contains("1/4"), "narrow should show the column position strip: {narrow:?}");
+        assert!(!narrow.contains("WAITING"), "narrow should NOT show non-focused columns: {narrow:?}");
+    }
+
+    // Responsive: a short pane drops the detail pane so the board keeps its rows. Assert the board
+    // (a column title) still renders and the "detail" pane title does not.
+    #[tokio::test]
+    async fn deck_short_drops_detail_pane() {
+        let Some(path) = deck_wasm() else {
+            eprintln!("skip: build the deck wasm first (cd ../deck/guest-wasm && cargo build --release --target wasm32-wasip2), or set DECK_WASM");
+            return;
+        };
+        let tall = deck_frame_at(&path, "120x40").await;
+        assert!(tall.contains("detail"), "tall should show the detail pane");
+
+        let short = deck_frame_at(&path, "120x12").await;
+        assert!(short.contains("TODAY"), "short should still show the board: {short:?}");
+        assert!(!short.contains("detail"), "short should drop the detail pane: {short:?}");
     }
 }

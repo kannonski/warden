@@ -800,21 +800,27 @@ mod tests {
 
     // Step 2 proof: a pane requested as a WASM app renders the guest's frames over WebTransport —
     // the whole plugin path end to end (client `{"app":..}` → app capability → frames → browser),
-    // governed exactly like the pty pane above. Skips if the hello component isn't built.
+    // governed exactly like the pty pane above. Uses the deck component (the canonical app plugin);
+    // skips if it isn't built.
     #[tokio::test]
     async fn webtransport_app_pane_streams_wasm_frames() {
-        let hello = concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../../guest-app/target/wasm32-wasip2/release/kedi_app_hello.wasm"
-        );
-        if !std::path::Path::new(hello).exists() {
-            eprintln!("skip: build guest-app first (cargo build --release --target wasm32-wasip2)");
+        // the deck plugin lives in its own repo (the Go deck's guest-wasm/); locate its built .wasm
+        // via $DECK_WASM, else the deck repo checked out as a sibling of warden. Absent → skip.
+        let deck = std::env::var("DECK_WASM").unwrap_or_else(|_| {
+            concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../../deck/guest-wasm/target/wasm32-wasip2/release/kedi_app_deck.wasm"
+            )
+            .to_string()
+        });
+        if !std::path::Path::new(&deck).exists() {
+            eprintln!("skip: build the deck wasm first (cd ../deck/guest-wasm && cargo build --release --target wasm32-wasip2), or set DECK_WASM");
             return;
         }
-        // point the plugin dir at a temp dir holding the hello component as `demo.wasm` + a registry
+        // point the plugin dir at a temp dir holding the deck component as `demo.wasm` + a registry
         let dir = std::env::temp_dir().join("kedi-app-pane-test");
         std::fs::create_dir_all(&dir).unwrap();
-        std::fs::copy(hello, dir.join("demo.wasm")).unwrap();
+        std::fs::copy(deck, dir.join("demo.wasm")).unwrap();
         std::fs::write(
             dir.join("plugins.toml"),
             "[[plugin]]\nname = \"demo\"\ncaps = [\"dstask\"]\n",
@@ -871,9 +877,11 @@ mod tests {
         .await;
 
         let out = String::from_utf8_lossy(&got.lock().unwrap()).into_owned();
+        // deck always paints its board chrome (column titles) — proof the app's frames streamed over
+        // WebTransport. (It reaches the real dstask via the granted cap; the board renders regardless.)
         assert!(
-            out.contains("hello from a kedi WASM app"),
-            "expected the WASM app's frame over WebTransport, got: {out:?}"
+            out.contains("TODAY") || out.contains("NEXT"),
+            "expected the deck app's board frame over WebTransport, got: {out:?}"
         );
     }
 
