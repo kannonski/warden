@@ -1,0 +1,141 @@
+//! deck's state + pure navigation logic (ported from the Go model). No IO here — `load()` (task.rs)
+//! is the only thing that reaches the capability; everything in this file is cursor/filter math.
+
+use crate::task::{Column, Task, load};
+
+pub struct Model {
+    pub cols: Vec<Column>,
+    pub cols_w: u16,
+    pub cols_h: u16,
+    pub col: usize,  // cursor column
+    pub card: usize, // cursor card (index within the filtered view)
+    pub off: Vec<usize>, // per-column scroll offset
+    pub mode: Mode,
+    pub input: String,
+    pub filter: String,
+    pub status: String,
+}
+
+#[derive(PartialEq, Eq, Clone, Copy)]
+pub enum Mode {
+    Nav,
+    Add,
+    Filter,
+    Note,
+    Modify,
+}
+
+pub fn clampi(v: isize, n: usize) -> usize {
+    if n == 0 {
+        0
+    } else if v < 0 {
+        0
+    } else if (v as usize) >= n {
+        n - 1
+    } else {
+        v as usize
+    }
+}
+
+impl Model {
+    pub fn new() -> Model {
+        let mut m = Model {
+            cols: Vec::new(),
+            cols_w: 80,
+            cols_h: 24,
+            col: 0,
+            card: 0,
+            off: Vec::new(),
+            mode: Mode::Nav,
+            input: String::new(),
+            filter: String::new(),
+            status: String::new(),
+        };
+        m.reload();
+        m
+    }
+
+    pub fn reload(&mut self) {
+        match load() {
+            Ok(cols) => {
+                self.cols = cols;
+                if self.off.len() != self.cols.len() {
+                    self.off = vec![0; self.cols.len()];
+                }
+                self.col = clampi(self.col as isize, self.cols.len());
+                let n = self.visn();
+                self.card = clampi(self.card as isize, n);
+                self.scroll();
+            }
+            Err(e) => self.status = format!("⚠ {e}"),
+        }
+    }
+
+    /// Cards visible in column `ci` after the active filter (area/state/summary substring).
+    pub fn shown(&self, ci: usize) -> Vec<&Task> {
+        let Some(col) = self.cols.get(ci) else { return Vec::new() };
+        if self.filter.is_empty() {
+            return col.cards.iter().collect();
+        }
+        let f = self.filter.to_lowercase();
+        col.cards
+            .iter()
+            .filter(|t| {
+                format!("{} {} {}", t.project, t.state(), t.summary)
+                    .to_lowercase()
+                    .contains(&f)
+            })
+            .collect()
+    }
+
+    pub fn visn(&self) -> usize {
+        self.shown(self.col).len()
+    }
+
+    /// The selected task's uuid (for actions), or None if the column is empty.
+    #[allow(dead_code)] // for the planned move-follow-cursor feature
+    pub fn selected_uuid(&self) -> Option<String> {
+        self.shown(self.col).get(self.card).map(|t| t.uuid.clone())
+    }
+
+    pub fn selected(&self) -> Option<&Task> {
+        self.shown(self.col).into_iter().nth(self.card)
+    }
+
+    /// Visible cards per column, from the current column height (title + blank + 2/card).
+    pub fn visible_rows(&self) -> usize {
+        (((self.cols_h as usize).saturating_sub(4)) / 2).max(3)
+    }
+
+    /// Keep the cursor inside its column's scroll window.
+    pub fn scroll(&mut self) {
+        if self.col >= self.off.len() {
+            return;
+        }
+        let v = self.visible_rows();
+        if self.card < self.off[self.col] {
+            self.off[self.col] = self.card;
+        }
+        if self.card >= self.off[self.col] + v {
+            self.off[self.col] = self.card + 1 - v;
+        }
+    }
+
+    pub fn move_col(&mut self, d: isize) {
+        self.col = clampi(self.col as isize + d, self.cols.len());
+        self.card = clampi(self.card as isize, self.visn());
+        self.scroll();
+    }
+    pub fn move_card(&mut self, d: isize) {
+        self.card = clampi(self.card as isize + d, self.visn());
+        self.scroll();
+    }
+    pub fn top(&mut self) {
+        self.card = 0;
+        self.scroll();
+    }
+    pub fn bottom(&mut self) {
+        self.card = clampi(isize::MAX, self.visn());
+        self.scroll();
+    }
+}

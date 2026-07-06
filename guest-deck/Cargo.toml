@@ -1,0 +1,31 @@
+# deck — a kanban over dstask, as a kedi:app WASM plugin.
+#
+# The UI is real ratatui (Layout/Block/List/Paragraph widgets), rendered into a TestBackend buffer
+# and serialized to ANSI for host.render. The task store is reached only through the governed
+# `dstask` capability via host.invoke — deck-in-WASM can't touch the filesystem.
+#
+#   cargo build --release --target wasm32-wasip2
+#
+# Standalone workspace (a different target than the host crates).
+[package]
+name = "kedi-app-deck"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+wit-bindgen = "0.58"
+# ratatui with only the TestBackend (no crossterm/termion — those need a real terminal / libc we
+# don't have in wasm). We render into TestBackend's Buffer and serialize it to ANSI ourselves.
+ratatui = { version = "0.29", default-features = false }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[profile.release]
+opt-level = "z"   # small wasm
+lto = true
+
+[workspace]

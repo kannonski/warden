@@ -15,11 +15,43 @@ use warden_core::{Broker, CapKind, CapRequest, Capability, OpSpec, Result, Warde
 
 pub const DSTASK: CapKind = CapKind("dstask");
 
-const OPS: &[OpSpec] = &[OpSpec {
-    op: "list",
-    doc: "all tasks (incl. resolved) as the dstask JSON array on stdout",
-    mutates: false,
-}];
+const OPS: &[OpSpec] = &[
+    OpSpec {
+        op: "list",
+        doc: "all tasks (incl. resolved) as the dstask JSON array on stdout",
+        mutates: false,
+    },
+    OpSpec {
+        op: "add",
+        doc: "add a task; input = the summary + dstask tokens (+tag project: Pn)",
+        mutates: true,
+    },
+    OpSpec {
+        op: "modify",
+        doc: "modify a task; input = `<id> <tokens>` (+tag -tag Pn project:x)",
+        mutates: true,
+    },
+    OpSpec {
+        op: "done",
+        doc: "resolve a task; input = the id",
+        mutates: true,
+    },
+    OpSpec {
+        op: "start",
+        doc: "mark a task active; input = the id",
+        mutates: true,
+    },
+    OpSpec {
+        op: "stop",
+        doc: "pause an active task; input = the id",
+        mutates: true,
+    },
+    OpSpec {
+        op: "note",
+        doc: "append a note; input = `<id> <text>`",
+        mutates: true,
+    },
+];
 
 pub struct DsTaskCap {
     /// the dstask binary (default `dstask`; overridable so a sandboxed/test host can point elsewhere)
@@ -34,25 +66,32 @@ impl Capability for DsTaskCap {
     fn ops(&self) -> &'static [OpSpec] {
         OPS
     }
-    async fn perform(&self, op: &str, _input: &[u8]) -> Result<Vec<u8>> {
-        match op {
-            // `dstask` with no args prints the full task set as JSON (id, uuid, summary, status,
-            // priority, tags, project, notes, created, resolved, due) — exactly what deck renders.
-            "list" => {
-                let out = Command::new(&self.bin)
-                    .output()
-                    .map_err(|e| WardenError::Cap(format!("dstask spawn: {e}")))?;
-                if !out.status.success() {
-                    return Err(WardenError::Cap(format!(
-                        "dstask exited {}: {}",
-                        out.status,
-                        String::from_utf8_lossy(&out.stderr).trim()
-                    )));
-                }
-                Ok(out.stdout)
+    async fn perform(&self, op: &str, input: &[u8]) -> Result<Vec<u8>> {
+        // the dstask subcommand + its args. `list` is the bare CLI (JSON out); the mutating ops map
+        // to dstask subcommands, with the input string appended as whitespace-split arguments.
+        let args: Vec<String> = match op {
+            "list" => Vec::new(),
+            "add" | "modify" | "done" | "start" | "stop" | "note" => {
+                let mut a = vec![op.to_string()];
+                let s = std::str::from_utf8(input)
+                    .map_err(|e| WardenError::Cap(format!("dstask {op} utf8: {e}")))?;
+                a.extend(s.split_whitespace().map(str::to_string));
+                a
             }
-            other => Err(warden_core::no_such_op(DSTASK, other)),
+            other => return Err(warden_core::no_such_op(DSTASK, other)),
+        };
+        let out = Command::new(&self.bin)
+            .args(&args)
+            .output()
+            .map_err(|e| WardenError::Cap(format!("dstask spawn: {e}")))?;
+        if !out.status.success() {
+            return Err(WardenError::Cap(format!(
+                "dstask {op} exited {}: {}",
+                out.status,
+                String::from_utf8_lossy(&out.stderr).trim()
+            )));
         }
+        Ok(out.stdout)
     }
     fn revoke(&self) {
         // nothing to release — each op is a fresh CLI call

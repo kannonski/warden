@@ -9,9 +9,9 @@
 //!
 //! wasmtime is driven SYNC on a dedicated worker thread (blocking OS I/O's right home), bridged to
 //! the async world by channels — the same thread↔async pattern the pty reader uses. The guest's only
-//! door to the world is the `host.invoke` import, which crosses the warden chokepoint via a callback
-//! the host wires in (governed exactly like `warden:action`); step 1 wires a deny-all stub so the
-//! spine is provable before real capabilities are threaded through.
+//! door to the world is the `host.invoke` import: it dispatches to the app's granted capabilities
+//! (governed exactly like `warden:action`), so a plugin like deck reaches the task store only through
+//! a `dstask` capability. An ungranted kind is refused — the sandbox stance.
 
 use async_trait::async_trait;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -344,7 +344,11 @@ mod tests {
         }
         async fn perform(&self, op: &str, _input: &[u8]) -> Result<Vec<u8>> {
             assert_eq!(op, "list");
-            Ok(br#"[{"uuid":"a","summary":"one"},{"uuid":"b","summary":"two"}]"#.to_vec())
+            // two pending tasks (bucket into NEXT / TODAY) with the fields deck reads
+            Ok(br#"[
+              {"uuid":"a","id":1,"summary":"write the report","status":"pending","priority":"P2","tags":[],"project":"work","notes":"","resolved":"0001-01-01T00:00:00Z"},
+              {"uuid":"b","id":2,"summary":"call the plumber","status":"pending","priority":"P2","tags":["now"],"project":"home","notes":"","resolved":"0001-01-01T00:00:00Z"}
+            ]"#.to_vec())
         }
         fn revoke(&self) {}
     }
@@ -364,6 +368,56 @@ mod tests {
         assert!(
             text.contains("dstask: 2 tasks"),
             "app did not reach the dstask capability: {text:?}"
+        );
+    }
+
+    fn deck_wasm() -> Option<String> {
+        let p = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../guest-deck/target/wasm32-wasip2/release/kedi_app_deck.wasm"
+        );
+        std::path::Path::new(p).exists().then(|| p.to_string())
+    }
+
+    // The real deck plugin: a ratatui kanban rendered to ANSI, reading tasks through the dstask
+    // capability. Assert the board (column titles + a bucketed task) renders end to end.
+    #[tokio::test]
+    async fn deck_plugin_renders_a_ratatui_board() {
+        let Some(path) = deck_wasm() else {
+            eprintln!(
+                "skip: build guest-deck first (cargo build --release --target wasm32-wasip2)"
+            );
+            return;
+        };
+        let cap = AppCap::spawn(&path, vec![Box::new(MockDsTask)]).expect("spawn deck");
+        let mut frames = cap.output().expect("output");
+        // resize to a real board size so ratatui has room to lay out the columns
+        cap.perform("resize", b"120x40").await.expect("resize");
+
+        // collect a couple of frames (init + resize repaint) and check the latest
+        let mut latest = String::new();
+        for _ in 0..2 {
+            if let Ok(Some(f)) =
+                tokio::time::timeout(std::time::Duration::from_millis(500), frames.next()).await
+            {
+                latest = String::from_utf8_lossy(&f).into_owned();
+            }
+        }
+        // the ratatui board: all four column titles + the two mock tasks bucketed (one TODAY via
+        // +now, one NEXT). Summaries are width-truncated in the narrow columns, so match a prefix.
+        for want in ["TODAY", "NEXT", "WAITING", "DONE"] {
+            assert!(
+                latest.contains(want),
+                "column {want} missing from board: {latest:?}"
+            );
+        }
+        assert!(
+            latest.contains("write the r"),
+            "NEXT task (write the report) missing"
+        );
+        assert!(
+            latest.contains("call the pl"),
+            "TODAY task (call the plumber) missing"
         );
     }
 }
