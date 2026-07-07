@@ -22,7 +22,7 @@ use warden_caps::pty::{PTY, PtyBroker};
 use warden_core::Broker as _; // brings .grant() into scope for grant_declared_caps
 use warden_core::{
     Action, ActionSource, ApprovalRequest, Approver, Call, CapRequest, Ctx, Decision, Event,
-    Incoming, InputFrame, Policy, Recorder, Result as WResult, Runtime, Session, SessionCtx,
+    InputFrame, InputStream, Policy, Recorder, Result as WResult, Runtime, Session, SessionCtx,
     SessionId, Verdict, Warden, WardenError,
 };
 use warden_host::{Manifest, plugin};
@@ -256,12 +256,17 @@ pub fn terminal_warden(
 /// toggled on mid-session.
 pub fn sessions_json(warden: &Warden) -> String {
     let rows: Vec<String> = warden
-        .live_sessions()
+        .session_views()
         .into_iter()
-        .map(|(id, who, caps)| {
-            let caps_json = serde_json::to_string(&caps).unwrap_or_else(|_| "[]".into());
-            let who_json = serde_json::to_string(&who).unwrap_or_else(|_| "\"?\"".into());
-            format!("{{\"id\":{id},\"who\":{who_json},\"caps\":{caps_json}}}")
+        .map(|s| {
+            let caps_json = serde_json::to_string(&s.caps).unwrap_or_else(|_| "[]".into());
+            let who_json = serde_json::to_string(&s.identity).unwrap_or_else(|_| "\"?\"".into());
+            let title_json = serde_json::to_string(&s.title).unwrap_or_else(|_| "\"\"".into());
+            let tab_json = serde_json::to_string(&s.tab).unwrap_or_else(|_| "\"\"".into());
+            format!(
+                "{{\"id\":{},\"who\":{who_json},\"caps\":{caps_json},\"title\":{title_json},\"tab\":{tab_json},\"detachable\":{}}}",
+                s.id, s.detachable
+            )
         })
         .collect();
     format!("[{}]", rows.join(","))
@@ -429,6 +434,18 @@ enum ClientMsg {
     Frame(InputFrame),
     /// The kill button: record an attributed kill + terminate this pane's session.
     Kill(String),
+    /// Re-attach this stream to an EXISTING durable session by id (teleport): bind here instead of
+    /// opening a fresh session. The prior viewer (another tab) is detached (exclusive move).
+    Attach(u64),
+    /// Push this pane's human title (its OSC title) to the server so the cross-tab palette can search
+    /// it. Sent whenever the title changes.
+    Title(String),
+    /// Tag this session with a per-pane key of the form `<tab-id>:<pane-nonce>` — unique per pane, and
+    /// prefixed by the owning browser-tab id. The palette splits on the first `:` to group by tab
+    /// (here vs another tab) and matches the whole key to map a /sessions row back to its own pane.
+    Tab(String),
+    /// Explicitly end this durable session (revoke + remove) — distinct from a viewer just detaching.
+    Close,
 }
 
 fn parse_msg(line: &[u8]) -> Option<ClientMsg> {
@@ -465,6 +482,25 @@ fn parse_msg(line: &[u8]) -> Option<ClientMsg> {
     }
     if let Some(k) = v.get("kill") {
         return Some(ClientMsg::Kill(k.as_str().unwrap_or("browser").to_string()));
+    }
+    if let Some(id) = v.get("attach").and_then(|x| x.as_u64()) {
+        return Some(ClientMsg::Attach(id));
+    }
+    if let Some(t) = v.get("title").and_then(|x| x.as_str()) {
+        // bounded, printable — it lands in session_views + the audit UI
+        let title: String = t.chars().filter(|c| !c.is_control()).take(120).collect();
+        return Some(ClientMsg::Title(title));
+    }
+    if let Some(t) = v.get("tab").and_then(|x| x.as_str()) {
+        let tab: String = t
+            .chars()
+            .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | ':'))
+            .take(80)
+            .collect();
+        return Some(ClientMsg::Tab(tab));
+    }
+    if v.get("close").is_some() {
+        return Some(ClientMsg::Close);
     }
     // {"pasteImage":"<base64>","ext":"png"} — a clipboard image. The pty capability writes it to a
     // file and returns the path (typed at the prompt by the attach loop). Data is `ext\n<raw bytes>`.
@@ -579,6 +615,8 @@ async fn pane_session(
     let mut identity = String::from("browser");
     let mut pending: Vec<InputFrame> = Vec::new();
     let mut app_name: Option<String> = None; // Some(name) → this pane is a WASM plugin, not a shell
+    let mut attach_to: Option<u64> = None; // Some(id) → re-attach to that durable session (teleport)
+    let mut tab_id = String::new();
     'intro: loop {
         match recv.read(&mut tmp).await {
             Ok(Some(n)) if n > 0 => {
@@ -594,6 +632,11 @@ async fn pane_session(
                                 app_name = Some(name);
                             }
                         }
+                        // {"attach":id} re-attaches this stream to an existing durable session
+                        // (teleport) instead of opening a fresh one. Recorded before the hello.
+                        Some(ClientMsg::Attach(id)) => attach_to = Some(id),
+                        // {"tab":id} tags which browser tab owns this session (for the palette)
+                        Some(ClientMsg::Tab(t)) => tab_id = t,
                         Some(ClientMsg::Hello(who)) if !who.trim().is_empty() => {
                             identity = who;
                             break 'intro;
@@ -659,47 +702,64 @@ async fn pane_session(
             })
         })),
     };
-    let request = match &app_name {
-        // an app pane: the broker resolves this plugin name through plugins.toml at grant time
-        Some(name) => CapRequest {
-            kind: APP,
-            arg: name.clone(),
-        },
-        None => CapRequest {
-            kind: PTY,
-            arg: command,
-        },
-    };
-    let session = Session {
-        id: SessionId(sid),
-        identity,
-        requests: vec![request],
-        action,
-    };
-    // if the session ends in an error (e.g. policy deny), tell the human why before the pane closes
-    let out_notice = out_tx.clone();
-    let observer: Arc<dyn Recorder> = Arc::new(WtObserver { out: out_tx });
-    let inc = Incoming {
-        session,
-        runtime: "local".into(),
-        observer: Some(observer),
-        input: Some(Box::pin(
-            tokio_stream::wrappers::UnboundedReceiverStream::new(in_rx),
-        )),
-        done: Box::new(move |r: &warden_core::Result<()>| {
-            if let Err(e) = r {
-                let _ =
-                    out_notice.send(format!("\r\n\x1b[1;31m[warden] {e}\x1b[0m\r\n").into_bytes());
+    // ── open-or-reattach: a session is a durable warden object; a stream is a transient viewer ──
+    // If the client asked to {"attach": id} an existing detachable session, we re-attach this stream
+    // to it (teleport — the prior viewer is detached). Otherwise we OPEN a fresh durable session
+    // (grant its pty/app cap, start its long-lived output pump) and attach this stream as its first
+    // viewer. Either way, a disconnect DETACHES (the session lives on); only {"close"}/{"kill"} end it.
+    let target = match attach_to {
+        // re-attach: only if it's a live, detachable session (else fall through to a fresh open)
+        Some(id)
+            if warden
+                .session_views()
+                .iter()
+                .any(|s| s.id == id && s.detachable) =>
+        {
+            id
+        }
+        _ => {
+            // OPEN a new durable session. Grant the pty/app cap; start its pump.
+            let request = match &app_name {
+                Some(name) => CapRequest {
+                    kind: APP,
+                    arg: name.clone(),
+                },
+                None => CapRequest {
+                    kind: PTY,
+                    arg: command,
+                },
+            };
+            let session = Session {
+                id: SessionId(sid),
+                identity: identity.clone(),
+                requests: vec![request],
+                action: action_placeholder(), // open_session ignores this; the action is on attach
+            };
+            match warden.open_session(session).await {
+                Ok(pump) => {
+                    tokio::spawn(pump); // the caller drives the long-lived pump (kernel schedules none)
+                }
+                Err(e) => {
+                    let _ = send
+                        .write_all(format!("\r\n\x1b[1;31m[warden] {e}\x1b[0m\r\n").as_bytes())
+                        .await;
+                    return;
+                }
             }
-        }),
+            sid
+        }
     };
+    let tsid = SessionId(target);
 
-    // run the warden session as a tokio task now that the kernel is async — no more thread-per-
-    // session. It finishes when `in_tx` closes below (the attach loop's input stream ends).
-    let warden_kill = warden.clone(); // kept for the {kill} control frame
-    tokio::spawn(async move { warden.run_incoming(inc).await });
+    // record the owner tab so /sessions can group "here vs another tab". The client learns which
+    // /sessions row is which of its own panes by matching the per-pane `tab` key it sent (no need to
+    // push the numeric session id back over the terminal stream).
+    if !tab_id.is_empty() {
+        warden.set_tab(tsid, &tab_id);
+    }
 
-    // pump pty output → the WebTransport stream (ends when the session drops `out_tx`)
+    // out pump: session output (via WtObserver) → this stream. Ends when out_tx drops (detach).
+    let observer: Arc<dyn Recorder> = Arc::new(WtObserver { out: out_tx });
     let out_task = tokio::spawn(async move {
         while let Some(bytes) = out_rx.recv().await {
             if send.write_all(&bytes).await.is_err() {
@@ -708,41 +768,81 @@ async fn pane_session(
         }
     });
 
-    // a frame that arrived with (instead of) the hello goes to the session first
+    // seed any frame that arrived with the hello, then attach this viewer + run its action.
     for f in pending.drain(..) {
-        if in_tx.send(f).is_err() {
-            return;
-        }
+        let _ = in_tx.send(f);
     }
+    let input =
+        Box::pin(tokio_stream::wrappers::UnboundedReceiverStream::new(in_rx)) as InputStream;
+    let warden_attach = warden.clone();
+    let mut attach_task = tokio::spawn(async move {
+        warden_attach
+            .attach(tsid, "local", action, observer, Some(input))
+            .await
+    });
 
-    // read client control frames (keystrokes/resize) → the warden input channel.
-    // NB: drain lines already sitting in `buf` (read together with the intro) BEFORE reading more.
+    // read client control frames, running alongside the attach task. Three ways this ends:
+    //  · the client disconnects (recv EOF) → DETACH: drop in_tx, the session + caps live on;
+    //  · the client sends {"kill"}/{"close"} → tear the session down (revoke + remove);
+    //  · the attach task finishes on its own while the client is still connected → the capability
+    //    self-exited (shell quit / app returned false) → CLOSE the session (a terminal condition).
+    let mut ended = false; // the session was explicitly ended (kill/close/self-exit) — don't detach
     loop {
         while let Some(p) = buf.iter().position(|&b| b == b'\n') {
             let line: Vec<u8> = buf.drain(..=p).collect();
             match parse_msg(&line[..line.len() - 1]) {
                 Some(ClientMsg::Frame(f)) => {
-                    if in_tx.send(f).is_err() {
-                        return;
-                    }
+                    let _ = in_tx.send(f);
                 }
-                // kill button: attributed Event::Killed, then end the session (attach loop
-                // stops → revoke → the pty child is terminated)
                 Some(ClientMsg::Kill(by)) => {
-                    warden_kill.kill(SessionId(sid), &by);
-                    return;
+                    warden.kill(tsid, &by);
+                    ended = true;
+                    break;
                 }
-                // late hello/app are ignored — identity and pane kind are fixed at open
-                Some(ClientMsg::Hello(_)) | Some(ClientMsg::App(_)) | None => {}
+                Some(ClientMsg::Close) => {
+                    warden.close_session(tsid);
+                    ended = true;
+                    break;
+                }
+                Some(ClientMsg::Title(t)) => warden.set_title(tsid, &t),
+                Some(ClientMsg::Tab(t)) => warden.set_tab(tsid, &t),
+                Some(ClientMsg::Hello(_))
+                | Some(ClientMsg::App(_))
+                | Some(ClientMsg::Attach(_))
+                | None => {}
             }
         }
-        match recv.read(&mut tmp).await {
-            Ok(Some(n)) if n > 0 => buf.extend_from_slice(&tmp[..n]),
-            _ => break, // client disconnected / stream closed
+        if ended {
+            break;
+        }
+        tokio::select! {
+            r = recv.read(&mut tmp) => match r {
+                Ok(Some(n)) if n > 0 => buf.extend_from_slice(&tmp[..n]),
+                _ => break, // client disconnected → detach
+            },
+            _ = &mut attach_task => {
+                // the capability self-exited while the client was still here → end the session.
+                warden.close_session(tsid);
+                ended = true;
+                break;
+            }
         }
     }
-    drop(in_tx); // end the attach loop → session closes → shell revoked → out_tx drops
-    let _ = out_task.await; // drain remaining output, then done
+    drop(in_tx); // end the attach loop (if still running) → `attach` returns
+    if !ended {
+        // a plain client disconnect: DETACH — the session + caps live on for a re-attach (teleport).
+        let _ = attach_task.await;
+    }
+    let _ = out_task.await;
+}
+
+/// A throwaway action for `open_session`, which ignores `Session.action` (it only grants + registers;
+/// the real attach loop is supplied to `attach`). Never run.
+fn action_placeholder() -> Action {
+    Action {
+        name: "open".into(),
+        source: ActionSource::InProcess(warden_core::action_fn(|_| Box::pin(async { Ok(()) }))),
+    }
 }
 
 #[cfg(test)]
@@ -880,11 +980,20 @@ mod tests {
 
         let got: std::sync::Arc<std::sync::Mutex<Vec<u8>>> = Default::default();
         let got2 = got.clone();
-        let _ = tokio::time::timeout(std::time::Duration::from_millis(800), async move {
+        // generous window (spawning + rendering the wasm fixture can be slow under parallel load), but
+        // break EARLY once the expected frame lands so the test is fast in the common case.
+        let _ = tokio::time::timeout(std::time::Duration::from_millis(2000), async move {
             let mut tmp = [0u8; 4096];
             loop {
                 match recv.read(&mut tmp).await {
-                    Ok(Some(n)) if n > 0 => got2.lock().unwrap().extend_from_slice(&tmp[..n]),
+                    Ok(Some(n)) if n > 0 => {
+                        got2.lock().unwrap().extend_from_slice(&tmp[..n]);
+                        if String::from_utf8_lossy(&got2.lock().unwrap())
+                            .contains("kedi:app fixture")
+                        {
+                            break;
+                        }
+                    }
                     _ => break,
                 }
             }
@@ -1535,6 +1644,184 @@ mod tests {
         assert!(
             last.contains("You are helping") || last.contains("✨ agent") || last.contains("TODAY"),
             "expected the agent answer (echoed prompt) or at least the board: {last:?}"
+        );
+    }
+
+    // A viewer disconnecting DETACHES — the durable session survives (tmux model). Open a pty pane,
+    // drop the client, and assert the session is still live + detachable in session_views().
+    #[tokio::test]
+    async fn disconnect_detaches_and_session_survives() {
+        let warden = Arc::new(
+            terminal_warden("/tmp/kedi-detach-test.jsonl", true, vec![])
+                .unwrap()
+                .0,
+        );
+        let (identity, hash) = wt_identity("localhost");
+        let endpoint = wt_server(identity, "127.0.0.1:0".parse().unwrap()).unwrap();
+        let port = endpoint.local_addr().unwrap().port();
+        // `cat` stays alive (doesn't self-exit), so a disconnect is a pure detach, not a close.
+        tokio::spawn(serve(endpoint, warden.clone(), "cat".into()));
+
+        let client = Endpoint::client(
+            ClientConfig::builder()
+                .with_bind_default()
+                .with_server_certificate_hashes([wtransport::tls::Sha256Digest::new(hash)])
+                .build(),
+        )
+        .unwrap();
+        let conn = client
+            .connect(format!("https://127.0.0.1:{port}/pty"))
+            .await
+            .unwrap();
+        let (mut send, _recv) = conn.open_bi().await.unwrap().await.unwrap();
+        send.write_all(b"{\"hello\":\"carol\"}\n{\"resize\":[80,24]}\n")
+            .await
+            .unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        assert_eq!(warden.session_views().len(), 1, "session should be live");
+
+        // disconnect the viewer
+        drop(send);
+        drop(conn);
+        tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+
+        let views = warden.session_views();
+        assert_eq!(
+            views.len(),
+            1,
+            "session must SURVIVE a viewer disconnect (detach, not close)"
+        );
+        assert!(views[0].detachable, "the surviving session is detachable");
+    }
+
+    // Teleport: a second stream that sends {"attach": id} re-attaches to the SAME live session and
+    // receives its output (the ring replay) — the process moved to the new viewer, no new session.
+    #[tokio::test]
+    async fn reattach_teleports_the_live_session() {
+        let warden = Arc::new(
+            terminal_warden("/tmp/kedi-teleport-test.jsonl", true, vec![])
+                .unwrap()
+                .0,
+        );
+        let (identity, hash) = wt_identity("localhost");
+        let endpoint = wt_server(identity, "127.0.0.1:0".parse().unwrap()).unwrap();
+        let port = endpoint.local_addr().unwrap().port();
+        // echo a unique marker, then `cat` (stays alive) — so the marker sits in the session's ring
+        tokio::spawn(serve(
+            endpoint,
+            warden.clone(),
+            "printf 'MARKER-XYZ\\n'; cat".into(),
+        ));
+
+        let client = Endpoint::client(
+            ClientConfig::builder()
+                .with_bind_default()
+                .with_server_certificate_hashes([wtransport::tls::Sha256Digest::new(hash)])
+                .build(),
+        )
+        .unwrap();
+        let conn = client
+            .connect(format!("https://127.0.0.1:{port}/pty"))
+            .await
+            .unwrap();
+
+        // viewer A: open the pane, let the marker print, then disconnect (detach).
+        let (mut send_a, _recv_a) = conn.open_bi().await.unwrap().await.unwrap();
+        send_a
+            .write_all(b"{\"hello\":\"carol\"}\n{\"resize\":[80,24]}\n")
+            .await
+            .unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+        let sid = warden
+            .session_views()
+            .first()
+            .map(|s| s.id)
+            .expect("a live session");
+        drop(send_a);
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        assert_eq!(
+            warden.session_views().len(),
+            1,
+            "session survives A's disconnect"
+        );
+
+        // viewer B: re-attach to that session id (teleport) → must replay the ring (MARKER-XYZ).
+        let (mut send_b, mut recv_b) = conn.open_bi().await.unwrap().await.unwrap();
+        send_b
+            .write_all(format!("{{\"attach\":{sid}}}\n{{\"hello\":\"carol\"}}\n").as_bytes())
+            .await
+            .unwrap();
+
+        let got: std::sync::Arc<std::sync::Mutex<Vec<u8>>> = Default::default();
+        let got2 = got.clone();
+        let _ = tokio::time::timeout(std::time::Duration::from_millis(800), async move {
+            let mut tmp = [0u8; 4096];
+            loop {
+                match recv_b.read(&mut tmp).await {
+                    Ok(Some(n)) if n > 0 => got2.lock().unwrap().extend_from_slice(&tmp[..n]),
+                    _ => break,
+                }
+            }
+        })
+        .await;
+        let out = String::from_utf8_lossy(&got.lock().unwrap()).into_owned();
+        assert!(
+            out.contains("MARKER-XYZ"),
+            "re-attach must replay the live session's output (teleport): {out:?}"
+        );
+        assert_eq!(
+            warden.session_views().len(),
+            1,
+            "teleport re-attaches, it doesn't spawn a new session"
+        );
+    }
+
+    // The session palette's data source: a pane's {"title"} + {"tab"} frames land in sessions_json,
+    // so any tab's palette can search by title and tell "here" (its own tab key) from "another tab".
+    #[tokio::test]
+    async fn title_and_tab_frames_surface_in_sessions_json() {
+        let warden = Arc::new(
+            terminal_warden("/tmp/kedi-palette-test.jsonl", true, vec![])
+                .unwrap()
+                .0,
+        );
+        let (identity, hash) = wt_identity("localhost");
+        let endpoint = wt_server(identity, "127.0.0.1:0".parse().unwrap()).unwrap();
+        let port = endpoint.local_addr().unwrap().port();
+        tokio::spawn(serve(endpoint, warden.clone(), "cat".into()));
+
+        let client = Endpoint::client(
+            ClientConfig::builder()
+                .with_bind_default()
+                .with_server_certificate_hashes([wtransport::tls::Sha256Digest::new(hash)])
+                .build(),
+        )
+        .unwrap();
+        let conn = client
+            .connect(format!("https://127.0.0.1:{port}/pty"))
+            .await
+            .unwrap();
+        let (mut send, _recv) = conn.open_bi().await.unwrap().await.unwrap();
+        // the client pushes its per-pane tab key + a title (exactly what makePane/onTitleChange send)
+        send.write_all(
+            b"{\"tab\":\"tabABC:7\"}\n{\"hello\":\"carol\"}\n{\"resize\":[80,24]}\n{\"title\":\"bash ~/proj\"}\n",
+        )
+        .await
+        .unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+
+        let json = sessions_json(&warden);
+        assert!(
+            json.contains("\"title\":\"bash ~/proj\""),
+            "title must reach /sessions: {json}"
+        );
+        assert!(
+            json.contains("\"tab\":\"tabABC:7\""),
+            "tab key must reach /sessions: {json}"
+        );
+        assert!(
+            json.contains("\"detachable\":true"),
+            "pty pane is detachable: {json}"
         );
     }
 }
