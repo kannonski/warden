@@ -14,11 +14,12 @@ use crate::kedi::app::host;
 use std::cell::RefCell;
 
 thread_local! {
-    static STATE: RefCell<State> = const { RefCell::new(State { keys: 0, probe: None }) };
+    static STATE: RefCell<State> = const { RefCell::new(State { keys: 0, ticks: 0, probe: None }) };
 }
 
 struct State {
     keys: u32,
+    ticks: u32,
     probe: Option<String>, // the probe cap's answer, or an error string
 }
 
@@ -29,8 +30,8 @@ fn paint(s: &State) {
     };
     // one plain frame — enough for the host tests to assert on
     host::render(&format!(
-        "\x1b[2J\x1b[Hkedi:app fixture\r\nkeys: {}\r\n{probe}\r\n",
-        s.keys
+        "\x1b[2J\x1b[Hkedi:app fixture\r\nkeys: {}\r\nticks: {}\r\n{probe}\r\n",
+        s.keys, s.ticks
     ));
 }
 
@@ -67,6 +68,12 @@ impl Guest for Fixture {
     }
 
     fn on_tick() -> bool {
+        // count ticks + repaint, so a host test can prove the host is actually driving on_tick.
+        STATE.with(|s| {
+            let mut st = s.borrow_mut();
+            st.ticks += 1;
+            paint(&st);
+        });
         true
     }
 }

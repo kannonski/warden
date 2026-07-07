@@ -410,4 +410,27 @@ mod tests {
             "ungranted cap should be refused, got: {text:?}"
         );
     }
+
+    // The `tick` op drives the guest's on_tick (the mechanism deck uses to poll an async ai job). The
+    // fixture counts ticks + repaints; assert a tick bumps the count. kedi's attach loop sends this
+    // op to app panes on its 100ms ticker.
+    #[tokio::test]
+    async fn tick_op_drives_on_tick() {
+        let Some(path) = fixture_wasm() else {
+            eprintln!(
+                "skip: build the fixture first (cd tests/fixture && cargo build --release --target wasm32-wasip2), or set FIXTURE_WASM"
+            );
+            return;
+        };
+        let cap = AppCap::spawn(&path, vec![]).expect("spawn app");
+        let mut frames = cap.output().expect("output");
+        let _ = frames.next().await; // drain the init frame (ticks: 0)
+        cap.perform("tick", b"").await.expect("tick");
+        let after =
+            String::from_utf8_lossy(&frames.next().await.expect("frame after tick")).into_owned();
+        assert!(
+            after.contains("ticks: 1"),
+            "tick op should drive on_tick: {after:?}"
+        );
+    }
 }
