@@ -14,9 +14,9 @@
 
 use async_trait::async_trait;
 use futures::StreamExt;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::fmt;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
 // ── ids & core types ────────────────────────────────────────────────────────────────────────
@@ -362,6 +362,11 @@ pub struct InputFrame {
 /// disconnects. Async, so the attach loop `.await`s a frame instead of polling a blocking recv.
 pub type InputStream = std::pin::Pin<Box<dyn futures::Stream<Item = InputFrame> + Send>>;
 
+/// A detachable session's long-lived output pump, returned by [`Warden::open_session`] for the CALLER
+/// to drive (spawn on its runtime — the kernel schedules nothing). It resolves when the session's
+/// capabilities are revoked (their output streams EOF) on close/kill.
+pub type SessionPump = std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>;
+
 // ── session & action ────────────────────────────────────────────────────────────────────────
 
 #[derive(Clone)]
@@ -424,6 +429,18 @@ pub struct Session {
     pub identity: String,
     pub requests: Vec<CapRequest>,
     pub action: Action,
+}
+
+/// A UI-facing snapshot of a live session (for the cross-tab palette). Richer than `live_sessions()`:
+/// carries the client-pushed title + owner-tab id + whether the session can be detached/teleported.
+#[derive(Clone, Debug)]
+pub struct SessionView {
+    pub id: u64,
+    pub identity: String,
+    pub caps: Vec<String>,
+    pub title: String,
+    pub tab: String,
+    pub detachable: bool,
 }
 
 // ── the interceptor chain (the chokepoint) ────────────────────────────────────────────────────
@@ -534,7 +551,10 @@ async fn gate(
 
 pub struct Ctx {
     pub session: SessionCtx,
-    caps: HashMap<CapId, Box<dyn Capability>>,
+    // Arc, not Box: a detachable session's caps live in the registry and are SHARED with each viewer's
+    // Ctx (they outlive any one attach). Non-detachable sessions still hold the sole reference here and
+    // revoke on action end — the difference is who calls `revoke_all`, not the type.
+    caps: HashMap<CapId, Arc<dyn Capability>>,
     interceptors: Vec<Arc<dyn Interceptor>>,
     policy: Arc<dyn Policy>,
     approver: Arc<dyn Approver>,
@@ -706,13 +726,80 @@ impl Recorder for Tee {
     }
 }
 
+/// The upper bound on a detachable session's replay ring — enough recent output that a re-attach
+/// (teleport) shows meaningful scrollback, without unbounded memory per idle session.
+const RING_CAP: usize = 256 * 1024;
+
+/// A **swappable** live observer for a detachable session: the currently-attached viewer's output
+/// sink, behind a slot that a re-attach can replace (exclusive-move today; shaped to hold a `Vec` for
+/// mirroring later). It also keeps a bounded ring of recent `Output` bytes so a fresh viewer can be
+/// replayed the recent screen on attach. As a `Recorder` it's the second arm of the session's `Tee`:
+/// every event is offered to the current sink (if any) and `Output` bytes are appended to the ring.
+struct SwapSink {
+    sink: Mutex<Option<Arc<dyn Recorder>>>,
+    ring: Mutex<VecDeque<u8>>,
+}
+impl SwapSink {
+    fn new() -> Self {
+        SwapSink {
+            sink: Mutex::new(None),
+            ring: Mutex::new(VecDeque::new()),
+        }
+    }
+    /// Install `obs` as the live viewer, first replaying the recent-output ring to it so the new
+    /// viewer sees scrollback. Any previous viewer is dropped (its transport stream then ends —
+    /// the exclusive-move that makes teleport work). `session`/`cap` stamp the replayed Output events.
+    fn attach(&self, obs: Arc<dyn Recorder>, session: SessionId, cap: CapId) {
+        let replay: Vec<u8> = self.ring.lock().unwrap().iter().copied().collect();
+        if !replay.is_empty() {
+            obs.record(Event::Output {
+                session,
+                cap,
+                bytes: replay,
+            });
+        }
+        *self.sink.lock().unwrap() = Some(obs);
+    }
+    /// Detach the current viewer (keep the session + ring alive).
+    fn detach(&self) {
+        *self.sink.lock().unwrap() = None;
+    }
+}
+impl Recorder for SwapSink {
+    fn record(&self, ev: Event) {
+        if let Event::Output { ref bytes, .. } = ev {
+            let mut ring = self.ring.lock().unwrap();
+            ring.extend(bytes.iter().copied());
+            let overflow = ring.len().saturating_sub(RING_CAP);
+            if overflow > 0 {
+                ring.drain(..overflow);
+            }
+        }
+        if let Some(obs) = self.sink.lock().unwrap().as_ref() {
+            obs.record(ev);
+        }
+    }
+}
+
 /// A live session's control surface: its kill flag and its (tee'd) recorder, so a kill lands in
-/// the session's own stream — the client watching sees it happen.
+/// the session's own stream — the client watching sees it happen. A **detachable** session also owns
+/// its granted capabilities and its swappable sink here (so they outlive any one viewer/connection);
+/// a non-detachable session leaves those `None` and behaves exactly as before (caps in the run's Ctx,
+/// revoked when the action ends).
 struct LiveSession {
     killed: Arc<OnceLock<String>>,
     recorder: Arc<dyn Recorder>,
     identity: String,
     caps: Vec<String>, // requested capability kinds — for a record-independent live view
+    title: Mutex<String>,
+    tab: Mutex<String>, // client-supplied owner-tab id (for the cross-tab palette)
+    swap: Option<Arc<SwapSink>>, // Some → detachable: the swappable viewer sink + replay ring
+    detachable: bool,
+    // detachable-only: the granted caps live HERE (shared with each viewer's Ctx via Arc, so they
+    // outlive any one attach). The long-lived output pump is a future the CALLER spawns (the kernel is
+    // runtime-agnostic — it schedules nothing); it self-completes when the caps are revoked on close.
+    held_caps: HashMap<CapId, Arc<dyn Capability>>,
+    attached: Arc<AtomicBool>, // a viewer is currently bound (exclusive-move guard)
 }
 
 /// Owns the registries (wired explicitly at the composition root) and runs sessions through the
@@ -755,13 +842,13 @@ impl Drop for SessionGuard<'_> {
 /// grant→revoke invariant and each cap's cleanup (kill a child, zeroize a key) on the failure path
 /// exactly as `revoke_all` does on success. [`disarm`](GrantGuard::disarm) hands ownership to the `Ctx`.
 struct GrantGuard {
-    caps: HashMap<CapId, Box<dyn Capability>>,
+    caps: HashMap<CapId, Arc<dyn Capability>>,
     recorder: Arc<dyn Recorder>,
     session: SessionId,
     armed: bool,
 }
 impl GrantGuard {
-    fn disarm(mut self) -> HashMap<CapId, Box<dyn Capability>> {
+    fn disarm(mut self) -> HashMap<CapId, Arc<dyn Capability>> {
         self.armed = false;
         std::mem::take(&mut self.caps)
     }
@@ -805,20 +892,31 @@ impl Warden {
     /// Returns false if the session isn't live. Honest scope: this severs the session's access to
     /// the world (the chokepoint), it does not preempt pure CPU inside a guest — that's the wasm
     /// runtime's epoch-interruption tier, later.
+    ///
+    /// For a NON-detachable session the kill flag is enough: the attached action sees it (at the
+    /// chokepoint / via `finished`-poll), ends, and `run_full` tears down (revoke + remove). A
+    /// DETACHABLE session has no such action-owned teardown, so kill also revokes + removes it here
+    /// (the `close_session` teardown) — otherwise a killed detachable session would linger live.
     pub fn kill(&self, session: SessionId, by: &str) -> bool {
-        let live = self.live.lock().unwrap();
-        match live.get(&session.0) {
-            Some(ls) => {
-                if ls.killed.set(by.to_string()).is_ok() {
-                    ls.recorder.record(Event::Killed {
-                        session,
-                        by: by.to_string(),
-                    });
+        let detachable = {
+            let live = self.live.lock().unwrap();
+            match live.get(&session.0) {
+                Some(ls) => {
+                    if ls.killed.set(by.to_string()).is_ok() {
+                        ls.recorder.record(Event::Killed {
+                            session,
+                            by: by.to_string(),
+                        });
+                    }
+                    ls.detachable
                 }
-                true
+                None => return false,
             }
-            None => false,
+        };
+        if detachable {
+            self.close_session(session); // revoke + remove + SessionClosed
         }
+        true
     }
 
     /// Snapshot of currently-open sessions (id, identity, requested capability kinds), sorted by id.
@@ -833,6 +931,280 @@ impl Warden {
             .collect();
         v.sort_by_key(|(id, _, _)| *id);
         v
+    }
+
+    /// Richer per-session snapshot for the cross-tab palette: adds the client-pushed title + owner-tab
+    /// id + whether the session is detachable (teleportable). Sorted by id.
+    pub fn session_views(&self) -> Vec<SessionView> {
+        let mut v: Vec<SessionView> = self
+            .live
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(id, ls)| SessionView {
+                id: *id,
+                identity: ls.identity.clone(),
+                caps: ls.caps.clone(),
+                title: ls.title.lock().unwrap().clone(),
+                tab: ls.tab.lock().unwrap().clone(),
+                detachable: ls.detachable,
+            })
+            .collect();
+        v.sort_by_key(|s| s.id);
+        v
+    }
+
+    /// Set a live session's human title (client-pushed, e.g. the pane's OSC title). No-op if unknown.
+    pub fn set_title(&self, session: SessionId, title: &str) {
+        if let Some(ls) = self.live.lock().unwrap().get(&session.0) {
+            *ls.title.lock().unwrap() = title.to_string();
+        }
+    }
+
+    /// Tag a live session with the browser-tab id that currently owns it (for the palette's
+    /// "here vs another tab" grouping). No-op if unknown.
+    pub fn set_tab(&self, session: SessionId, tab: &str) {
+        if let Some(ls) = self.live.lock().unwrap().get(&session.0) {
+            *ls.tab.lock().unwrap() = tab.to_string();
+        }
+    }
+
+    // ── detachable sessions: a session as a durable primitive (see docs/detachable-sessions.md) ──
+    //
+    // `open_session` grants caps + registers + starts a LONG-LIVED output pump, but runs no action and
+    // never revokes — the session is live with no viewer. `attach` binds a viewer (observer + input),
+    // runs the action, and on the action ending (viewer disconnect) DETACHES without revoking — the
+    // session lives on. `close_session`/`kill` are the only paths that revoke + remove. The whole thing
+    // is opt-in: `run_session*`/`run_incoming` (non-detachable, action-owns-lifetime) are unchanged.
+
+    /// Open a durable, detachable session: grant its capabilities and register it. Returns a
+    /// **pump future** the CALLER must drive (spawn on its runtime) — the kernel is runtime-agnostic,
+    /// so it schedules nothing itself. The pump streams the session's output into the swappable sink +
+    /// replay ring for as long as the caps live; it self-completes when the caps are revoked on
+    /// `close_session`/`kill`. Governance (policy gates, grant records) is identical to a normal run;
+    /// only the lifetime differs. On a grant/policy failure, whatever was granted is revoked and the
+    /// error returned (nothing left registered, no pump).
+    pub async fn open_session(&self, session: Session) -> Result<SessionPump> {
+        let sctx = SessionCtx {
+            id: session.id,
+            identity: session.identity.clone(),
+        };
+        let killed: Arc<OnceLock<String>> = Arc::new(OnceLock::new());
+        let swap = Arc::new(SwapSink::new());
+        // the session recorder tees the base record and the swappable viewer sink (+ replay ring).
+        let recorder: Arc<dyn Recorder> = Arc::new(Tee(self.recorder.clone(), swap.clone()));
+
+        // gate + grant, revoking on any early failure (same invariant as `drive`).
+        gate(
+            recorder.as_ref(),
+            self.approver.as_ref(),
+            session.id,
+            &sctx.identity,
+            "open session".into(),
+            self.policy.on_session(&sctx),
+        )
+        .await?;
+        let mut guard = GrantGuard {
+            caps: HashMap::new(),
+            recorder: recorder.clone(),
+            session: session.id,
+            armed: true,
+        };
+        for req in &session.requests {
+            gate(
+                recorder.as_ref(),
+                self.approver.as_ref(),
+                session.id,
+                &sctx.identity,
+                format!("grant {} {}", req.kind.0, req.arg),
+                self.policy.on_request(&sctx, req),
+            )
+            .await?;
+            let broker = self
+                .brokers
+                .iter()
+                .find(|b| b.handles(req))
+                .ok_or(WardenError::NoBroker(req.kind))?;
+            let cap: Arc<dyn Capability> = broker.grant(req).await?.into();
+            let id = CapId(self.next_cap.fetch_add(1, Ordering::Relaxed) + 1);
+            recorder.record(Event::CapGranted {
+                session: session.id,
+                cap: id,
+                kind: cap.kind(),
+            });
+            guard.caps.insert(id, cap);
+        }
+        let caps = guard.disarm(); // success: caps now owned by the registry, revoked only on close
+
+        // Build the long-lived pump FUTURE (the caller spawns it): drain each streaming cap → mask →
+        // record (→ swap sink + ring). It captures output even while no viewer is attached, and ends
+        // when the caps are revoked (streams EOF) on close/kill.
+        let pump: SessionPump = {
+            let interceptors = self.interceptors.clone();
+            let rec = recorder.clone();
+            let sid = session.id;
+            let streams: Vec<(CapId, OutputStream)> = caps
+                .iter()
+                .filter_map(|(id, cap)| cap.output().map(|s| (*id, s)))
+                .collect();
+            Box::pin(async move {
+                let mut pumps = futures::stream::FuturesUnordered::new();
+                for (cid, mut stream) in streams {
+                    let rec = rec.clone();
+                    let interceptors = interceptors.clone();
+                    pumps.push(async move {
+                        let mut maskers: Vec<OutputMasker> =
+                            interceptors.iter().map(|i| i.output_masker()).collect();
+                        while let Some(chunk) = stream.next().await {
+                            let masked = maskers.iter_mut().fold(chunk, |b, m| m(b));
+                            rec.record(Event::Output {
+                                session: sid,
+                                cap: cid,
+                                bytes: masked,
+                            });
+                        }
+                        let tail = maskers.iter_mut().fold(Vec::new(), |b, m| m(b));
+                        if !tail.is_empty() {
+                            rec.record(Event::Output {
+                                session: sid,
+                                cap: cid,
+                                bytes: tail,
+                            });
+                        }
+                    });
+                }
+                while pumps.next().await.is_some() {}
+            })
+        };
+
+        self.live.lock().unwrap().insert(
+            session.id.0,
+            LiveSession {
+                killed,
+                recorder: recorder.clone(),
+                identity: session.identity.clone(),
+                caps: session
+                    .requests
+                    .iter()
+                    .map(|r| r.kind.0.to_string())
+                    .collect(),
+                title: Mutex::new(String::new()),
+                tab: Mutex::new(String::new()),
+                swap: Some(swap),
+                detachable: true,
+                held_caps: caps,
+                attached: Arc::new(AtomicBool::new(false)),
+            },
+        );
+        recorder.record(Event::SessionOpened {
+            session: session.id,
+            identity: session.identity,
+        });
+        Ok(pump)
+    }
+
+    /// Bind a viewer to a live detachable session and run its action. Installs `observer` as the
+    /// session's live output sink (replaying the recent-output ring first — scrollback follows a
+    /// teleport), dropping any prior viewer (exclusive move). `input` feeds keystrokes/resize to the
+    /// SAME running capabilities. When the action returns (the viewer disconnected: input stream
+    /// ended), the viewer is DETACHED — the session and its capabilities live on. Errors if the
+    /// session is unknown or not detachable.
+    pub async fn attach(
+        &self,
+        session: SessionId,
+        runtime: &str,
+        action: Action,
+        observer: Arc<dyn Recorder>,
+        input: Option<InputStream>,
+    ) -> Result<()> {
+        // snapshot what we need from the registry entry (recorder, caps, killed, swap), then release
+        // the lock before running the action.
+        let (recorder, caps, killed, swap, attached) = {
+            let live = self.live.lock().unwrap();
+            let ls = live
+                .get(&session.0)
+                .ok_or_else(|| WardenError::Cap(format!("no session {}", session.0)))?;
+            if !ls.detachable {
+                return Err(WardenError::Cap(format!(
+                    "session {} is not detachable",
+                    session.0
+                )));
+            }
+            (
+                ls.recorder.clone(),
+                ls.held_caps.clone(),
+                ls.killed.clone(),
+                ls.swap.clone(),
+                ls.attached.clone(),
+            )
+        };
+        // install this viewer's sink (replay the ring to it, drop any prior viewer).
+        if let Some(swap) = &swap {
+            let cap_id = caps.keys().next().copied().unwrap_or(CapId(0));
+            swap.attach(observer, session, cap_id);
+        }
+        attached.store(true, Ordering::SeqCst);
+
+        let rt = self
+            .runtimes
+            .get(runtime)
+            .ok_or_else(|| WardenError::NoRuntime(runtime.to_string()))?
+            .clone();
+        let sctx = SessionCtx {
+            id: session,
+            identity: self
+                .live
+                .lock()
+                .unwrap()
+                .get(&session.0)
+                .map(|ls| ls.identity.clone())
+                .unwrap_or_default(),
+        };
+        let ctx = Ctx {
+            session: sctx,
+            caps, // shared Arcs with the registry — the Ctx does NOT revoke them on the attach path
+            interceptors: self.interceptors.clone(),
+            policy: self.policy.clone(),
+            approver: self.approver.clone(),
+            recorder,
+            killed,
+            input: Mutex::new(input),
+            seq: AtomicU64::new(0),
+        };
+        // run the viewer's action (the attach loop). No pump join here — the session's long-lived pump
+        // already streams output to the sink we installed.
+        let result = rt.run(action, &ctx).await;
+        // viewer gone → detach (keep the session + caps alive). Only close/kill revoke.
+        if let Some(swap) = &swap {
+            swap.detach();
+        }
+        attached.store(false, Ordering::SeqCst);
+        result
+    }
+
+    /// Explicitly end a detachable session: revoke its capabilities (each `revoke()` → recorded, and
+    /// closes the cap's output stream → the pump future EOFs and completes), remove it from the
+    /// registry, and record `SessionClosed`. The one deliberate teardown path (alongside `kill`).
+    /// Returns false if the session isn't a live detachable one. Preserves the load-bearing order:
+    /// revoke first (streams EOF) → the caller's pump future then finishes on its own.
+    pub fn close_session(&self, session: SessionId) -> bool {
+        let ls = self.live.lock().unwrap().remove(&session.0);
+        match ls {
+            Some(ls) if ls.detachable => {
+                for (id, cap) in &ls.held_caps {
+                    cap.revoke();
+                    ls.recorder.record(Event::Revoked { session, cap: *id });
+                }
+                ls.recorder.record(Event::SessionClosed { session });
+                true
+            }
+            // not detachable (or absent) → put it back if it was there; not ours to close this way.
+            Some(ls) => {
+                self.live.lock().unwrap().insert(session.0, ls);
+                false
+            }
+            None => false,
+        }
     }
 
     pub async fn run_session(&self, session: Session, runtime: &str) -> Result<()> {
@@ -883,6 +1255,12 @@ impl Warden {
                     .iter()
                     .map(|r| r.kind.0.to_string())
                     .collect(),
+                title: Mutex::new(String::new()),
+                tab: Mutex::new(String::new()),
+                swap: None, // non-detachable: caps live in the run's Ctx, revoked when the action ends
+                detachable: false,
+                held_caps: HashMap::new(),
+                attached: Arc::new(AtomicBool::new(false)),
             },
         );
 
@@ -953,7 +1331,7 @@ impl Warden {
                 .iter()
                 .find(|b| b.handles(req))
                 .ok_or(WardenError::NoBroker(req.kind))?;
-            let cap = broker.grant(req).await?;
+            let cap: Arc<dyn Capability> = broker.grant(req).await?.into();
             let id = CapId(self.next_cap.fetch_add(1, Ordering::Relaxed) + 1);
             recorder.record(Event::CapGranted {
                 session: session.id,
@@ -1031,5 +1409,419 @@ impl Warden {
         let drain_side = async { while pump_futs.next().await.is_some() {} };
         let (result, ()) = futures::future::join(run_side, drain_side).await;
         result
+    }
+}
+
+#[cfg(test)]
+mod detachable_tests {
+    //! Stage-1 proof of detachable sessions (docs/detachable-sessions.md), in isolation — no kedi, no
+    //! real pty. A mock streaming capability whose output we can push, a mock broker, a local runtime,
+    //! and a capturing observer. Drives the pump future on the tokio test runtime (the test is the
+    //! "caller" that would spawn it in production).
+
+    use super::*;
+    use std::sync::atomic::AtomicBool;
+    use tokio::sync::mpsc::{UnboundedSender, unbounded_channel};
+
+    const MOCK: CapKind = CapKind("mock");
+    const MOCK_OPS: &[OpSpec] = &[OpSpec {
+        op: "input",
+        doc: "feed input",
+        mutates: true,
+    }];
+
+    /// A capability whose output stream we drive by pushing bytes; `revoke()` closes it (EOF). Records
+    /// whether it was revoked so tests can assert cap lifetime.
+    struct MockCap {
+        out_tx: Mutex<Option<UnboundedSender<Vec<u8>>>>,
+        out_rx: Mutex<Option<tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>>>,
+        revoked: Arc<AtomicBool>,
+    }
+    #[async_trait::async_trait]
+    impl Capability for MockCap {
+        fn kind(&self) -> CapKind {
+            MOCK
+        }
+        fn ops(&self) -> &'static [OpSpec] {
+            MOCK_OPS
+        }
+        async fn perform(&self, _op: &str, _input: &[u8]) -> Result<Vec<u8>> {
+            Ok(Vec::new())
+        }
+        fn revoke(&self) {
+            self.revoked.store(true, Ordering::SeqCst);
+            *self.out_tx.lock().unwrap() = None; // drop the sender → stream EOFs → pump ends
+        }
+        fn output(&self) -> Option<OutputStream> {
+            self.out_rx.lock().unwrap().take().map(|rx| {
+                Box::pin(tokio_stream::wrappers::UnboundedReceiverStream::new(rx)) as OutputStream
+            })
+        }
+    }
+
+    /// A broker that hands out one MockCap and exposes its output sender + revoked flag so the test can
+    /// push output and observe revocation.
+    struct MockBroker {
+        tx: std::sync::Mutex<Option<UnboundedSender<Vec<u8>>>>,
+        revoked: Arc<AtomicBool>,
+    }
+    #[async_trait::async_trait]
+    impl Broker for MockBroker {
+        fn handles(&self, req: &CapRequest) -> bool {
+            req.kind == MOCK
+        }
+        async fn grant(&self, _req: &CapRequest) -> Result<Box<dyn Capability>> {
+            let (tx, rx) = unbounded_channel::<Vec<u8>>();
+            *self.tx.lock().unwrap() = Some(tx.clone());
+            Ok(Box::new(MockCap {
+                out_tx: Mutex::new(Some(tx)),
+                out_rx: Mutex::new(Some(rx)),
+                revoked: self.revoked.clone(),
+            }))
+        }
+    }
+
+    /// Local runtime: runs an in-process action closure.
+    struct Local;
+    #[async_trait::async_trait]
+    impl Runtime for Local {
+        fn name(&self) -> &'static str {
+            "local"
+        }
+        async fn run(&self, action: Action, ctx: &Ctx) -> Result<()> {
+            match action.source {
+                ActionSource::InProcess(body) => body(ctx).await,
+                _ => Err(WardenError::Cap("local only".into())),
+            }
+        }
+    }
+
+    struct AllowAll;
+    impl Policy for AllowAll {
+        fn on_session(&self, _: &SessionCtx) -> Decision {
+            Decision::Allow
+        }
+        fn on_request(&self, _: &SessionCtx, _: &CapRequest) -> Decision {
+            Decision::Allow
+        }
+        fn on_call(&self, _: &SessionCtx, _: &Call) -> Decision {
+            Decision::Allow
+        }
+    }
+    struct AutoApprove;
+    #[async_trait::async_trait]
+    impl Approver for AutoApprove {
+        async fn decide(&self, _: &ApprovalRequest) -> Verdict {
+            Verdict::Approved { by: vec![] }
+        }
+    }
+
+    /// A recorder that captures Output bytes it receives (a viewer's live view).
+    #[derive(Clone, Default)]
+    struct CapRec(Arc<Mutex<Vec<u8>>>);
+    impl Recorder for CapRec {
+        fn record(&self, ev: Event) {
+            if let Event::Output { bytes, .. } = ev {
+                self.0.lock().unwrap().extend_from_slice(&bytes);
+            }
+        }
+    }
+    impl CapRec {
+        fn seen(&self) -> Vec<u8> {
+            self.0.lock().unwrap().clone()
+        }
+    }
+
+    struct NullRec;
+    impl Recorder for NullRec {
+        fn record(&self, _: Event) {}
+    }
+
+    fn warden_with(broker: Arc<MockBroker>) -> Warden {
+        let mut runtimes: HashMap<&'static str, Arc<dyn Runtime>> = HashMap::new();
+        runtimes.insert("local", Arc::new(Local));
+        Warden::new(
+            Arc::new(AllowAll),
+            Arc::new(AutoApprove),
+            vec![],
+            vec![broker],
+            runtimes,
+            Arc::new(NullRec),
+        )
+    }
+
+    fn mock_session(id: u64) -> Session {
+        Session {
+            id: SessionId(id),
+            identity: "carol".into(),
+            requests: vec![CapRequest {
+                kind: MOCK,
+                arg: String::new(),
+            }],
+            // open_session ignores session.action (it only grants + registers); a no-op placeholder.
+            action: Action {
+                name: "noop".into(),
+                source: ActionSource::InProcess(action_fn(|_| Box::pin(async { Ok(()) }))),
+            },
+        }
+    }
+
+    /// An attach action that forwards input to the cap and ends when the input stream closes (the
+    /// disconnect/detach signal) — like kedi's real attach loop.
+    fn attach_action() -> Action {
+        Action {
+            name: "attach".into(),
+            source: ActionSource::InProcess(action_fn(|ctx: &Ctx| {
+                Box::pin(async move {
+                    let cap = ctx.first_cap();
+                    let mut input = match ctx.take_input() {
+                        Some(i) => i,
+                        None => return Ok(()),
+                    };
+                    use futures::StreamExt;
+                    while let Some(frame) = input.next().await {
+                        if let Some(c) = cap {
+                            let _ = ctx.invoke(c, &frame.op, frame.data).await;
+                        }
+                    }
+                    Ok(())
+                })
+            })),
+        }
+    }
+
+    #[tokio::test]
+    async fn open_detachable_session_is_live_with_no_viewer() {
+        let revoked = Arc::new(AtomicBool::new(false));
+        let broker = Arc::new(MockBroker {
+            tx: std::sync::Mutex::new(None),
+            revoked: revoked.clone(),
+        });
+        let w = Arc::new(warden_with(broker));
+        let pump = w.open_session(mock_session(1)).await.expect("open");
+        let _pump = tokio::spawn(pump);
+        let views = w.session_views();
+        assert_eq!(views.len(), 1);
+        assert!(views[0].detachable);
+        assert_eq!(views[0].id, 1);
+        assert!(
+            !revoked.load(Ordering::SeqCst),
+            "cap must NOT be revoked while just open"
+        );
+    }
+
+    #[tokio::test]
+    async fn attach_replays_ring_and_streams_output() {
+        let revoked = Arc::new(AtomicBool::new(false));
+        let broker = Arc::new(MockBroker {
+            tx: std::sync::Mutex::new(None),
+            revoked,
+        });
+        let w = Arc::new(warden_with(broker.clone()));
+        let pump = w.open_session(mock_session(1)).await.expect("open");
+        tokio::spawn(pump);
+        // push output BEFORE any viewer → it lands in the ring
+        broker
+            .tx
+            .lock()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .send(b"before\n".to_vec())
+            .unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+
+        // attach a viewer; give it an input stream we keep open so the action doesn't end immediately
+        let (in_tx, in_rx) = unbounded_channel::<InputFrame>();
+        let obs = CapRec::default();
+        let w2 = w.clone();
+        let obs2 = obs.clone();
+        let attach = tokio::spawn(async move {
+            let input = Box::pin(tokio_stream::wrappers::UnboundedReceiverStream::new(in_rx))
+                as InputStream;
+            w2.attach(
+                SessionId(1),
+                "local",
+                attach_action(),
+                Arc::new(obs2),
+                Some(input),
+            )
+            .await
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+        // more output AFTER attach → streams live to the viewer
+        broker
+            .tx
+            .lock()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .send(b"after\n".to_vec())
+            .unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+
+        let seen = String::from_utf8_lossy(&obs.seen()).into_owned();
+        assert!(
+            seen.contains("before"),
+            "attach should replay the ring: {seen:?}"
+        );
+        assert!(
+            seen.contains("after"),
+            "live output should stream to the viewer: {seen:?}"
+        );
+        drop(in_tx); // detach
+        let _ = attach.await;
+    }
+
+    #[tokio::test]
+    async fn detach_keeps_session_alive() {
+        let revoked = Arc::new(AtomicBool::new(false));
+        let broker = Arc::new(MockBroker {
+            tx: std::sync::Mutex::new(None),
+            revoked: revoked.clone(),
+        });
+        let w = Arc::new(warden_with(broker));
+        tokio::spawn(w.open_session(mock_session(1)).await.expect("open"));
+        let (in_tx, in_rx) = unbounded_channel::<InputFrame>();
+        let w2 = w.clone();
+        let attach = tokio::spawn(async move {
+            let input = Box::pin(tokio_stream::wrappers::UnboundedReceiverStream::new(in_rx))
+                as InputStream;
+            w2.attach(
+                SessionId(1),
+                "local",
+                attach_action(),
+                Arc::new(CapRec::default()),
+                Some(input),
+            )
+            .await
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        drop(in_tx); // viewer disconnects → detach
+        let _ = attach.await;
+        assert_eq!(w.session_views().len(), 1, "session must survive a detach");
+        assert!(
+            !revoked.load(Ordering::SeqCst),
+            "cap must NOT be revoked on detach"
+        );
+    }
+
+    #[tokio::test]
+    async fn reattach_moves_the_viewer() {
+        let revoked = Arc::new(AtomicBool::new(false));
+        let broker = Arc::new(MockBroker {
+            tx: std::sync::Mutex::new(None),
+            revoked,
+        });
+        let w = Arc::new(warden_with(broker.clone()));
+        tokio::spawn(w.open_session(mock_session(1)).await.expect("open"));
+
+        // viewer A
+        let (in_tx_a, in_rx_a) = unbounded_channel::<InputFrame>();
+        let obs_a = CapRec::default();
+        let (w2, obs_a2) = (w.clone(), obs_a.clone());
+        tokio::spawn(async move {
+            let input = Box::pin(tokio_stream::wrappers::UnboundedReceiverStream::new(
+                in_rx_a,
+            )) as InputStream;
+            w2.attach(
+                SessionId(1),
+                "local",
+                attach_action(),
+                Arc::new(obs_a2),
+                Some(input),
+            )
+            .await
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+
+        // viewer B attaches → A is dropped (exclusive move)
+        let (in_tx_b, in_rx_b) = unbounded_channel::<InputFrame>();
+        let obs_b = CapRec::default();
+        let (w3, obs_b2) = (w.clone(), obs_b.clone());
+        tokio::spawn(async move {
+            let input = Box::pin(tokio_stream::wrappers::UnboundedReceiverStream::new(
+                in_rx_b,
+            )) as InputStream;
+            w3.attach(
+                SessionId(1),
+                "local",
+                attach_action(),
+                Arc::new(obs_b2),
+                Some(input),
+            )
+            .await
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+
+        let a_before = obs_a.seen().len();
+        broker
+            .tx
+            .lock()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .send(b"post-move\n".to_vec())
+            .unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+        assert_eq!(
+            obs_a.seen().len(),
+            a_before,
+            "A must stop receiving after B attaches"
+        );
+        assert!(
+            String::from_utf8_lossy(&obs_b.seen()).contains("post-move"),
+            "B receives live output"
+        );
+        drop(in_tx_a);
+        drop(in_tx_b);
+    }
+
+    #[tokio::test]
+    async fn close_revokes_and_removes() {
+        let revoked = Arc::new(AtomicBool::new(false));
+        let broker = Arc::new(MockBroker {
+            tx: std::sync::Mutex::new(None),
+            revoked: revoked.clone(),
+        });
+        let w = Arc::new(warden_with(broker));
+        tokio::spawn(w.open_session(mock_session(1)).await.expect("open"));
+        assert_eq!(w.session_views().len(), 1);
+        assert!(w.close_session(SessionId(1)), "close should succeed");
+        assert!(w.session_views().is_empty(), "session gone after close");
+        assert!(revoked.load(Ordering::SeqCst), "cap revoked on close");
+    }
+
+    #[tokio::test]
+    async fn kill_detachable_tears_down() {
+        let revoked = Arc::new(AtomicBool::new(false));
+        let broker = Arc::new(MockBroker {
+            tx: std::sync::Mutex::new(None),
+            revoked: revoked.clone(),
+        });
+        let w = Arc::new(warden_with(broker));
+        tokio::spawn(w.open_session(mock_session(1)).await.expect("open"));
+        assert!(w.kill(SessionId(1), "operator"));
+        assert!(
+            w.session_views().is_empty(),
+            "killed detachable session removed"
+        );
+        assert!(revoked.load(Ordering::SeqCst), "cap revoked on kill");
+    }
+
+    #[tokio::test]
+    async fn title_and_tab_reflected_in_views() {
+        let revoked = Arc::new(AtomicBool::new(false));
+        let broker = Arc::new(MockBroker {
+            tx: std::sync::Mutex::new(None),
+            revoked,
+        });
+        let w = Arc::new(warden_with(broker));
+        tokio::spawn(w.open_session(mock_session(1)).await.expect("open"));
+        w.set_title(SessionId(1), "bash ~/proj");
+        w.set_tab(SessionId(1), "tab-abc");
+        let v = &w.session_views()[0];
+        assert_eq!(v.title, "bash ~/proj");
+        assert_eq!(v.tab, "tab-abc");
     }
 }

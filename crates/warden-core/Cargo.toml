@@ -13,3 +13,9 @@ publish = false
 [dependencies]
 async-trait = { workspace = true }
 futures = { workspace = true }
+
+# tests only: an async runtime to drive detachable sessions' pump futures + tokio channels for the
+# mock streaming capability. The kernel itself stays runtime-agnostic (the caller spawns the pump).
+[dev-dependencies]
+tokio = { workspace = true }
+tokio-stream = "0.1"
