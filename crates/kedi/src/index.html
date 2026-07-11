@@ -1402,18 +1402,18 @@ $("quit-btn").addEventListener("click", async () => {
   overlay("kedi stopped.<br><span style='opacity:.6'>relaunch from the app icon, or <code>kedi --open</code>.</span>");
 });
 
-// New-terminal / palette shortcuts, from ANYWHERE (empty canvas, any pane, an overlay). NB: a normal
-// Chrome TAB reserves Ctrl+T (new tab), Ctrl+Shift+N (incognito), etc. and never lets the page see
-// them — so the primary bindings are combos Chrome does NOT reserve. kedi's launcher opens an --app
-// window (chromeless) where even Ctrl+T reaches us, so we honor it too as a convenience there.
+// New-pane / palette shortcuts, from ANYWHERE (empty canvas, any pane, an overlay). We deliberately
+// use combos a browser does NOT reserve (Ctrl+Shift+Enter, Ctrl+Shift+P) — the browser keeps Ctrl+T
+// (new browser tab), Ctrl+Shift+N (incognito), etc. for itself and the page never sees them.
 document.addEventListener("keydown", (e) => {
   if (e._kediHandled) return; // a focused terminal's keyHandler already handled this event
   const k = e.key.toLowerCase();
-  // NEW TERMINAL — Ctrl+Shift+Enter (free in a normal tab) · Ctrl+T (app-window convenience)
-  const newTerm =
-    (e.ctrlKey && e.shiftKey && (e.key === "Enter" || k === "enter")) ||
-    (e.ctrlKey && !e.shiftKey && !e.altKey && !e.metaKey && k === "t");
-  if (newTerm) { e.preventDefault(); spawnFloatCascade(); return; }
+  // NEW PANE — Ctrl+Shift+Enter. NOT Ctrl+T: a browser reserves Ctrl+T for a new browser tab and the
+  // page never sees it (nothing kedi can do about that). This combo is free, so it reaches us and
+  // opens a pane inside the current kedi.
+  if (e.ctrlKey && e.shiftKey && (e.key === "Enter" || k === "enter")) {
+    e.preventDefault(); spawnFloatCascade(); return;
+  }
   // SESSION PALETTE — Ctrl+Shift+P (Chrome may reserve it in a normal tab; works in the --app window)
   if (e.ctrlKey && e.shiftKey && k === "p" && !$("palette").classList.contains("show")) {
     e.preventDefault(); openPalette(); return;
@@ -1426,9 +1426,6 @@ document.addEventListener("keydown", (e) => {
 
 function keyHandler(e, pane) {
   if (e.type !== "keydown") return true;
-  // Ctrl+T (no shift) → new terminal; swallow it here so the shell doesn't also get ^T (transpose).
-  // The document-level listener does the spawn; we just tell xterm not to forward the byte.
-  if (e.ctrlKey && !e.shiftKey && !e.altKey && !e.metaKey && e.key.toLowerCase() === "t") return false;
   if (!e.ctrlKey || !e.shiftKey) return true;
   const k = e.key.toLowerCase();
   const fw = focused && focused.floatwin;

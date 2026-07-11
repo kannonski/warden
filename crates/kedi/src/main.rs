@@ -426,9 +426,9 @@ fn open_in_browser(url: &str) {
             .is_ok()
     };
     // Launch Chromium in APP mode (`--app=<url>`): a standalone, chromeless window (no tab strip or
-    // omnibox) that RELEASES keyboard shortcuts to the page — so kedi's Ctrl+T / Ctrl+Shift+* bindings
-    // work instead of being swallowed by the browser (Ctrl+T = new browser tab, etc.). A normal tab
-    // reserves those. Falls back to opening the url normally if no Chromium is found.
+    // omnibox) — a dedicated kedi window rather than a browser tab, and it releases more shortcuts to
+    // the page. kedi's own bindings (Ctrl+Shift+Enter new pane, Ctrl+Shift+P sessions) work either
+    // way; Ctrl+T stays the browser's. Falls back to a normal tab if no Chromium is found.
     let app = format!("--app={url}");
     #[cfg(target_os = "macos")]
     {
