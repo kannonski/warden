@@ -208,6 +208,8 @@ struct Config {
     name: String, // this warden's display name (shown in the header: "which warden am I on")
     open: bool,   // --open: launcher mode — ensure a background server, open the browser, exit
     font_size: u8, // [ui] font_size — injected into the page
+    ai_cmd: String, // [ai] cmd — backend for the `ai` capability; exported as $KEDI_AI_CMD so a
+    // desktop-launched kedi (which won't inherit your shell env) still has an AI backend
     config_used: Option<String>, // which kedi.toml was loaded (for the startup banner)
 }
 
@@ -223,6 +225,11 @@ struct FileConfig {
     record: Option<String>,    // path enables recording; "" keeps it off
     name: Option<String>,      // warden display name
     ui: Option<UiConfig>,
+    ai: Option<AiConfig>,
+}
+#[derive(serde::Deserialize, Default)]
+struct AiConfig {
+    cmd: Option<String>, // backend command for the `ai` capability (prompt on stdin → answer stdout)
 }
 #[derive(serde::Deserialize, Default)]
 struct UiConfig {
@@ -278,6 +285,7 @@ fn parse_config() -> Config {
         name: default_warden_name(),
         open: false,
         font_size: 15,
+        ai_cmd: String::new(),
         config_used: None,
     };
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -323,6 +331,11 @@ fn parse_config() -> Config {
                         && let Some(v) = ui.font_size
                     {
                         c.font_size = v.clamp(8, 28);
+                    }
+                    if let Some(ai) = f.ai
+                        && let Some(v) = ai.cmd
+                    {
+                        c.ai_cmd = v;
                     }
                     c.config_used = Some(path.display().to_string());
                 }
@@ -412,8 +425,22 @@ fn open_in_browser(url: &str) {
             .spawn()
             .is_ok()
     };
+    // Launch Chromium in APP mode (`--app=<url>`): a standalone, chromeless window (no tab strip or
+    // omnibox) that RELEASES keyboard shortcuts to the page — so kedi's Ctrl+T / Ctrl+Shift+* bindings
+    // work instead of being swallowed by the browser (Ctrl+T = new browser tab, etc.). A normal tab
+    // reserves those. Falls back to opening the url normally if no Chromium is found.
+    let app = format!("--app={url}");
     #[cfg(target_os = "macos")]
     {
+        // macOS `open -a` can't pass --app flags to Chrome cleanly; try the binary directly first.
+        for chrome in [
+            "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+            "/Applications/Chromium.app/Contents/MacOS/Chromium",
+        ] {
+            if try_spawn(chrome, &[app.as_str()]) {
+                return;
+            }
+        }
         if try_spawn("open", &["-a", "Google Chrome", url]) || try_spawn("open", &[url]) {
             return;
         }
@@ -428,11 +455,11 @@ fn open_in_browser(url: &str) {
             "brave-browser",
             "microsoft-edge",
         ] {
-            if try_spawn(chrome, &[url]) {
+            if try_spawn(chrome, &[app.as_str()]) {
                 return;
             }
         }
-        try_spawn("xdg-open", &[url]); // last resort: the OS default (may not be Chromium)
+        try_spawn("xdg-open", &[url]); // last resort: the OS default (may not be Chromium → normal tab)
     }
 }
 
@@ -483,6 +510,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if cfg.open {
         launch(&cfg)?;
         return Ok(());
+    }
+
+    // Wire the AI backend for the `ai` capability: export the config's [ai] cmd as $KEDI_AI_CMD so
+    // the AiBroker (which reads that env var) finds it — even when kedi was desktop-launched and thus
+    // didn't inherit your shell env. A shell-set $KEDI_AI_CMD still wins (only set it if unset).
+    if !cfg.ai_cmd.is_empty() && std::env::var_os("KEDI_AI_CMD").is_none() {
+        // SAFETY: single-threaded startup, before the tokio runtime / any session threads exist.
+        unsafe { std::env::set_var("KEDI_AI_CMD", &cfg.ai_cmd) };
     }
 
     // bind targets: an explicit --bind, else dual loopback (127.0.0.1 + ::1) so name-based hosts
