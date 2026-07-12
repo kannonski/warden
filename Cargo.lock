@@ -1252,6 +1252,7 @@ dependencies = [
  "tokio",
  "tokio-stream",
  "toml",
+ "toml_edit",
  "warden-caps",
  "warden-core",
  "warden-host",

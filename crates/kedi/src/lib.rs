@@ -29,6 +29,11 @@ use warden_host::{Manifest, plugin};
 use warden_wasm::APP;
 use wtransport::{Endpoint, Identity, ServerConfig};
 
+/// The plugin manager (`kedi plugin …`): list / install / remove / info over the plugin dir +
+/// `plugins.toml`. The one owner of registry edits (comment-preserving via toml_edit). CLI now; a
+/// browser manager pane can call the same functions later.
+pub mod plugin_cli;
+
 // DLP (output masking) intentionally NOT wired here. The spike's literal-secret masker was a demo
 // toy, and doing real detection (regex/entropy) per-byte on the interactive output stream is the
 // wrong layer + a hot-path performance risk. Deferred until it can run as a proper detector over the
@@ -335,7 +340,7 @@ pub fn wt_server(
 // grants each app exactly the caps it declares. Adding a plugin = drop a .wasm + a toml block.
 
 /// The plugin dir: `$KEDI_PLUGIN_DIR`, else `$XDG_CONFIG_HOME/kedi/plugins`, else `~/.config/kedi/plugins`.
-fn plugin_dir() -> std::path::PathBuf {
+pub(crate) fn plugin_dir() -> std::path::PathBuf {
     std::env::var("KEDI_PLUGIN_DIR")
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|_| {

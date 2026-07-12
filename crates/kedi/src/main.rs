@@ -504,6 +504,17 @@ fn launch(cfg: &Config) -> std::io::Result<()> {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // `kedi plugin …` is a standalone CLI action (manage the plugin registry), not a serve — handle it
+    // before any server/config setup. It only touches the plugin dir + plugins.toml.
+    let raw: Vec<String> = std::env::args().skip(1).collect();
+    if raw.first().map(String::as_str) == Some("plugin") {
+        if let Err(e) = kedi::plugin_cli::run(&raw[1..]) {
+            eprintln!("kedi plugin: {e}");
+            std::process::exit(1);
+        }
+        return Ok(());
+    }
+
     let cfg = parse_config();
 
     // launcher mode: ensure a detached server, open the browser, done.

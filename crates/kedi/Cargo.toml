@@ -24,6 +24,7 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "io-ut
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 toml = "0.8"
+toml_edit = "0.22" # comment-preserving edits to plugins.toml (the plugin manager)
 sha2 = "0.10"
 
 # `--open` launcher: setsid(2) to detach the background server from the controlling terminal
