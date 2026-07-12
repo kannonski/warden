@@ -263,8 +263,9 @@ pub fn sessions_json(warden: &Warden) -> String {
             let who_json = serde_json::to_string(&s.identity).unwrap_or_else(|_| "\"?\"".into());
             let title_json = serde_json::to_string(&s.title).unwrap_or_else(|_| "\"\"".into());
             let tab_json = serde_json::to_string(&s.tab).unwrap_or_else(|_| "\"\"".into());
+            let preview_json = serde_json::to_string(&s.preview).unwrap_or_else(|_| "\"\"".into());
             format!(
-                "{{\"id\":{},\"who\":{who_json},\"caps\":{caps_json},\"title\":{title_json},\"tab\":{tab_json},\"detachable\":{}}}",
+                "{{\"id\":{},\"who\":{who_json},\"caps\":{caps_json},\"title\":{title_json},\"tab\":{tab_json},\"detachable\":{},\"preview\":{preview_json}}}",
                 s.id, s.detachable
             )
         })
@@ -1822,6 +1823,50 @@ mod tests {
         assert!(
             json.contains("\"detachable\":true"),
             "pty pane is detachable: {json}"
+        );
+    }
+
+    // The exposé cards show each pane's recent output. /sessions must carry a `preview` — the last
+    // non-blank line of the session's ring, ANSI-stripped — so a remote tab's pane is recognizable.
+    #[tokio::test]
+    async fn session_preview_reflects_recent_output() {
+        let warden = Arc::new(
+            terminal_warden("/tmp/kedi-preview-test.jsonl", true, vec![])
+                .unwrap()
+                .0,
+        );
+        let (identity, hash) = wt_identity("localhost");
+        let endpoint = wt_server(identity, "127.0.0.1:0".parse().unwrap()).unwrap();
+        let port = endpoint.local_addr().unwrap().port();
+        // `cat` echoes back what we type → that becomes the session's recent output.
+        tokio::spawn(serve(endpoint, warden.clone(), "cat".into()));
+
+        let client = Endpoint::client(
+            ClientConfig::builder()
+                .with_bind_default()
+                .with_server_certificate_hashes([wtransport::tls::Sha256Digest::new(hash)])
+                .build(),
+        )
+        .unwrap();
+        let conn = client
+            .connect(format!("https://127.0.0.1:{port}/pty"))
+            .await
+            .unwrap();
+        let (mut send, _recv) = conn.open_bi().await.unwrap().await.unwrap();
+        send.write_all(b"{\"hello\":\"carol\"}\n{\"resize\":[80,24]}\n")
+            .await
+            .unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        // type a distinctive line; cat echoes it → into the ring → into the preview
+        send.write_all(b"{\"input\":\"PREVIEW-MARKER-42\\n\"}\n")
+            .await
+            .unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+
+        let json = sessions_json(&warden);
+        assert!(
+            json.contains("PREVIEW-MARKER-42"),
+            "the preview should carry the recent output line: {json}"
         );
     }
 }

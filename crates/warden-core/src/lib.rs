@@ -441,6 +441,9 @@ pub struct SessionView {
     pub title: String,
     pub tab: String,
     pub detachable: bool,
+    /// The last non-blank line of the session's recent output (ANSI-stripped) — a human preview for
+    /// the exposé card, so a pane is recognizable even from another tab (via the server-side ring).
+    pub preview: String,
 }
 
 // ── the interceptor chain (the chokepoint) ────────────────────────────────────────────────────
@@ -764,6 +767,67 @@ impl SwapSink {
     fn detach(&self) {
         *self.sink.lock().unwrap() = None;
     }
+
+    /// A short human preview of the session's recent output — the last non-blank visible line, ANSI
+    /// stripped, bounded. Feeds the exposé/palette card so you recognize a pane by what's on it. Only
+    /// the tail of the ring is scanned (cheap); a fully-blank ring yields "".
+    fn preview(&self) -> String {
+        let ring = self.ring.lock().unwrap();
+        // scan the last chunk of the ring (a preview never needs the whole 256 KiB)
+        let tail: Vec<u8> = {
+            let n = ring.len();
+            let start = n.saturating_sub(8192);
+            ring.iter().skip(start).copied().collect()
+        };
+        let text = String::from_utf8_lossy(&tail);
+        // strip ANSI CSI/OSC escapes + control chars, split into lines, take the last non-blank one.
+        let mut last = String::new();
+        for raw in strip_ansi(&text).lines() {
+            let line = raw.trim_end();
+            if !line.trim().is_empty() {
+                last = line.to_string();
+            }
+        }
+        last.chars().take(120).collect()
+    }
+}
+
+/// Strip ANSI escape sequences (CSI `ESC[…`, OSC `ESC]…BEL/ST`) and other control chars from `s`,
+/// leaving printable text — enough to make a terminal-output line human-readable for a preview.
+fn strip_ansi(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\x1b' {
+            match chars.next() {
+                Some('[') => {
+                    // CSI: consume until a final byte in @..~
+                    for n in chars.by_ref() {
+                        if ('\x40'..='\x7e').contains(&n) {
+                            break;
+                        }
+                    }
+                }
+                Some(']') => {
+                    // OSC: consume until BEL or ESC\ (ST)
+                    while let Some(n) = chars.next() {
+                        if n == '\x07' {
+                            break;
+                        }
+                        if n == '\x1b' {
+                            chars.next(); // the '\'
+                            break;
+                        }
+                    }
+                }
+                _ => {} // a lone ESC or a 2-char sequence we don't care about
+            }
+        } else if c == '\n' || !c.is_control() {
+            out.push(c);
+        }
+        // other control chars (\r, \t, etc.) dropped
+    }
+    out
 }
 impl Recorder for SwapSink {
     fn record(&self, ev: Event) {
@@ -948,6 +1012,7 @@ impl Warden {
                 title: ls.title.lock().unwrap().clone(),
                 tab: ls.tab.lock().unwrap().clone(),
                 detachable: ls.detachable,
+                preview: ls.swap.as_ref().map(|s| s.preview()).unwrap_or_default(),
             })
             .collect();
         v.sort_by_key(|s| s.id);
@@ -1418,6 +1483,17 @@ mod detachable_tests {
     //! real pty. A mock streaming capability whose output we can push, a mock broker, a local runtime,
     //! and a capturing observer. Drives the pump future on the tokio test runtime (the test is the
     //! "caller" that would spawn it in production).
+
+    #[test]
+    fn strip_ansi_leaves_readable_text() {
+        // a typical colored prompt line → the escapes vanish, the words remain
+        let s = "\x1b[0;32mokkan@box\x1b[0m:\x1b[1;34m~/proj\x1b[0m$ cargo build";
+        assert_eq!(super::strip_ansi(s), "okkan@box:~/proj$ cargo build");
+        // OSC title sequence (ESC]0;…BEL) is dropped whole
+        assert_eq!(super::strip_ansi("\x1b]0;my title\x07hello"), "hello");
+        // bare control chars (\r, \t) dropped, newlines kept
+        assert_eq!(super::strip_ansi("a\r\tb\nc"), "ab\nc");
+    }
 
     use super::*;
     use std::sync::atomic::AtomicBool;
