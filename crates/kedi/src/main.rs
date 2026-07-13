@@ -83,7 +83,6 @@ fn serve_one(mut stream: TcpStream, pages: &Pages) {
     }
     let method = line.split_whitespace().next().unwrap_or("GET").to_string();
     let path = line.split_whitespace().nth(1).unwrap_or("/");
-    let mut shutdown = false;
     let (body, ctype): (String, &str) = if path.starts_with("/record") {
         // GET /record[?since=N] — the verified stream from index N on (audit panel polls incrementally)
         let since = path
@@ -155,18 +154,6 @@ fn serve_one(mut stream: TcpStream, pages: &Pages) {
                 ),
             }
         }
-    } else if path.starts_with("/shutdown") {
-        // POST /shutdown — the explicit quit-from-the-UI: ack, flush, then exit the process. A
-        // relaunch (`kedi --open` / the app icon) starts a fresh one.
-        if method == "POST" {
-            shutdown = true;
-            ("{\"ok\":true}".into(), "application/json")
-        } else {
-            (
-                "{\"ok\":false,\"error\":\"POST required\"}".into(),
-                "application/json",
-            )
-        }
     } else if path.starts_with("/raw") {
         (pages.raw.clone(), "text/html; charset=utf-8")
     } else {
@@ -186,10 +173,6 @@ fn serve_one(mut stream: TcpStream, pages: &Pages) {
         "HTTP/1.1 200 OK\r\nContent-Type: {ctype}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
         body.len(),
     );
-    if shutdown {
-        let _ = stream.flush(); // let the ack reach the browser, then quit
-        std::process::exit(0);
-    }
 }
 
 /// kedi [--config PATH] [--host HOST] [--bind IP] [--http-port N] [--wt-port N] [--shell CMD]

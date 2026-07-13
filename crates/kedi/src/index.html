@@ -24,6 +24,7 @@
   body { background:var(--bg); color:var(--fg); display:flex; flex-direction:column;
          font:13px/1.5 "FiraCode Nerd Font", ui-monospace, monospace; overflow:hidden; }
   header { display:flex; align-items:center; gap:9px; padding:8px 14px; border-bottom:1px solid var(--edge); flex:0 0 auto; }
+  body.no-header header { display:none; }  /* optional top banner (settings ▸ show header) → canvas reclaims the space */
   header h1 { margin:0; font-size:16px; font-weight:600; letter-spacing:.06em; }
   header h1 .k { color:var(--focus); }
   .badge { background:var(--panel); border:1px solid var(--edge); border-radius:999px; padding:4px 12px; font-size:12px; color:var(--dim); white-space:nowrap; display:inline-flex; align-items:center; gap:7px; }
@@ -139,6 +140,19 @@
   .grip { position:absolute; right:0; bottom:0; width:15px; height:15px; cursor:nwse-resize; z-index:2;
           background:linear-gradient(135deg, transparent 45%, var(--dim) 45%, var(--dim) 55%, transparent 55%); }
   #snap { position:absolute; display:none; border:2px solid var(--cyan); background:rgba(86,200,216,.12); border-radius:6px; pointer-events:none; z-index:9998; }
+  /* snap-up chooser: maximize vs split top/bottom, floated at the top-center */
+  #snapchoose { position:fixed; display:none; z-index:10002; top:16px; left:50%; transform:translateX(-50%);
+    gap:8px; padding:7px; background:rgba(24,24,37,.97); backdrop-filter:blur(12px); -webkit-backdrop-filter:blur(12px);
+    border:1px solid var(--edge); border-radius:12px; box-shadow:0 14px 40px rgba(0,0,0,.5); }
+  #snapchoose.show { display:flex; }
+  .sc-opt { display:flex; flex-direction:column; align-items:center; gap:7px; width:120px; padding:12px 10px; cursor:pointer;
+    border:1px solid var(--edge); border-radius:9px; color:var(--fg); font-size:12px; transition:border-color .12s, background .12s; }
+  .sc-opt:hover, .sc-opt.sel { border-color:var(--focus); background:#252539; }
+  .sc-diagram { width:66px; height:40px; border:1.5px solid var(--dim); border-radius:4px; display:flex; flex-direction:column; overflow:hidden; }
+  .sc-diagram > i { flex:1; background:var(--dim); opacity:.28; }
+  .sc-diagram.split > i:first-child { border-bottom:1.5px solid var(--focus); background:var(--focus); opacity:.5; }
+  .sc-diagram.split > i:last-child { opacity:.18; }
+  .sc-diagram.maxi > i { background:var(--focus); opacity:.4; }
   .marquee { position:absolute; border:1px dashed var(--cyan); background:rgba(137,220,235,.08); pointer-events:none; }
   #ctxmenu { position:absolute; display:none; min-width:190px; z-index:9997; padding:5px; border-radius:10px;
              background:rgba(24,24,37,.88); backdrop-filter:blur(12px); -webkit-backdrop-filter:blur(12px);
@@ -202,7 +216,6 @@
   <button class="badge btn" id="audit-btn" title="audit — live sessions, event timeline, replay, kill"><span class="dot"></span>audit</button>
   <span class="badge" id="conn" title="the warden you're connected to"><span class="dot"></span>⌂ <b id="warden-name">warden</b></span>
   <button class="badge btn" id="settings-btn" title="settings — theme, font, cursor, layout">⚙</button>
-  <button class="badge btn" id="quit-btn" title="shut down kedi (ends all sessions)">⏻</button>
 </header>
 
 <div id="tabstrip"></div>
@@ -224,6 +237,10 @@
     <div id="pal-hint">every pane, every browser tab · click or ↵ to focus (this tab) or move here (another tab)</div>
   </div></div>
   <div id="snap"></div>
+  <div id="snapchoose">
+    <div class="sc-opt" data-choice="max"><div class="sc-diagram maxi"><i></i></div>maximize</div>
+    <div class="sc-opt" data-choice="split"><div class="sc-diagram split"><i></i><i></i></div>split top / bottom</div>
+  </div>
   <div id="overlay"></div>
 </div>
 <div id="taskbar"></div>
@@ -423,6 +440,9 @@
     <label for="set-taskbar">minimize to taskbar</label>
     <label class="switch"><input type="checkbox" id="set-taskbar"><span></span></label>
 
+    <label for="set-header">show top bar</label>
+    <label class="switch"><input type="checkbox" id="set-header"><span></span></label>
+
     <div class="sec">terminal</div>
     <label for="set-font">font size <span id="set-font-val" class="valtag"></span></label>
     <input type="range" id="set-font" min="8" max="28" step="1">
@@ -520,6 +540,7 @@ const DEFAULT_SETTINGS = {
   layout: "floating",     // floating | tab
   winControls: "auto",    // auto | mac | win | linux — window-button flavor
   taskbar: false,         // minimize → taskbar dock (on) vs. collapse-to-title in place (off, default)
+  header: true,           // show the top banner (🐱 kedi · identity · audit · settings); off = more room
 };
 
 // Best-effort OS guess for the "auto" window-control flavor. userAgentData is the modern signal;
@@ -564,6 +585,7 @@ function applySettings() {
   applyPlatform();
   const t = THEMES[SETTINGS.theme];
   document.documentElement.style.setProperty("--term-bg", t.term.background);
+  document.body.classList.toggle("no-header", !SETTINGS.header); // hide the top banner when off
   const o = xtermOpts();
   for (const p of allPanes()) Object.assign(p.term.options, o);
   if (typeof au !== "undefined" && au.term) Object.assign(au.term.options, { theme: o.theme, fontFamily: o.fontFamily });
@@ -981,6 +1003,106 @@ function snapWin(win, pane, name) {
 }
 function restoreWin(win, pane) { if (win._restore) { applyGeom(win, pane, win._restore); win._restore = null; win._snap = null; } }
 
+// ── snap-up chooser: maximize, or split the pane into a top/bottom pair ──
+// Snapping up (key or drag-to-top-edge) doesn't just maximize — it PROPOSES: maximize the pane, or
+// split it top/bottom (this pane → top half, then pick another pane for the bottom half).
+function askSnapUp(win, pane) {
+  const box = $("snapchoose");
+  const opts = [...box.querySelectorAll(".sc-opt")];
+  let sel = 0;
+  const paint = () => opts.forEach((o, i) => o.classList.toggle("sel", i === sel));
+  const close = () => {
+    box.classList.remove("show");
+    document.removeEventListener("keydown", onKey, true);
+    document.removeEventListener("mousedown", onOutside, true);
+  };
+  const apply = (choice) => {
+    close();
+    if (choice === "max") snapWin(win, pane, "max");
+    else splitTopBottom(pane);
+  };
+  const onKey = (e) => {
+    if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); close(); }
+    else if (e.key === "ArrowLeft" || e.key === "ArrowRight") {
+      e.preventDefault(); e.stopPropagation(); sel = (sel + (e.key === "ArrowRight" ? 1 : opts.length - 1)) % opts.length; paint();
+    } else if (e.key === "Enter") { e.preventDefault(); e.stopPropagation(); apply(opts[sel].dataset.choice); }
+  };
+  const onOutside = (e) => { if (!box.contains(e.target)) close(); };
+  opts.forEach((o, i) => {
+    o.onmouseenter = () => { sel = i; paint(); };
+    o.onclick = () => apply(o.dataset.choice);
+  });
+  paint();
+  box.classList.add("show");
+  document.addEventListener("keydown", onKey, true);
+  // defer the outside-click listener so the click that opened it doesn't immediately close it
+  setTimeout(() => document.addEventListener("mousedown", onOutside, true), 0);
+}
+
+// snap the pane to the TOP half, then pick another pane to fill the BOTTOM half.
+function splitTopBottom(pane) {
+  const win = pane.floatwin;
+  if (!win) return;
+  win._restore = win._restore || [win.offsetLeft, win.offsetTop, win.offsetWidth, win.offsetHeight];
+  win._snap = "top";
+  applyGeom(win, pane, snapRegion("top"));
+  pickPaneForBottom(pane);
+}
+
+// a compact picker of the OTHER panes in this tab → the chosen one snaps to the bottom half.
+function pickPaneForBottom(topPane) {
+  const others = allPanes().filter((p) => p !== topPane && !p.stowed);
+  if (!others.length) {
+    overlayFlash("split: open another terminal first (Ctrl+Shift+↵), then snap up → split");
+    return;
+  }
+  const grid = $("pal-grid");
+  const input = $("pal-in");
+  $("palette").classList.add("show");
+  input.value = ""; input.placeholder = "pick a pane for the bottom half — esc to cancel";
+  $("pal-hint").textContent = "the chosen pane fills the bottom half; " + (topPane.title || "the current pane") + " keeps the top";
+  grid.innerHTML = "";
+  let sel = 0;
+  const tiles = [];
+  const finish = () => {
+    $("palette").classList.remove("show");
+    input.placeholder = "type to filter every pane across your tabs — ↵ focus / move here · esc close";
+    input.onkeydown = null;
+    if (focused) try { focused.term.focus(); } catch (_) {}
+  };
+  const choose = (p) => {
+    finish();
+    const w = p.floatwin;
+    if (!w) return;
+    w._restore = w._restore || [w.offsetLeft, w.offsetTop, w.offsetWidth, w.offsetHeight];
+    w._snap = "bottom";
+    w.style.zIndex = ++zTop;
+    applyGeom(w, p, snapRegion("bottom"));
+    setFocus(topPane);
+  };
+  others.forEach((p, i) => {
+    const tile = document.createElement("div");
+    tile.className = "tile" + (i === sel ? " sel" : "");
+    const preview = localPreview(p) || "no output yet";
+    const isApp = !!p.app;
+    tile.innerHTML =
+      `<div class="tile-screen"><span class="glyph">${isApp ? "▤" : "❯"}</span></div>` +
+      `<div class="tile-foot"><div class="tile-title"></div><div class="tile-meta"><span>this tab</span><span class="tile-act">bottom half →</span></div></div>`;
+    tile.querySelector(".tile-screen").insertBefore(document.createTextNode(preview), tile.querySelector(".glyph"));
+    tile.querySelector(".tile-title").textContent = p.title || ("pane " + p.id);
+    tile.addEventListener("mouseenter", () => { sel = i; tiles.forEach((t, j) => t.classList.toggle("sel", j === i)); });
+    tile.addEventListener("click", () => choose(p));
+    grid.appendChild(tile); tiles.push(tile);
+  });
+  input.onkeydown = (e) => {
+    if (e.key === "Escape") { e.preventDefault(); finish(); }
+    else if (e.key === "ArrowRight" || e.key === "ArrowDown") { e.preventDefault(); sel = Math.min(others.length - 1, sel + 1); tiles.forEach((t, j) => t.classList.toggle("sel", j === sel)); }
+    else if (e.key === "ArrowLeft" || e.key === "ArrowUp") { e.preventDefault(); sel = Math.max(0, sel - 1); tiles.forEach((t, j) => t.classList.toggle("sel", j === sel)); }
+    else if (e.key === "Enter") { e.preventDefault(); choose(others[sel]); }
+  };
+  input.focus();
+}
+
 // ── minimize: two modes ──
 // Default is "minify" — collapse the window to its title bar IN PLACE (macOS window-shade); click
 // the bar to expand. If the `taskbar` setting is on, minimize stows to the bottom dock instead.
@@ -1070,7 +1192,11 @@ function dragWin(win, handle, pane) {
       if (pending) { const [x, y, w, h] = snapRegion(pending); snap.style.cssText = `display:block;left:${x}px;top:${y}px;width:${w}px;height:${h}px`; }
       else snap.style.display = "none";
     };
-    const up = () => { document.removeEventListener("mousemove", move); document.removeEventListener("mouseup", up); snap.style.display = "none"; if (pending) snapWin(win, pane, pending); };
+    const up = () => {
+      document.removeEventListener("mousemove", move); document.removeEventListener("mouseup", up); snap.style.display = "none";
+      if (pending === "max") askSnapUp(win, pane); // top edge → propose maximize vs split
+      else if (pending) snapWin(win, pane, pending);
+    };
     document.addEventListener("mousemove", move); document.addEventListener("mouseup", up);
   });
 }
@@ -1397,6 +1523,7 @@ function syncSettingsForm() {
   $("set-family").value = SETTINGS.fontFamily;
   $("set-blink").checked = SETTINGS.cursorBlink;
   $("set-taskbar").checked = SETTINGS.taskbar;
+  $("set-header").checked = SETTINGS.header;
   $("set-lh").value = SETTINGS.lineHeight; $("set-lh-val").textContent = SETTINGS.lineHeight.toFixed(2);
   $("set-ls").value = SETTINGS.letterSpacing; $("set-ls-val").textContent = SETTINGS.letterSpacing;
   $("set-scroll").value = SETTINGS.scrollback; $("set-scroll-val").textContent = SETTINGS.scrollback.toLocaleString();
@@ -1414,6 +1541,7 @@ $("set-font").addEventListener("input", (e) => setOpt("fontSize", Number(e.targe
 $("set-family").addEventListener("change", (e) => setOpt("fontFamily", e.target.value.trim() || FONT));
 $("set-blink").addEventListener("change", (e) => setOpt("cursorBlink", e.target.checked));
 $("set-taskbar").addEventListener("change", (e) => { SETTINGS.taskbar = e.target.checked; saveSettings(); syncSettingsForm(); });
+$("set-header").addEventListener("change", (e) => { SETTINGS.header = e.target.checked; applySettings(); });
 $("set-lh").addEventListener("input", (e) => setOpt("lineHeight", Number(e.target.value)));
 $("set-ls").addEventListener("input", (e) => setOpt("letterSpacing", Number(e.target.value)));
 $("set-scroll").addEventListener("input", (e) => setOpt("scrollback", Number(e.target.value)));
@@ -1421,12 +1549,6 @@ $("set-cursor").addEventListener("click", (e) => { const b = e.target.closest("b
 $("set-layout").addEventListener("click", (e) => { const b = e.target.closest("button"); if (b) setLayout(b.dataset.v); });
 $("set-wc").addEventListener("click", (e) => { const b = e.target.closest("button"); if (b) { SETTINGS.winControls = b.dataset.v; applyPlatform(); saveSettings(); syncSettingsForm(); } });
 $("set-reset").addEventListener("click", () => { SETTINGS = { ...DEFAULT_SETTINGS }; setLayout(SETTINGS.layout); applySettings(); syncSettingsForm(); });
-
-$("quit-btn").addEventListener("click", async () => {
-  if (!confirm("Shut down kedi?\nEvery session ends and the background server stops.")) return;
-  try { await fetch("/shutdown", { method: "POST" }); } catch (_) { /* the socket dropping is the ack */ }
-  overlay("kedi stopped.<br><span style='opacity:.6'>relaunch from the app icon, or <code>kedi --open</code>.</span>");
-});
 
 // New-pane / palette shortcuts, from ANYWHERE (empty canvas, any pane, an overlay). We deliberately
 // use combos a browser does NOT reserve (Ctrl+Shift+Enter, Ctrl+Shift+P) — the browser keeps Ctrl+T
@@ -1443,6 +1565,11 @@ document.addEventListener("keydown", (e) => {
   // SESSION PALETTE — Ctrl+Shift+P (Chrome may reserve it in a normal tab; works in the --app window)
   if (e.ctrlKey && e.shiftKey && k === "p" && !$("palette").classList.contains("show")) {
     e.preventDefault(); openPalette(); return;
+  }
+  // SETTINGS — Ctrl+Shift+, from anywhere. The escape hatch when the top bar is hidden (its ⚙ button
+  // is gone), so you can always get back to turn the bar on again.
+  if (e.ctrlKey && e.shiftKey && (k === "," || e.key === "<")) {
+    e.preventDefault(); toggleSettings(); return;
   }
   if (e.key !== "Escape") return;
   if ($("palette").classList.contains("show")) closePalette();
@@ -1467,7 +1594,7 @@ function keyHandler(e, pane) {
     case "0": zoom(0); break;
     case "arrowleft": fw ? snapWin(fw, focused, "left") : (ok = false); break;
     case "arrowright": fw ? snapWin(fw, focused, "right") : (ok = false); break;
-    case "arrowup": fw ? snapWin(fw, focused, "max") : (ok = false); break;
+    case "arrowup": fw ? askSnapUp(fw, focused) : (ok = false); break; // propose: maximize · split
     case "arrowdown": fw ? restoreWin(fw, focused) : (ok = false); break;
     case "g": tileGrid(); break;
     case "m": focused ? minimizePane(focused) : (ok = false); break;

@@ -787,12 +787,15 @@ async fn pane_session(
             .await
     });
 
-    // read client control frames, running alongside the attach task. Three ways this ends:
-    //  · the client disconnects (recv EOF) → DETACH: drop in_tx, the session + caps live on;
-    //  · the client sends {"kill"}/{"close"} → tear the session down (revoke + remove);
-    //  · the attach task finishes on its own while the client is still connected → the capability
-    //    self-exited (shell quit / app returned false) → CLOSE the session (a terminal condition).
-    let mut ended = false; // the session was explicitly ended (kill/close/self-exit) — don't detach
+    // read client control frames, running alongside the attach task. Ways this ends:
+    //  · the client sends {"kill"}/{"close"} → tear the session down now (revoke + remove);
+    //  · the capability self-exits (shell quit / app returned false) → the attach task finishes →
+    //    CLOSE the session (terminal condition);
+    //  · the client disconnects (recv EOF: a browser TAB CLOSE) → we drop in_tx, then check how the
+    //    attach ended. `Disconnected` = we were still the owner → CLOSE the session (a tab closing
+    //    kills the panes it owns). `Superseded` = a move re-attached this session to another tab →
+    //    that tab owns it now, so we leave it running.
+    let mut ended = false; // the session was explicitly ended (kill/close/self-exit)
     loop {
         while let Some(p) = buf.iter().position(|&b| b == b'\n') {
             let line: Vec<u8> = buf.drain(..=p).collect();
@@ -824,7 +827,7 @@ async fn pane_session(
         tokio::select! {
             r = recv.read(&mut tmp) => match r {
                 Ok(Some(n)) if n > 0 => buf.extend_from_slice(&tmp[..n]),
-                _ => break, // client disconnected → detach
+                _ => break, // client disconnected (tab close) → handled below
             },
             _ = &mut attach_task => {
                 // the capability self-exited while the client was still here → end the session.
@@ -836,8 +839,11 @@ async fn pane_session(
     }
     drop(in_tx); // end the attach loop (if still running) → `attach` returns
     if !ended {
-        // a plain client disconnect: DETACH — the session + caps live on for a re-attach (teleport).
-        let _ = attach_task.await;
+        // a plain client disconnect (tab close): if we were still the owning viewer, kill the session;
+        // if a move handed it to another tab (Superseded) or the task errored, leave it be.
+        if let Ok(Ok(warden_core::AttachEnd::Disconnected)) = attach_task.await {
+            warden.close_session(tsid); // this tab owned the pane → closing the tab kills it
+        }
     }
     let _ = out_task.await;
 }
@@ -1653,19 +1659,19 @@ mod tests {
         );
     }
 
-    // A viewer disconnecting DETACHES — the durable session survives (tmux model). Open a pty pane,
-    // drop the client, and assert the session is still live + detachable in session_views().
+    // A browser tab closing KILLS the panes it owns: the owning viewer's disconnect (no move handed
+    // it off) closes the session. Open a pty pane, drop the client, assert the session is gone.
     #[tokio::test]
-    async fn disconnect_detaches_and_session_survives() {
+    async fn tab_close_kills_the_owned_session() {
         let warden = Arc::new(
-            terminal_warden("/tmp/kedi-detach-test.jsonl", true, vec![])
+            terminal_warden("/tmp/kedi-close-test.jsonl", true, vec![])
                 .unwrap()
                 .0,
         );
         let (identity, hash) = wt_identity("localhost");
         let endpoint = wt_server(identity, "127.0.0.1:0".parse().unwrap()).unwrap();
         let port = endpoint.local_addr().unwrap().port();
-        // `cat` stays alive (doesn't self-exit), so a disconnect is a pure detach, not a close.
+        // `cat` stays alive (doesn't self-exit), so the disconnect is a pure tab-close, not self-exit.
         tokio::spawn(serve(endpoint, warden.clone(), "cat".into()));
 
         let client = Endpoint::client(
@@ -1686,18 +1692,15 @@ mod tests {
         tokio::time::sleep(std::time::Duration::from_millis(300)).await;
         assert_eq!(warden.session_views().len(), 1, "session should be live");
 
-        // disconnect the viewer
+        // close the tab (disconnect the owning viewer)
         drop(send);
         drop(conn);
-        tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
 
-        let views = warden.session_views();
-        assert_eq!(
-            views.len(),
-            1,
-            "session must SURVIVE a viewer disconnect (detach, not close)"
+        assert!(
+            warden.session_views().is_empty(),
+            "closing the owning tab must KILL its pane's session"
         );
-        assert!(views[0].detachable, "the surviving session is detachable");
     }
 
     // Teleport: a second stream that sends {"attach": id} re-attaches to the SAME live session and
@@ -1731,7 +1734,8 @@ mod tests {
             .await
             .unwrap();
 
-        // viewer A: open the pane, let the marker print, then disconnect (detach).
+        // viewer A: open the pane, let the marker print. Keep A connected — the move hands ownership
+        // to B FIRST (B re-attaches before A drops), so A's later disconnect is a no-op, not a close.
         let (mut send_a, _recv_a) = conn.open_bi().await.unwrap().await.unwrap();
         send_a
             .write_all(b"{\"hello\":\"carol\"}\n{\"resize\":[80,24]}\n")
@@ -1743,20 +1747,17 @@ mod tests {
             .first()
             .map(|s| s.id)
             .expect("a live session");
-        drop(send_a);
-        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
-        assert_eq!(
-            warden.session_views().len(),
-            1,
-            "session survives A's disconnect"
-        );
 
-        // viewer B: re-attach to that session id (teleport) → must replay the ring (MARKER-XYZ).
+        // viewer B: re-attach to that session id (the move) WHILE A is still connected → B takes over
+        // (supersedes A), replays the ring (MARKER-XYZ). Then A drops → no-op (B owns it now).
         let (mut send_b, mut recv_b) = conn.open_bi().await.unwrap().await.unwrap();
         send_b
             .write_all(format!("{{\"attach\":{sid}}}\n{{\"hello\":\"carol\"}}\n").as_bytes())
             .await
             .unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        drop(send_a); // origin tab goes away — must NOT kill the session (B superseded it)
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
 
         let got: std::sync::Arc<std::sync::Mutex<Vec<u8>>> = Default::default();
         let got2 = got.clone();
