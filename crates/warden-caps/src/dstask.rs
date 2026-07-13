@@ -389,11 +389,17 @@ fn resolve_dstask() -> String {
 }
 
 #[cfg(test)]
+// The serialized dstask tests hold `ENV_LOCK` (a std Mutex) across `.await` — deliberately, so the
+// process-global DSTASK_GIT_REPO stays stable while the test's async cap ops run. That trips
+// `await_holding_lock`, but it's a false positive here: the awaits are on `cat`/dstask child procs
+// (no re-entrancy into the lock) and the whole point is to serialize env mutation across parallel
+// test threads. Scoped to the test module so the lint still guards all non-test code.
+#[allow(clippy::await_holding_lock)]
 mod tests {
     use super::*;
 
-    // Both tests set the process-global DSTASK_GIT_REPO; serialize them so parallel test threads
-    // don't clobber each other's env / store.
+    // The dstask-store tests set the process-global DSTASK_GIT_REPO; serialize them so parallel test
+    // threads don't clobber each other's env / store.
     static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     /// When dstask is installed, resolve it to an absolute existing path (not the bare fallback) — so
