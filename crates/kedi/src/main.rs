@@ -8,6 +8,58 @@ use std::sync::Arc;
 const INDEX_HTML: &str = include_str!("index.html");
 const RAW_HTML: &str = include_str!("raw.html");
 
+// PWA assets — installing kedi (Chrome ▸ "Install page as app…") builds a real, chromeless macOS app
+// with its own Dock/Launchpad icon (the cat), instead of a Chrome-branded --app window. The manifest
+// points at these PNGs; the icons + a trivial service worker are what make the page installable.
+const ICON_192: &[u8] = include_bytes!("icon-192.png");
+const ICON_512: &[u8] = include_bytes!("icon-512.png");
+const MANIFEST: &str = r##"{"name":"kedi — governed terminal","short_name":"kedi","description":"Your shell in the browser — recorded, replayable, killable.","start_url":"/","scope":"/","display":"standalone","background_color":"#1e1e2e","theme_color":"#1e1e2e","icons":[{"src":"/icon-192.png","sizes":"192x192","type":"image/png","purpose":"any maskable"},{"src":"/icon-512.png","sizes":"512x512","type":"image/png","purpose":"any maskable"}]}"##;
+// Minimal pass-through service worker: its mere presence (with a fetch handler) satisfies Chrome's
+// installability check. It does not cache — kedi is a live localhost app, offline caching is pointless.
+const SERVICE_WORKER: &str = "self.addEventListener('fetch', () => {});\n";
+
+/// macOS launchd socket activation. When kedi is started **on-demand** by its LaunchAgent, launchd
+/// has already bound + is listening on the http port and hands us the socket(s) here; we serve on
+/// them and skip binding the port ourselves (the WT/QUIC port we still bind directly). Started
+/// manually (no launchd), `launch_activate_socket` returns non-zero (ESRCH) → `None` → bind normally.
+/// This is what lets the *installed PWA* "launch everything": opening it connects to :8788, launchd
+/// wakes kedi, and kedi's existing 90s idle-exit stops it again — nothing runs while unused.
+#[cfg(target_os = "macos")]
+fn launchd_sockets(name: &str) -> Option<Vec<TcpListener>> {
+    use std::os::unix::io::FromRawFd;
+    // From <launch.h>; resolved from libSystem, so no extra link directive is needed.
+    unsafe extern "C" {
+        fn launch_activate_socket(
+            name: *const std::os::raw::c_char,
+            fds: *mut *mut std::os::raw::c_int,
+            count: *mut usize,
+        ) -> std::os::raw::c_int;
+    }
+    let cname = std::ffi::CString::new(name).ok()?;
+    let mut fds: *mut std::os::raw::c_int = std::ptr::null_mut();
+    let mut count: usize = 0;
+    let rc = unsafe { launch_activate_socket(cname.as_ptr(), &mut fds, &mut count) };
+    if rc != 0 || fds.is_null() || count == 0 {
+        return None; // not managed by launchd (or no such socket) → caller binds the port itself
+    }
+    // SAFETY: launchd returns a malloc'd array of `count` valid, already-listening socket fds; we own
+    // them (turn each into a TcpListener) and free the array launchd allocated.
+    let listeners = unsafe {
+        let v: Vec<TcpListener> = std::slice::from_raw_parts(fds, count)
+            .iter()
+            .map(|&fd| TcpListener::from_raw_fd(fd))
+            .collect();
+        libc::free(fds as *mut libc::c_void);
+        v
+    };
+    Some(listeners)
+}
+
+#[cfg(not(target_os = "macos"))]
+fn launchd_sockets(_name: &str) -> Option<Vec<TcpListener>> {
+    None
+}
+
 /// Serve the console page over plain HTTP on every given address — the cert hash + WebTransport URL
 /// are injected so the browser can accept kedi's self-signed cert via `serverCertificateHashes`.
 struct Pages {
@@ -25,7 +77,7 @@ struct Pages {
 
 #[allow(clippy::too_many_arguments)] // a startup wiring fn; grouping into a struct buys nothing here
 fn serve_page(
-    http_addrs: &[std::net::SocketAddr],
+    http_listeners: Vec<TcpListener>,
     wt_url: String,
     cert_hash: [u8; 32],
     rec_ctl: kedi::RecordControl,
@@ -70,8 +122,7 @@ fn serve_page(
         shutdown,
         shutdown_started,
     });
-    for addr in http_addrs {
-        let listener = TcpListener::bind(addr)?;
+    for listener in http_listeners {
         let pages = pages.clone();
         std::thread::spawn(move || {
             for stream in listener.incoming().flatten() {
@@ -95,6 +146,27 @@ fn serve_one(mut stream: TcpStream, pages: &Pages) {
     }
     let method = line.split_whitespace().next().unwrap_or("GET").to_string();
     let path = line.split_whitespace().nth(1).unwrap_or("/");
+    // Binary PWA icons: served as raw bytes, so they take a dedicated write path (the text branches
+    // below all yield a String). Drain the request headers first, then stream the PNG.
+    if path.starts_with("/icon-192.png") || path.starts_with("/icon-512.png") {
+        let bytes: &[u8] = if path.starts_with("/icon-512") { ICON_512 } else { ICON_192 };
+        loop {
+            let mut h = String::new();
+            match reader.read_line(&mut h) {
+                Ok(0) => return,
+                Ok(_) if h.trim().is_empty() => break,
+                Ok(_) => {}
+                Err(_) => return,
+            }
+        }
+        let _ = write!(
+            stream,
+            "HTTP/1.1 200 OK\r\nContent-Type: image/png\r\nContent-Length: {}\r\nCache-Control: max-age=86400\r\nConnection: close\r\n\r\n",
+            bytes.len(),
+        );
+        let _ = stream.write_all(bytes);
+        return;
+    }
     let (body, ctype): (String, &str) = if path.starts_with("/record") {
         // GET /record[?since=N] — the verified stream from index N on (audit panel polls incrementally)
         let since = path
@@ -196,6 +268,12 @@ fn serve_one(mut stream: TcpStream, pages: &Pages) {
             }
             ("{\"ok\":true}".into(), "application/json")
         }
+    } else if path.starts_with("/manifest.webmanifest") {
+        // PWA manifest — makes the page installable as a standalone app with the kedi icon.
+        (MANIFEST.to_string(), "application/manifest+json")
+    } else if path.starts_with("/sw.js") {
+        // Service worker (scope "/") — its fetch handler satisfies Chrome's installability check.
+        (SERVICE_WORKER.to_string(), "text/javascript")
     } else if path.starts_with("/raw") {
         (pages.raw.clone(), "text/html; charset=utf-8")
     } else {
@@ -580,12 +658,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let shutdown_started = Arc::new(std::sync::atomic::AtomicBool::new(false));
 
     let wt_url = format!("https://{}:{}/pty", cfg.host, cfg.wt_port);
-    let http_addrs: Vec<std::net::SocketAddr> = ips
-        .iter()
-        .map(|ip| std::net::SocketAddr::new(*ip, cfg.http_port))
-        .collect();
+    // http listeners: prefer sockets handed to us by launchd (on-demand PWA launch); otherwise bind
+    // the loopback address(es) ourselves. `via_launchd` only tweaks the startup banner.
+    let (http_listeners, via_launchd) = match launchd_sockets("KediHTTP") {
+        Some(l) => (l, true),
+        None => {
+            let mut v = Vec::new();
+            for ip in &ips {
+                let addr = std::net::SocketAddr::new(*ip, cfg.http_port);
+                match TcpListener::bind(addr) {
+                    Ok(l) => v.push(l),
+                    Err(e) => {
+                        eprintln!("kedi: http bind {addr} failed: {e}  (a stray kedi? `pkill -x kedi`)");
+                        std::process::exit(1);
+                    }
+                }
+            }
+            (v, false)
+        }
+    };
     serve_page(
-        &http_addrs,
+        http_listeners,
         wt_url.clone(),
         cert_hash,
         rec_ctl.clone(),
@@ -597,7 +690,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         shutdown_started.clone(),
     )
     .unwrap_or_else(|e| {
-        eprintln!("kedi: http bind failed: {e}  (a stray kedi? `pkill -x kedi`)");
+        eprintln!("kedi: http serve failed: {e}");
         std::process::exit(1);
     });
 
@@ -605,8 +698,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("  open   http://{}:{}", cfg.host, cfg.http_port);
     println!("  wt     {wt_url}  (QUIC/WebTransport)");
     println!(
-        "  bind   {ips:?} (http :{} · wt :{})",
-        cfg.http_port, cfg.wt_port
+        "  bind   {ips:?} (http :{}{} · wt :{})",
+        cfg.http_port,
+        if via_launchd { " via launchd" } else { "" },
+        cfg.wt_port
     );
     println!(
         "  config {}",
