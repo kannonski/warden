@@ -16,7 +16,7 @@ use async_trait::async_trait;
 use futures::StreamExt;
 use std::collections::{HashMap, VecDeque};
 use std::fmt;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
 // ── ids & core types ────────────────────────────────────────────────────────────────────────
@@ -366,6 +366,17 @@ pub type InputStream = std::pin::Pin<Box<dyn futures::Stream<Item = InputFrame> 
 /// to drive (spawn on its runtime — the kernel schedules nothing). It resolves when the session's
 /// capabilities are revoked (their output streams EOF) on close/kill.
 pub type SessionPump = std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>;
+
+/// How a viewer's [`Warden::attach`] ended — so the caller can tell a move from a disconnect.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AttachEnd {
+    /// This was still the current viewer when its connection ended — a genuine disconnect. The caller
+    /// decides the session's fate (kedi closes it: a browser tab closing kills the panes it owns).
+    Disconnected,
+    /// A later attach (a move to another viewer/tab) took over before this one ended — ownership was
+    /// handed off, so this call did nothing. The caller must NOT close the session.
+    Superseded,
+}
 
 // ── session & action ────────────────────────────────────────────────────────────────────────
 
@@ -863,7 +874,11 @@ struct LiveSession {
     // outlive any one attach). The long-lived output pump is a future the CALLER spawns (the kernel is
     // runtime-agnostic — it schedules nothing); it self-completes when the caps are revoked on close.
     held_caps: HashMap<CapId, Arc<dyn Capability>>,
-    attached: Arc<AtomicBool>, // a viewer is currently bound (exclusive-move guard)
+    // Monotonic attach epoch: each `attach` bumps it and remembers its own value. A viewer only acts
+    // on its own disconnect if it's STILL the current epoch — so a re-attach elsewhere (a move) makes
+    // the prior viewer's disconnect a no-op (the move handed ownership off), while a plain disconnect
+    // (still the current epoch) is a real close. This is what lets `attach` distinguish move vs close.
+    epoch: Arc<AtomicU64>,
 }
 
 /// Owns the registries (wired explicitly at the composition root) and runs sessions through the
@@ -1158,7 +1173,7 @@ impl Warden {
                 swap: Some(swap),
                 detachable: true,
                 held_caps: caps,
-                attached: Arc::new(AtomicBool::new(false)),
+                epoch: Arc::new(AtomicU64::new(0)),
             },
         );
         recorder.record(Event::SessionOpened {
@@ -1170,10 +1185,12 @@ impl Warden {
 
     /// Bind a viewer to a live detachable session and run its action. Installs `observer` as the
     /// session's live output sink (replaying the recent-output ring first — scrollback follows a
-    /// teleport), dropping any prior viewer (exclusive move). `input` feeds keystrokes/resize to the
-    /// SAME running capabilities. When the action returns (the viewer disconnected: input stream
-    /// ended), the viewer is DETACHED — the session and its capabilities live on. Errors if the
-    /// session is unknown or not detachable.
+    /// move), dropping any prior viewer (exclusive move). `input` feeds keystrokes/resize to the SAME
+    /// running capabilities. When the action returns (the viewer disconnected), returns how it ended:
+    /// [`AttachEnd::Disconnected`] if this was still the current viewer (a genuine disconnect — the
+    /// caller decides whether to keep the session or close it), or [`AttachEnd::Superseded`] if a
+    /// later attach (a move to another viewer) took over (this call does nothing — the new viewer
+    /// owns the session). Errors if the session is unknown or not detachable.
     pub async fn attach(
         &self,
         session: SessionId,
@@ -1181,10 +1198,10 @@ impl Warden {
         action: Action,
         observer: Arc<dyn Recorder>,
         input: Option<InputStream>,
-    ) -> Result<()> {
-        // snapshot what we need from the registry entry (recorder, caps, killed, swap), then release
-        // the lock before running the action.
-        let (recorder, caps, killed, swap, attached) = {
+    ) -> Result<AttachEnd> {
+        // snapshot what we need from the registry entry (recorder, caps, killed, swap, epoch), then
+        // release the lock before running the action.
+        let (recorder, caps, killed, swap, epoch) = {
             let live = self.live.lock().unwrap();
             let ls = live
                 .get(&session.0)
@@ -1200,7 +1217,7 @@ impl Warden {
                 ls.held_caps.clone(),
                 ls.killed.clone(),
                 ls.swap.clone(),
-                ls.attached.clone(),
+                ls.epoch.clone(),
             )
         };
         // install this viewer's sink (replay the ring to it, drop any prior viewer).
@@ -1208,7 +1225,9 @@ impl Warden {
             let cap_id = caps.keys().next().copied().unwrap_or(CapId(0));
             swap.attach(observer, session, cap_id);
         }
-        attached.store(true, Ordering::SeqCst);
+        // claim this attach's epoch: a LATER attach (a move to another tab) bumps it past ours, so on
+        // our disconnect we can tell "someone took over" (move → no-op) from "still ours" (close).
+        let my_epoch = epoch.fetch_add(1, Ordering::SeqCst) + 1;
 
         let rt = self
             .runtimes
@@ -1239,12 +1258,21 @@ impl Warden {
         // run the viewer's action (the attach loop). No pump join here — the session's long-lived pump
         // already streams output to the sink we installed.
         let result = rt.run(action, &ctx).await;
-        // viewer gone → detach (keep the session + caps alive). Only close/kill revoke.
-        if let Some(swap) = &swap {
-            swap.detach();
-        }
-        attached.store(false, Ordering::SeqCst);
-        result
+        // How did this viewer's action end?
+        //  · a LATER attach bumped the epoch past ours → this was a MOVE; the new viewer owns the
+        //    session now, so we do NOTHING (don't touch the sink it installed, don't close).
+        //  · still our epoch → a genuine DISCONNECT of the current viewer; detach the sink and report
+        //    it so the caller can decide (kedi closes the session on a real tab close).
+        let superseded = epoch.load(Ordering::SeqCst) != my_epoch;
+        let end = if superseded {
+            AttachEnd::Superseded
+        } else {
+            if let Some(swap) = &swap {
+                swap.detach();
+            }
+            AttachEnd::Disconnected
+        };
+        result.map(|()| end)
     }
 
     /// Explicitly end a detachable session: revoke its capabilities (each `revoke()` → recorded, and
@@ -1325,7 +1353,7 @@ impl Warden {
                 swap: None, // non-detachable: caps live in the run's Ctx, revoked when the action ends
                 detachable: false,
                 held_caps: HashMap::new(),
-                attached: Arc::new(AtomicBool::new(false)),
+                epoch: Arc::new(AtomicU64::new(0)),
             },
         );
 
@@ -1899,5 +1927,82 @@ mod detachable_tests {
         let v = &w.session_views()[0];
         assert_eq!(v.title, "bash ~/proj");
         assert_eq!(v.tab, "tab-abc");
+    }
+
+    // attach reports how it ended, so the caller can tell a MOVE from a DISCONNECT:
+    //  · a lone viewer whose input ends → AttachEnd::Disconnected (caller may close the session).
+    //  · a viewer superseded by a later attach (a move) → AttachEnd::Superseded (caller must NOT close).
+    #[tokio::test]
+    async fn attach_end_distinguishes_move_from_disconnect() {
+        let broker = Arc::new(MockBroker {
+            tx: std::sync::Mutex::new(None),
+            revoked: Arc::new(AtomicBool::new(false)),
+        });
+        let w = Arc::new(warden_with(broker));
+        tokio::spawn(w.open_session(mock_session(1)).await.expect("open"));
+
+        // a lone viewer whose input closes → Disconnected
+        let (in_tx, in_rx) = unbounded_channel::<InputFrame>();
+        let w2 = w.clone();
+        let solo = tokio::spawn(async move {
+            let input = Box::pin(tokio_stream::wrappers::UnboundedReceiverStream::new(in_rx))
+                as InputStream;
+            w2.attach(
+                SessionId(1),
+                "local",
+                attach_action(),
+                Arc::new(CapRec::default()),
+                Some(input),
+            )
+            .await
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        drop(in_tx);
+        assert_eq!(
+            solo.await.unwrap().unwrap(),
+            AttachEnd::Disconnected,
+            "a lone viewer's disconnect reports Disconnected"
+        );
+
+        // now viewer A, then B supersedes it (a move) → A reports Superseded
+        let (in_tx_a, in_rx_a) = unbounded_channel::<InputFrame>();
+        let w3 = w.clone();
+        let a = tokio::spawn(async move {
+            let input = Box::pin(tokio_stream::wrappers::UnboundedReceiverStream::new(
+                in_rx_a,
+            )) as InputStream;
+            w3.attach(
+                SessionId(1),
+                "local",
+                attach_action(),
+                Arc::new(CapRec::default()),
+                Some(input),
+            )
+            .await
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        let (in_tx_b, in_rx_b) = unbounded_channel::<InputFrame>();
+        let w4 = w.clone();
+        let _b = tokio::spawn(async move {
+            let input = Box::pin(tokio_stream::wrappers::UnboundedReceiverStream::new(
+                in_rx_b,
+            )) as InputStream;
+            w4.attach(
+                SessionId(1),
+                "local",
+                attach_action(),
+                Arc::new(CapRec::default()),
+                Some(input),
+            )
+            .await
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        drop(in_tx_a); // A's input ends AFTER B took over → A was superseded
+        assert_eq!(
+            a.await.unwrap().unwrap(),
+            AttachEnd::Superseded,
+            "a viewer a move took over from reports Superseded"
+        );
+        drop(in_tx_b);
     }
 }
