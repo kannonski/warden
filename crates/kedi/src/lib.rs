@@ -14,7 +14,7 @@
 
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use tokio::sync::mpsc::{UnboundedSender, unbounded_channel};
 use warden_caps::ai::{AI, AiBroker};
 use warden_caps::dstask::{DSTASK, DsTaskBroker};
@@ -562,33 +562,63 @@ pub async fn serve(
     endpoint: Endpoint<wtransport::endpoint::endpoint_side::Server>,
     warden: Arc<Warden>,
     command: String,
+    clients: Arc<AtomicUsize>,
 ) {
     let next = Arc::new(AtomicU64::new(2000));
     loop {
         let incoming = endpoint.accept().await;
-        let (warden, command, next) = (warden.clone(), command.clone(), next.clone());
+        let (warden, command, next, clients) = (
+            warden.clone(),
+            command.clone(),
+            next.clone(),
+            clients.clone(),
+        );
         tokio::spawn(async move {
             let Ok(request) = incoming.await else { return };
-            handle(request, warden, command, next).await;
+            handle(request, warden, command, next, clients).await;
         });
     }
 }
 
+/// Tear down every live session before the server exits. A `pty` child is killed only via its cap's
+/// `revoke()` (there is no `Drop`), so a bare `process::exit` would orphan shells — this closes each
+/// session first. `kill` handles both detachable (kedi's panes: flags + revokes + removes → child
+/// dies) and any non-detachable session (sets the flag so its action tears down) uniformly, and
+/// records an attributed kill. Returns how many it acted on.
+pub fn close_all_sessions(warden: &Warden, by: &str) -> usize {
+    let ids: Vec<SessionId> = warden
+        .session_views()
+        .into_iter()
+        .map(|s| SessionId(s.id))
+        .collect();
+    let mut n = 0;
+    for id in ids {
+        if warden.kill(id, by) {
+            n += 1;
+        }
+    }
+    n
+}
+
 /// One WebTransport connection carries many **panes**: each bidi stream the client opens is an
 /// independent governed pty session, multiplexed over the one QUIC connection (no extra handshakes).
+/// One connection = one browser tab, so `clients` counts live tabs: bumped once the connection is
+/// accepted, dropped when it closes. The `/clients` route and the idle-timeout read this count.
 async fn handle(
     request: wtransport::endpoint::SessionRequest,
     warden: Arc<Warden>,
     command: String,
     next: Arc<AtomicU64>,
+    clients: Arc<AtomicUsize>,
 ) {
     let Ok(conn) = request.accept().await else {
-        return;
+        return; // never incremented → nothing to decrement
     };
+    clients.fetch_add(1, Ordering::SeqCst);
     loop {
         let (send, recv) = match conn.accept_bi().await {
             Ok(pair) => pair,
-            Err(_) => break, // connection closed
+            Err(_) => break, // connection closed (tab gone)
         };
         let sid = next.fetch_add(1, Ordering::Relaxed);
         tokio::spawn(pane_session(
@@ -599,6 +629,8 @@ async fn handle(
             sid,
         ));
     }
+    // the tab's connection dropped → it's no longer a live client.
+    clients.fetch_sub(1, Ordering::SeqCst);
 }
 
 /// One pane = one bidi stream ↔ one warden pty session.
@@ -862,6 +894,12 @@ mod tests {
     use super::*;
     use wtransport::ClientConfig;
 
+    /// A throwaway connection counter for tests that don't inspect it (most). Tests that DO assert the
+    /// count keep their own `Arc<AtomicUsize>` and pass it in.
+    fn test_clients() -> Arc<AtomicUsize> {
+        Arc::new(AtomicUsize::new(0))
+    }
+
     #[tokio::test]
     async fn webtransport_session_streams_pty_output() {
         let warden = Arc::new(
@@ -872,7 +910,7 @@ mod tests {
         let (identity, hash) = wt_identity("localhost");
         let endpoint = wt_server(identity, "127.0.0.1:0".parse().unwrap()).unwrap();
         let port = endpoint.local_addr().unwrap().port();
-        tokio::spawn(serve(endpoint, warden, "cat".into()));
+        tokio::spawn(serve(endpoint, warden, "cat".into(), test_clients()));
 
         // verify the server by its cert hash — exactly what the browser does via serverCertificateHashes
         let client = Endpoint::client(
@@ -964,7 +1002,7 @@ mod tests {
         let (identity, hash) = wt_identity("localhost");
         let endpoint = wt_server(identity, "127.0.0.1:0".parse().unwrap()).unwrap();
         let port = endpoint.local_addr().unwrap().port();
-        tokio::spawn(serve(endpoint, warden, "cat".into()));
+        tokio::spawn(serve(endpoint, warden, "cat".into(), test_clients()));
 
         let client = Endpoint::client(
             ClientConfig::builder()
@@ -1031,7 +1069,7 @@ mod tests {
         let (identity, hash) = wt_identity("localhost");
         let endpoint = wt_server(identity, "127.0.0.1:0".parse().unwrap()).unwrap();
         let port = endpoint.local_addr().unwrap().port();
-        tokio::spawn(serve(endpoint, warden, "cat".into()));
+        tokio::spawn(serve(endpoint, warden, "cat".into(), test_clients()));
 
         let client = Endpoint::client(
             ClientConfig::builder()
@@ -1104,7 +1142,7 @@ mod tests {
         let (identity, hash) = wt_identity("localhost");
         let endpoint = wt_server(identity, "127.0.0.1:0".parse().unwrap()).unwrap();
         let port = endpoint.local_addr().unwrap().port();
-        tokio::spawn(serve(endpoint, warden, "cat".into())); // canonical tty echoes each byte
+        tokio::spawn(serve(endpoint, warden, "cat".into(), test_clients())); // canonical tty echoes each byte
 
         let client = Endpoint::client(
             ClientConfig::builder()
@@ -1161,7 +1199,7 @@ mod tests {
         let (identity, hash) = wt_identity("localhost");
         let endpoint = wt_server(identity, "127.0.0.1:0".parse().unwrap()).unwrap();
         let port = endpoint.local_addr().unwrap().port();
-        tokio::spawn(serve(endpoint, warden, "cat".into()));
+        tokio::spawn(serve(endpoint, warden, "cat".into(), test_clients()));
 
         let client = Endpoint::client(
             ClientConfig::builder()
@@ -1239,6 +1277,7 @@ mod tests {
                 "dd if=/dev/zero bs=65536 count={} 2>/dev/null",
                 TOTAL / 65536
             ),
+            test_clients(),
         ));
 
         let client = Endpoint::client(
@@ -1341,7 +1380,7 @@ mod tests {
         let (identity, hash) = wt_identity("localhost");
         let endpoint = wt_server(identity, "127.0.0.1:0".parse().unwrap()).unwrap();
         let port = endpoint.local_addr().unwrap().port();
-        tokio::spawn(serve(endpoint, warden, "cat".into()));
+        tokio::spawn(serve(endpoint, warden, "cat".into(), test_clients()));
 
         let client = Endpoint::client(
             ClientConfig::builder()
@@ -1380,7 +1419,7 @@ mod tests {
         let (identity, hash) = wt_identity("localhost");
         let endpoint = wt_server(identity, "127.0.0.1:0".parse().unwrap()).unwrap();
         let port = endpoint.local_addr().unwrap().port();
-        tokio::spawn(serve(endpoint, warden, "cat".into()));
+        tokio::spawn(serve(endpoint, warden, "cat".into(), test_clients()));
 
         let client = Endpoint::client(
             ClientConfig::builder()
@@ -1435,7 +1474,12 @@ mod tests {
         let (identity, hash) = wt_identity("localhost");
         let endpoint = wt_server(identity, "127.0.0.1:0".parse().unwrap()).unwrap();
         let port = endpoint.local_addr().unwrap().port();
-        tokio::spawn(serve(endpoint, warden.clone(), "cat".into())); // idle: never exits on its own
+        tokio::spawn(serve(
+            endpoint,
+            warden.clone(),
+            "cat".into(),
+            test_clients(),
+        )); // idle: never exits on its own
 
         let client = Endpoint::client(
             ClientConfig::builder()
@@ -1493,7 +1537,7 @@ mod tests {
         let endpoint = wt_server(identity, "127.0.0.1:0".parse().unwrap()).unwrap();
         let port = endpoint.local_addr().unwrap().port();
         // a shell that prints once and exits immediately
-        tokio::spawn(serve(endpoint, warden, "echo bye".into()));
+        tokio::spawn(serve(endpoint, warden, "echo bye".into(), test_clients()));
 
         let client = Endpoint::client(
             ClientConfig::builder()
@@ -1533,7 +1577,12 @@ mod tests {
         let endpoint = wt_server(identity, "127.0.0.1:0".parse().unwrap()).unwrap();
         let port = endpoint.local_addr().unwrap().port();
         // a shell that waits for one line, then reports its terminal size (rows cols)
-        tokio::spawn(serve(endpoint, warden, "IFS= read _; stty size".into()));
+        tokio::spawn(serve(
+            endpoint,
+            warden,
+            "IFS= read _; stty size".into(),
+            test_clients(),
+        ));
 
         let client = Endpoint::client(
             ClientConfig::builder()
@@ -1659,6 +1708,85 @@ mod tests {
         );
     }
 
+    // deck's async ACTION path, end to end: `a` + a summary + Enter fires an add through the dstask
+    // cap's async `do` op; `on_tick` polls `do-poll` and reloads. The added card must appear on the
+    // board WITHOUT the pane ever blocking — proves the freeze fix (mutations run off the wasm worker
+    // thread). Runs against a throwaway dstask store so it never touches the user's tasks.
+    #[tokio::test]
+    async fn deck_add_action_is_async_and_lands_on_the_board() {
+        let Some(path) = deck_wasm_path() else {
+            eprintln!("skip: build the deck wasm first, or set DECK_WASM");
+            return;
+        };
+        if std::process::Command::new("dstask")
+            .arg("version")
+            .output()
+            .is_err()
+        {
+            eprintln!("skip: dstask not installed");
+            return;
+        }
+        // isolate: a fresh git repo as the dstask store for the child dstask processes.
+        let repo = std::env::temp_dir().join(format!("kedi-deck-e2e-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&repo);
+        std::fs::create_dir_all(&repo).unwrap();
+        assert!(
+            std::process::Command::new("git")
+                .args(["init", "-q"])
+                .current_dir(&repo)
+                .status()
+                .unwrap()
+                .success()
+        );
+        // SAFETY: the child dstask processes (spawned by the cap) read this env; test section.
+        unsafe { std::env::set_var("DSTASK_GIT_REPO", &repo) };
+
+        use warden_core::Broker as _;
+        let dstask = DsTaskBroker
+            .grant(&CapRequest {
+                kind: DSTASK,
+                arg: String::new(),
+            })
+            .await
+            .unwrap();
+        let cap = warden_wasm::AppCap::spawn(&path, vec![dstask]).expect("spawn deck");
+        let cap = Arc::new(cap);
+        use warden_core::Capability as _;
+        let mut frames = cap.output().expect("output");
+        cap.perform("resize", b"120x40").await.unwrap();
+        // a → Add mode; type a unique summary; Enter → commit → async `do` add.
+        for k in ["a", "z", "z", "z", "q", "\r"] {
+            cap.perform("key", k.as_bytes()).await.unwrap();
+        }
+        // tick until the async add lands and the reload paints the new card.
+        let mut last = String::new();
+        for _ in 0..50 {
+            cap.perform("tick", b"").await.unwrap();
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            while let Ok(Some(f)) = tokio::time::timeout(
+                std::time::Duration::from_millis(30),
+                futures::StreamExt::next(&mut frames),
+            )
+            .await
+            {
+                last = String::from_utf8_lossy(&f).into_owned();
+            }
+            if last.contains("zzzq") {
+                break;
+            }
+        }
+        assert!(
+            last.contains("zzzq"),
+            "the async-added card should appear on the board: {last:?}"
+        );
+        // the pane title (OSC-2) should be in the stream too.
+        assert!(
+            last.contains("\x1b]2;deck\x07"),
+            "deck should emit an OSC-2 pane title: {last:?}"
+        );
+        let _ = std::fs::remove_dir_all(&repo);
+    }
+
     // A browser tab closing KILLS the panes it owns: the owning viewer's disconnect (no move handed
     // it off) closes the session. Open a pty pane, drop the client, assert the session is gone.
     #[tokio::test]
@@ -1672,7 +1800,12 @@ mod tests {
         let endpoint = wt_server(identity, "127.0.0.1:0".parse().unwrap()).unwrap();
         let port = endpoint.local_addr().unwrap().port();
         // `cat` stays alive (doesn't self-exit), so the disconnect is a pure tab-close, not self-exit.
-        tokio::spawn(serve(endpoint, warden.clone(), "cat".into()));
+        tokio::spawn(serve(
+            endpoint,
+            warden.clone(),
+            "cat".into(),
+            test_clients(),
+        ));
 
         let client = Endpoint::client(
             ClientConfig::builder()
@@ -1703,6 +1836,123 @@ mod tests {
         );
     }
 
+    // The live-connection counter (which drives the "am I the last tab?" check + the idle-timeout)
+    // tracks browser tabs = QUIC connections: +1 when a connection is accepted, -1 when it drops.
+    // Two connections → 2; drop each → back to 0.
+    #[tokio::test]
+    async fn connection_count_tracks_tabs() {
+        let warden = Arc::new(
+            terminal_warden("/tmp/kedi-count-test.jsonl", true, vec![])
+                .unwrap()
+                .0,
+        );
+        let (identity, hash) = wt_identity("localhost");
+        let endpoint = wt_server(identity, "127.0.0.1:0".parse().unwrap()).unwrap();
+        let port = endpoint.local_addr().unwrap().port();
+        let clients = Arc::new(AtomicUsize::new(0));
+        tokio::spawn(serve(
+            endpoint,
+            warden.clone(),
+            "cat".into(),
+            clients.clone(),
+        ));
+
+        let mk = || async move {
+            let client = Endpoint::client(
+                ClientConfig::builder()
+                    .with_bind_default()
+                    .with_server_certificate_hashes([wtransport::tls::Sha256Digest::new(hash)])
+                    .build(),
+            )
+            .unwrap();
+            client
+                .connect(format!("https://127.0.0.1:{port}/pty"))
+                .await
+                .unwrap()
+        };
+        // helper: poll the count until it reaches `want` (or time out).
+        let wait_count = |want: usize| {
+            let clients = clients.clone();
+            async move {
+                for _ in 0..50 {
+                    if clients.load(Ordering::SeqCst) == want {
+                        return true;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                }
+                false
+            }
+        };
+
+        let conn_a = mk().await;
+        // a connection is only counted once it's ACCEPTED, which for wtransport happens when the
+        // session is established; open a stream to make sure the server-side accept has run.
+        let (mut sa, _ra) = conn_a.open_bi().await.unwrap().await.unwrap();
+        sa.write_all(b"{\"hello\":\"carol\"}\n").await.unwrap();
+        assert!(wait_count(1).await, "one tab → count 1");
+
+        let conn_b = mk().await;
+        let (mut sb, _rb) = conn_b.open_bi().await.unwrap().await.unwrap();
+        sb.write_all(b"{\"hello\":\"dave\"}\n").await.unwrap();
+        assert!(wait_count(2).await, "two tabs → count 2");
+
+        drop(sa);
+        drop(conn_a);
+        assert!(wait_count(1).await, "dropping one tab → back to 1");
+
+        drop(sb);
+        drop(conn_b);
+        assert!(wait_count(0).await, "dropping the last tab → 0");
+    }
+
+    // Graceful shutdown must close every live session BEFORE the process exits, so pty children are
+    // killed via cap revoke (there's no Drop) — no orphans. `close_all_sessions` is that teardown;
+    // after it, no sessions remain. (We can't test process::exit in-process; this is the seam.)
+    #[tokio::test]
+    async fn shutdown_closes_all_sessions() {
+        let warden = Arc::new(
+            terminal_warden("/tmp/kedi-shutdown-test.jsonl", true, vec![])
+                .unwrap()
+                .0,
+        );
+        let (identity, hash) = wt_identity("localhost");
+        let endpoint = wt_server(identity, "127.0.0.1:0".parse().unwrap()).unwrap();
+        let port = endpoint.local_addr().unwrap().port();
+        // `cat` stays alive, so the session only ends because we close it (not self-exit).
+        tokio::spawn(serve(
+            endpoint,
+            warden.clone(),
+            "cat".into(),
+            test_clients(),
+        ));
+
+        let client = Endpoint::client(
+            ClientConfig::builder()
+                .with_bind_default()
+                .with_server_certificate_hashes([wtransport::tls::Sha256Digest::new(hash)])
+                .build(),
+        )
+        .unwrap();
+        let conn = client
+            .connect(format!("https://127.0.0.1:{port}/pty"))
+            .await
+            .unwrap();
+        let (mut send, _recv) = conn.open_bi().await.unwrap().await.unwrap();
+        send.write_all(b"{\"hello\":\"carol\"}\n{\"resize\":[80,24]}\n")
+            .await
+            .unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        assert_eq!(warden.session_views().len(), 1, "session should be live");
+
+        let n = close_all_sessions(&warden, "test-shutdown");
+        assert_eq!(n, 1, "should have closed the one live session");
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        assert!(
+            warden.session_views().is_empty(),
+            "close_all_sessions must leave no live sessions (pty child reaped, no orphan)"
+        );
+    }
+
     // Teleport: a second stream that sends {"attach": id} re-attaches to the SAME live session and
     // receives its output (the ring replay) — the process moved to the new viewer, no new session.
     #[tokio::test]
@@ -1720,6 +1970,7 @@ mod tests {
             endpoint,
             warden.clone(),
             "printf 'MARKER-XYZ\\n'; cat".into(),
+            test_clients(),
         ));
 
         let client = Endpoint::client(
@@ -1795,7 +2046,12 @@ mod tests {
         let (identity, hash) = wt_identity("localhost");
         let endpoint = wt_server(identity, "127.0.0.1:0".parse().unwrap()).unwrap();
         let port = endpoint.local_addr().unwrap().port();
-        tokio::spawn(serve(endpoint, warden.clone(), "cat".into()));
+        tokio::spawn(serve(
+            endpoint,
+            warden.clone(),
+            "cat".into(),
+            test_clients(),
+        ));
 
         let client = Endpoint::client(
             ClientConfig::builder()
@@ -1845,7 +2101,12 @@ mod tests {
         let endpoint = wt_server(identity, "127.0.0.1:0".parse().unwrap()).unwrap();
         let port = endpoint.local_addr().unwrap().port();
         // `cat` echoes back what we type → that becomes the session's recent output.
-        tokio::spawn(serve(endpoint, warden.clone(), "cat".into()));
+        tokio::spawn(serve(
+            endpoint,
+            warden.clone(),
+            "cat".into(),
+            test_clients(),
+        ));
 
         let client = Endpoint::client(
             ClientConfig::builder()

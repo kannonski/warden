@@ -277,9 +277,11 @@ mod tests {
     // A mock capability of kind "probe" that answers `ping` — so the host.invoke path is tested
     // hermetically. Records its calls so a test can assert the guest reached it. warden's own proof
     // of the governed invoke path; it depends on no real plugin.
+    // (op, input) pairs the mock recorded — aliased so the field type isn't flagged as over-complex.
+    type ProbeCalls = std::sync::Arc<std::sync::Mutex<Vec<(String, Vec<u8>)>>>;
     #[derive(Clone, Default)]
     struct MockProbe {
-        calls: std::sync::Arc<std::sync::Mutex<Vec<(String, Vec<u8>)>>>,
+        calls: ProbeCalls,
     }
     #[async_trait]
     impl Capability for MockProbe {

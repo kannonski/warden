@@ -16,8 +16,14 @@ struct Pages {
     record_path: String, // /record — the audit log (always present; toggle governs writes)
     rec: Arc<std::sync::atomic::AtomicBool>, // /rec — the recording switch (flip from the UI)
     warden: Arc<warden_core::Warden>, // /sessions + /kill — the warden's live state
+    clients: Arc<std::sync::atomic::AtomicUsize>, // /clients — live WT connection (tab) count
+    // /shutdown — stop the whole server: `notify` wakes the main task (which closes sessions +
+    // exits); the AtomicBool makes the route idempotent under a two-tabs-both-hit-stop race.
+    shutdown: Arc<tokio::sync::Notify>,
+    shutdown_started: Arc<std::sync::atomic::AtomicBool>,
 }
 
+#[allow(clippy::too_many_arguments)] // a startup wiring fn; grouping into a struct buys nothing here
 fn serve_page(
     http_addrs: &[std::net::SocketAddr],
     wt_url: String,
@@ -26,6 +32,9 @@ fn serve_page(
     font_size: u8,
     warden_name: &str,
     warden: Arc<warden_core::Warden>,
+    clients: Arc<std::sync::atomic::AtomicUsize>,
+    shutdown: Arc<tokio::sync::Notify>,
+    shutdown_started: Arc<std::sync::atomic::AtomicBool>,
 ) -> std::io::Result<()> {
     let hash_js = cert_hash
         .iter()
@@ -57,6 +66,9 @@ fn serve_page(
         record_path: rec_ctl.path.clone(),
         rec: rec_ctl.on.clone(),
         warden,
+        clients,
+        shutdown,
+        shutdown_started,
     });
     for addr in http_addrs {
         let listener = TcpListener::bind(addr)?;
@@ -153,6 +165,36 @@ fn serve_one(mut stream: TcpStream, pages: &Pages) {
                     "application/json",
                 ),
             }
+        }
+    } else if path.starts_with("/clients") {
+        // GET /clients — {"clients":N,"sessions":M}. N = live WT connections (browser tabs), M =
+        // open sessions. The closing tab reads this to decide if it's the last client (offer to stop
+        // the server) and to warn if sessions are still running. Source of truth for "am I last?" —
+        // only the server sees the other tabs.
+        use std::sync::atomic::Ordering;
+        (
+            format!(
+                "{{\"clients\":{},\"sessions\":{}}}",
+                pages.clients.load(Ordering::SeqCst),
+                pages.warden.session_views().len()
+            ),
+            "application/json",
+        )
+    } else if path.starts_with("/shutdown") {
+        // POST /shutdown — stop the whole server (last tab chose "stop", or the idle-timeout fired).
+        // Idempotent via the swap guard so two tabs racing "stop" don't double-trigger. Wakes the
+        // main task, which closes all sessions (→ pty children killed) then exits. Loopback-only.
+        use std::sync::atomic::Ordering;
+        if method != "POST" {
+            (
+                "{\"ok\":false,\"error\":\"POST required\"}".into(),
+                "application/json",
+            )
+        } else {
+            if !pages.shutdown_started.swap(true, Ordering::SeqCst) {
+                pages.shutdown.notify_one();
+            }
+            ("{\"ok\":true}".into(), "application/json")
         }
     } else if path.starts_with("/raw") {
         (pages.raw.clone(), "text/html; charset=utf-8")
@@ -529,6 +571,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let warden = Arc::new(w);
     let (identity, cert_hash) = kedi::wt_identity(&cfg.host);
 
+    // Shutdown plumbing. `clients` counts live WT connections (browser tabs) across BOTH bind
+    // endpoints — created once here and shared, so it isn't split per-endpoint. `shutdown` wakes the
+    // main task to tear down + exit; `shutdown_started` makes the trigger idempotent (racing tabs /
+    // idle-timeout + a manual stop).
+    let clients = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let shutdown = Arc::new(tokio::sync::Notify::new());
+    let shutdown_started = Arc::new(std::sync::atomic::AtomicBool::new(false));
+
     let wt_url = format!("https://{}:{}/pty", cfg.host, cfg.wt_port);
     let http_addrs: Vec<std::net::SocketAddr> = ips
         .iter()
@@ -542,6 +592,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         cfg.font_size,
         &cfg.name,
         warden.clone(),
+        clients.clone(),
+        shutdown.clone(),
+        shutdown_started.clone(),
     )
     .unwrap_or_else(|e| {
         eprintln!("kedi: http bind failed: {e}  (a stray kedi? `pkill -x kedi`)");
@@ -583,9 +636,52 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             eprintln!("kedi: wt bind {addr} failed: {e}  (a stray kedi? `pkill -x kedi`)");
             std::process::exit(1);
         });
-        tokio::spawn(kedi::serve(endpoint, warden.clone(), cfg.shell.clone()));
+        tokio::spawn(kedi::serve(
+            endpoint,
+            warden.clone(),
+            cfg.shell.clone(),
+            clients.clone(),
+        ));
     }
 
-    std::future::pending::<()>().await; // serve tasks run in the background
-    Ok(())
+    // Stay alive until either an explicit stop (last tab chose "stop", or a manual POST /shutdown) or
+    // the idle-timeout fires. The idle-timeout is the fallback for a HARD browser-close (window X /
+    // Cmd-Q / crash) — there's no reliable way to run the confirm dialog in `unload`, so instead the
+    // server self-exits once it's been idle a while: NO live connections AND NO open sessions. Gating
+    // on sessions-empty (not just connections==0) protects a detached/teleported session left running
+    // with no viewer — the daemon design deliberately outlives a tab, so we only reap when truly idle.
+    const IDLE_GRACE: std::time::Duration = std::time::Duration::from_secs(90);
+    let reason = {
+        use std::sync::atomic::Ordering;
+        loop {
+            let idle = clients.load(Ordering::SeqCst) == 0 && warden.session_views().is_empty();
+            if idle {
+                // arm the grace timer; a reconnect or new session before it elapses cancels the exit.
+                tokio::select! {
+                    _ = shutdown.notified() => break "stop",
+                    _ = tokio::time::sleep(IDLE_GRACE) => {
+                        if clients.load(Ordering::SeqCst) == 0 && warden.session_views().is_empty() {
+                            break "idle";
+                        }
+                        // something reconnected during the grace window → keep serving.
+                    }
+                }
+            } else {
+                // busy: wait for an explicit stop, or re-poll periodically to catch the busy→idle edge.
+                tokio::select! {
+                    _ = shutdown.notified() => break "stop",
+                    _ = tokio::time::sleep(std::time::Duration::from_secs(5)) => {}
+                }
+            }
+        }
+    };
+
+    // Graceful teardown: close every session FIRST so pty children are killed (via cap revoke — there
+    // is no Drop), then exit. A bare exit would orphan shells. A short grace lets the kills propagate.
+    let n = kedi::close_all_sessions(&warden, "server-shutdown");
+    if n > 0 {
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    }
+    println!("kedi: shutting down ({reason}) — closed {n} session(s)");
+    std::process::exit(0);
 }

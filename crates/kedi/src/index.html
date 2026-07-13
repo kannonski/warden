@@ -904,9 +904,54 @@ function closePane(p) {
     const next = allPanes()[0];
     if (SETTINGS.layout === "tab" && next) setFocus(next); // setFocus() calls renderTabs()
     else renderTabs();
-    if (!document.querySelector(".floatwin")) { $("hint").style.display = "grid"; document.title = "kedi"; }
+    // closed the last window in this tab → maybe offer to stop the whole server (if we're the last tab)
+    if (!document.querySelector(".floatwin")) maybeOfferShutdown();
   }, wait);
 }
+
+// The hint (empty) screen — shown when this tab has no open windows.
+function resetToHint() { $("hint").style.display = "grid"; document.title = "kedi"; }
+
+// Closing the last window in THIS tab: ask the server if we're the last connected client. If so,
+// offer to stop the whole server; otherwise (another tab is still attached) just show the hint. The
+// server is the only place that knows about other browser tabs, so it's the source of truth.
+async function maybeOfferShutdown() {
+  let info = { clients: 2, sessions: 0 }; // fail-safe: assume others exist → never stop on error
+  try { info = await (await fetch("/clients", { cache: "no-store" })).json(); } catch (_) {}
+  // <= 1 because our own connection (still open until the page unloads) counts as the 1.
+  if ((info.clients ?? 2) > 1) { resetToHint(); return; }
+  confirmShutdown(info.sessions | 0);
+}
+
+// "Also stop the kedi server?" — [keep running] / [stop]. `sessions` > 0 warns that stopping will
+// end running work. keep/Esc = leave the daemon up (its whole point is to outlive a tab); stop =
+// POST /shutdown (server closes sessions + exits). Reuses the #overlay modal.
+function confirmShutdown(sessions) {
+  const warn = sessions > 0
+    ? "<div style='color:#f9e2af;font-size:12px;margin-top:6px'>" + sessions +
+      " session" + (sessions === 1 ? "" : "s") + " still running — stopping ends them.</div>"
+    : "";
+  overlay(
+    "<div>Also stop the kedi server?" +
+    "<div style='color:var(--dim);font-size:12px;margin-top:6px'>This was the last kedi window.</div>" +
+    warn +
+    "<div style='margin-top:12px;display:flex;gap:10px;justify-content:center'>" +
+      "<button id='sd-keep'>keep running</button>" +
+      "<button id='sd-stop' style='border-color:var(--red);color:var(--red)'>stop</button>" +
+    "</div></div>"
+  );
+  const onKey = (e) => { if (e.key === "Escape") { e.preventDefault(); done(false); } };
+  const done = (stop) => {
+    document.removeEventListener("keydown", onKey, true);
+    $("overlay").style.display = "none"; $("overlay").innerHTML = "";
+    if (stop) { weStoppedIt = true; fetch("/shutdown", { method: "POST" }).catch(() => {}); }
+    resetToHint();
+  };
+  document.addEventListener("keydown", onKey, true);
+  $("sd-keep").onclick = () => done(false);
+  $("sd-stop").onclick = () => done(true);
+}
+let weStoppedIt = false; // set when WE asked the server to stop → friendlier wt.closed message
 
 // ── float windows ──
 function spawnFloat(x, y, w, h, app, attachId) {
@@ -1772,7 +1817,13 @@ async function boot() {
     _reflowPending = true;
     requestAnimationFrame(() => { _reflowPending = false; reflowWindows(); });
   });
-  wt.closed.finally(() => { setState("disconnected", false); overlay("connection lost — sessions ended (no persistence, by design).<br><button onclick='location.reload()'>reconnect</button>"); });
+  wt.closed.finally(() => {
+    setState("disconnected", false);
+    // if WE asked the server to stop, say so plainly; otherwise it's an unexpected disconnect.
+    overlay(weStoppedIt
+      ? "kedi server stopped.<br><span style='color:#5c6b82'>relaunch kedi to start a new one.</span>"
+      : "connection lost — sessions ended (no persistence, by design).<br><button onclick='location.reload()'>reconnect</button>");
+  });
 }
 boot();
 </script>
