@@ -1,0 +1,13 @@
+/* kedi-app frontend — hot-swappable: edit this on disk and the window reloads. */
+html, body { height: 100%; margin: 0; background: #1e1e2e; color: #cdd6f4;
+             font-family: -apple-system, system-ui, sans-serif; }
+
+#bar { display: flex; gap: 6px; align-items: center; padding: 6px 8px;
+       background: #181825; border-bottom: 1px solid #313244; height: 28px; box-sizing: content-box; }
+#bar .lbl { color: #cba6f7; font-weight: 600; margin-right: 6px; }
+#bar button { background: #313244; color: #cdd6f4; border: 0; border-radius: 6px;
+              padding: 4px 9px; cursor: pointer; font-size: 13px; }
+#bar button:hover { background: #45475a; }
+
+#term { height: calc(100vh - 43px); width: 100vw; }
+.xterm { padding: 8px; height: 100%; }

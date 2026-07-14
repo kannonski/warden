@@ -15,7 +15,7 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
-use tokio::sync::mpsc::{UnboundedSender, unbounded_channel};
+use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 use warden_caps::ai::{AI, AiBroker};
 use warden_caps::dstask::{DSTASK, DsTaskBroker};
 use warden_caps::pty::{PTY, PtyBroker};
@@ -145,12 +145,13 @@ async fn grant_declared_caps(kinds: &[String]) -> Vec<Box<dyn warden_core::Capab
     caps
 }
 
-/// Forwards a session's pty output to the WebTransport stream; the rest of the event stream
-/// still lands in the audit record via the warden's base recorder.
-struct WtObserver {
+/// Forwards a session's pty output bytes to the pane's transport (a channel drained by the WT send
+/// stream or a Tauri IPC channel); the rest of the event stream still lands in the audit record via
+/// the warden's base recorder.
+struct PaneObserver {
     out: UnboundedSender<Vec<u8>>,
 }
-impl Recorder for WtObserver {
+impl Recorder for PaneObserver {
     fn record(&self, ev: Event) {
         if let Event::Output { bytes, .. } = ev {
             let _ = self.out.send(bytes);
@@ -340,7 +341,8 @@ pub fn wt_server(
 // grants each app exactly the caps it declares. Adding a plugin = drop a .wasm + a toml block.
 
 /// The plugin dir: `$KEDI_PLUGIN_DIR`, else `$XDG_CONFIG_HOME/kedi/plugins`, else `~/.config/kedi/plugins`.
-pub(crate) fn plugin_dir() -> std::path::PathBuf {
+/// Public so a host (e.g. the Tauri app's plugin manager) can watch it for hot-reload.
+pub fn plugin_dir() -> std::path::PathBuf {
     std::env::var("KEDI_PLUGIN_DIR")
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|_| {
@@ -633,7 +635,9 @@ async fn handle(
     clients.fetch_sub(1, Ordering::SeqCst);
 }
 
-/// One pane = one bidi stream ↔ one warden pty session.
+/// One WebTransport bidi stream ↔ one warden pane. Thin adapter over [`run_pane`]: it splits the recv
+/// stream into newline JSON control lines (→ the message channel) and pumps pane output bytes back out
+/// to the send stream. All session logic lives in `run_pane`, transport-agnostic.
 async fn pane_session(
     mut send: wtransport::SendStream,
     mut recv: wtransport::RecvStream,
@@ -641,54 +645,92 @@ async fn pane_session(
     command: String,
     sid: u64,
 ) {
-    let (in_tx, in_rx) = unbounded_channel::<InputFrame>();
+    let (msg_tx, msg_rx) = unbounded_channel::<Vec<u8>>();
     let (out_tx, mut out_rx) = unbounded_channel::<Vec<u8>>();
 
-    // ── introduction: the first line names the session's (claimed) identity ──────────────────
-    // The client sends {"hello":"name"} immediately on stream open. A client that skips it (e.g.
-    // the /raw page) falls through on its first regular frame with identity "browser"; that frame
-    // is kept and fed to the session below. Leftover bytes stay in `buf` for the main loop.
-    let mut buf: Vec<u8> = Vec::new();
-    let mut tmp = [0u8; 4096];
+    // reader: recv stream → newline-split JSON lines → the message channel. Stream EOF (a tab close)
+    // drops `msg_tx`, which `run_pane` sees as the client going away.
+    let reader = tokio::spawn(async move {
+        let mut buf: Vec<u8> = Vec::new();
+        let mut tmp = [0u8; 4096];
+        loop {
+            match recv.read(&mut tmp).await {
+                Ok(Some(n)) if n > 0 => {
+                    buf.extend_from_slice(&tmp[..n]);
+                    while let Some(p) = buf.iter().position(|&b| b == b'\n') {
+                        let line: Vec<u8> = buf.drain(..=p).collect();
+                        if msg_tx.send(line[..line.len() - 1].to_vec()).is_err() {
+                            return;
+                        }
+                    }
+                }
+                _ => return, // stream closed
+            }
+        }
+    });
+
+    // writer: pane output bytes → send stream. Ends when `out_tx` drops (run_pane returned).
+    let writer = tokio::spawn(async move {
+        while let Some(bytes) = out_rx.recv().await {
+            if send.write_all(&bytes).await.is_err() {
+                break;
+            }
+        }
+    });
+
+    run_pane(warden, sid, command, msg_rx, out_tx).await;
+    reader.abort();
+    let _ = writer.await;
+}
+
+/// Transport-agnostic pane driver: one pane = one warden session. Consumes newline-JSON control lines
+/// from `msgs` (`{"hello":…}` / `{"input":…}` / `{"resize":…}` / `{"app":…}` / `{"attach":…}` /
+/// `{"kill"}` / `{"close"}` / `{"title":…}` / `{"tab":…}`) and streams the pane's raw output bytes to
+/// `out`. The same lifecycle drives a WebTransport stream (see [`pane_session`]) or Tauri IPC — the
+/// caller only bridges bytes. `msgs` closing = the client is gone (viewer detach / tab close).
+pub async fn run_pane(
+    warden: Arc<Warden>,
+    sid: u64,
+    command: String,
+    mut msgs: UnboundedReceiver<Vec<u8>>,
+    out: UnboundedSender<Vec<u8>>,
+) {
+    let (in_tx, in_rx) = unbounded_channel::<InputFrame>();
+
+    // ── introduction: consume control lines until the hello (or a first frame) settles this pane's
+    // claimed identity and whether it's a shell or a plugin/teleport. A client that skips the hello
+    // falls through on its first frame with identity "browser"; that frame is kept as `pending`.
     let mut identity = String::from("browser");
     let mut pending: Vec<InputFrame> = Vec::new();
     let mut app_name: Option<String> = None; // Some(name) → this pane is a WASM plugin, not a shell
     let mut attach_to: Option<u64> = None; // Some(id) → re-attach to that durable session (teleport)
     let mut tab_id = String::new();
     'intro: loop {
-        match recv.read(&mut tmp).await {
-            Ok(Some(n)) if n > 0 => {
-                buf.extend_from_slice(&tmp[..n]);
-                while let Some(p) = buf.iter().position(|&b| b == b'\n') {
-                    let line: Vec<u8> = buf.drain(..=p).collect();
-                    match parse_msg(&line[..line.len() - 1]) {
-                        // an {"app":"name"} frame selects a plugin pane; it can arrive before or with
-                        // the hello. Keep the name only if it's a registered, present plugin — else
-                        // fall through to a shell pane.
-                        Some(ClientMsg::App(name)) => {
-                            if resolve_plugin(&name).is_some() {
-                                app_name = Some(name);
-                            }
-                        }
-                        // {"attach":id} re-attaches this stream to an existing durable session
-                        // (teleport) instead of opening a fresh one. Recorded before the hello.
-                        Some(ClientMsg::Attach(id)) => attach_to = Some(id),
-                        // {"tab":id} tags which browser tab owns this session (for the palette)
-                        Some(ClientMsg::Tab(t)) => tab_id = t,
-                        Some(ClientMsg::Hello(who)) if !who.trim().is_empty() => {
-                            identity = who;
-                            break 'intro;
-                        }
-                        Some(ClientMsg::Hello(_)) => break 'intro, // empty hello → default
-                        Some(ClientMsg::Frame(f)) => {
-                            pending.push(f);
-                            break 'intro;
-                        }
-                        _ => {}
+        match msgs.recv().await {
+            Some(line) => match parse_msg(&line) {
+                // an {"app":"name"} frame selects a plugin pane; it can arrive before or with the
+                // hello. Keep the name only if it's a registered, present plugin — else a shell pane.
+                Some(ClientMsg::App(name)) => {
+                    if resolve_plugin(&name).is_some() {
+                        app_name = Some(name);
                     }
                 }
-            }
-            _ => return, // closed before introducing itself — no session, nothing recorded
+                // {"attach":id} re-attaches this pane to an existing durable session (teleport).
+                Some(ClientMsg::Attach(id)) => attach_to = Some(id),
+                // {"tab":id} tags which client tab owns this session (for the palette)
+                Some(ClientMsg::Tab(t)) => tab_id = t,
+                Some(ClientMsg::Hello(who)) if !who.trim().is_empty() => {
+                    identity = who;
+                    break 'intro;
+                }
+                Some(ClientMsg::Hello(_)) => break 'intro, // empty hello → default
+                Some(ClientMsg::Frame(f)) => {
+                    pending.push(f);
+                    break 'intro;
+                }
+                _ => {}
+            },
+            None => return, // closed before introducing itself — no session, nothing recorded
         }
     }
 
@@ -778,9 +820,9 @@ async fn pane_session(
                     tokio::spawn(pump); // the caller drives the long-lived pump (kernel schedules none)
                 }
                 Err(e) => {
-                    let _ = send
-                        .write_all(format!("\r\n\x1b[1;31m[warden] {e}\x1b[0m\r\n").as_bytes())
-                        .await;
+                    let _ = out.send(
+                        format!("\r\n\x1b[1;31m[warden] {e}\x1b[0m\r\n").into_bytes(),
+                    );
                     return;
                 }
             }
@@ -796,15 +838,9 @@ async fn pane_session(
         warden.set_tab(tsid, &tab_id);
     }
 
-    // out pump: session output (via WtObserver) → this stream. Ends when out_tx drops (detach).
-    let observer: Arc<dyn Recorder> = Arc::new(WtObserver { out: out_tx });
-    let out_task = tokio::spawn(async move {
-        while let Some(bytes) = out_rx.recv().await {
-            if send.write_all(&bytes).await.is_err() {
-                break;
-            }
-        }
-    });
+    // pane output → the caller's `out` channel (the transport writes it). The observer forwards only
+    // Event::Output bytes; the rest of the event stream still lands in the audit record.
+    let observer: Arc<dyn Recorder> = Arc::new(PaneObserver { out: out.clone() });
 
     // seed any frame that arrived with the hello, then attach this viewer + run its action.
     for f in pending.drain(..) {
@@ -823,43 +859,33 @@ async fn pane_session(
     //  · the client sends {"kill"}/{"close"} → tear the session down now (revoke + remove);
     //  · the capability self-exits (shell quit / app returned false) → the attach task finishes →
     //    CLOSE the session (terminal condition);
-    //  · the client disconnects (recv EOF: a browser TAB CLOSE) → we drop in_tx, then check how the
+    //  · the client disconnects (`msgs` closed: a tab close) → we drop in_tx, then check how the
     //    attach ended. `Disconnected` = we were still the owner → CLOSE the session (a tab closing
     //    kills the panes it owns). `Superseded` = a move re-attached this session to another tab →
     //    that tab owns it now, so we leave it running.
     let mut ended = false; // the session was explicitly ended (kill/close/self-exit)
     loop {
-        while let Some(p) = buf.iter().position(|&b| b == b'\n') {
-            let line: Vec<u8> = buf.drain(..=p).collect();
-            match parse_msg(&line[..line.len() - 1]) {
-                Some(ClientMsg::Frame(f)) => {
-                    let _ = in_tx.send(f);
-                }
-                Some(ClientMsg::Kill(by)) => {
-                    warden.kill(tsid, &by);
-                    ended = true;
-                    break;
-                }
-                Some(ClientMsg::Close) => {
-                    warden.close_session(tsid);
-                    ended = true;
-                    break;
-                }
-                Some(ClientMsg::Title(t)) => warden.set_title(tsid, &t),
-                Some(ClientMsg::Tab(t)) => warden.set_tab(tsid, &t),
-                Some(ClientMsg::Hello(_))
-                | Some(ClientMsg::App(_))
-                | Some(ClientMsg::Attach(_))
-                | None => {}
-            }
-        }
-        if ended {
-            break;
-        }
         tokio::select! {
-            r = recv.read(&mut tmp) => match r {
-                Ok(Some(n)) if n > 0 => buf.extend_from_slice(&tmp[..n]),
-                _ => break, // client disconnected (tab close) → handled below
+            line = msgs.recv() => match line {
+                Some(line) => match parse_msg(&line) {
+                    Some(ClientMsg::Frame(f)) => {
+                        let _ = in_tx.send(f);
+                    }
+                    Some(ClientMsg::Kill(by)) => {
+                        warden.kill(tsid, &by);
+                        ended = true;
+                        break;
+                    }
+                    Some(ClientMsg::Close) => {
+                        warden.close_session(tsid);
+                        ended = true;
+                        break;
+                    }
+                    Some(ClientMsg::Title(t)) => warden.set_title(tsid, &t),
+                    Some(ClientMsg::Tab(t)) => warden.set_tab(tsid, &t),
+                    _ => {}
+                },
+                None => break, // client disconnected (tab close) → handled below
             },
             _ = &mut attach_task => {
                 // the capability self-exited while the client was still here → end the session.
@@ -877,7 +903,6 @@ async fn pane_session(
             warden.close_session(tsid); // this tab owned the pane → closing the tab kills it
         }
     }
-    let _ = out_task.await;
 }
 
 /// A throwaway action for `open_session`, which ignores `Session.action` (it only grants + registers;

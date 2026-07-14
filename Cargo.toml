@@ -6,6 +6,7 @@ resolver = "2"
 exclude = ["guest"]                     # different target (wasm32-wasip2), own workspace
 members = [
     "crates/kedi",
+    "crates/kedi-app",
     "crates/warden-core",
     "crates/warden-host",
     "crates/warden-caps",

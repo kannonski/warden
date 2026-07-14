@@ -1,0 +1,6 @@
+{
+  "identifier": "default",
+  "description": "kedi default capability — core APIs for the main window. Custom IPC commands are allowed by default.",
+  "windows": ["main"],
+  "permissions": ["core:default"]
+}
