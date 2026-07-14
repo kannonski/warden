@@ -1,6 +1,11 @@
 {
   "identifier": "default",
   "description": "kedi default capability — core APIs for the main window. Custom IPC commands are allowed by default.",
-  "windows": ["main"],
-  "permissions": ["core:default"]
+  "windows": ["main", "kedi-*"],
+  "permissions": [
+    "core:default",
+    "clipboard-manager:allow-read-text",
+    "clipboard-manager:allow-write-text",
+    "opener:allow-open-url"
+  ]
 }
