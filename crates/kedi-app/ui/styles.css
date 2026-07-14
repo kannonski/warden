@@ -1,13 +1,44 @@
-/* kedi-app frontend — hot-swappable: edit this on disk and the window reloads. */
+/* kedi-app frontend — hot-swappable: edit on disk and the window reloads. Catppuccin-ish palette. */
+:root { color-scheme: dark; }
 html, body { height: 100%; margin: 0; background: #1e1e2e; color: #cdd6f4;
              font-family: -apple-system, system-ui, sans-serif; }
+body { display: flex; flex-direction: column; height: 100vh; }
 
-#bar { display: flex; gap: 6px; align-items: center; padding: 6px 8px;
-       background: #181825; border-bottom: 1px solid #313244; height: 28px; box-sizing: content-box; }
-#bar .lbl { color: #cba6f7; font-weight: 600; margin-right: 6px; }
-#bar button { background: #313244; color: #cdd6f4; border: 0; border-radius: 6px;
-              padding: 4px 9px; cursor: pointer; font-size: 13px; }
-#bar button:hover { background: #45475a; }
+/* tab strip */
+#tabbar { display: flex; align-items: center; gap: 6px; padding: 6px 8px; background: #181825;
+          border-bottom: 1px solid #313244; flex: 0 0 auto; overflow-x: auto; }
+#tabs { display: flex; gap: 4px; }
+#tabbar .group { display: flex; gap: 4px; }
+#tabbar .spacer { flex: 1; }
+#tabbar button, .tab { background: #313244; color: #cdd6f4; border: 0; border-radius: 6px;
+                       padding: 4px 9px; cursor: pointer; font-size: 13px; white-space: nowrap; }
+#tabbar button:hover, .tab:hover { background: #45475a; }
+.tab { display: inline-flex; align-items: center; gap: 6px; }
+.tab.active { background: #cba6f7; color: #1e1e2e; font-weight: 600; }
+.tab .x { opacity: .6; }
+.tab .x:hover { opacity: 1; }
+#rec-toggle.on { background: #f38ba8; color: #1e1e2e; }
+#audit-toggle.on { background: #89b4fa; color: #1e1e2e; }
 
-#term { height: calc(100vh - 43px); width: 100vw; }
+/* panes + audit */
+#main { flex: 1; display: flex; min-height: 0; }
+#panes { flex: 1; position: relative; min-width: 0; }
+.pane { position: absolute; inset: 0; display: none; }
+.pane.active { display: block; }
 .xterm { padding: 8px; height: 100%; }
+
+#audit { width: 340px; flex: 0 0 auto; background: #11111b; border-left: 1px solid #313244;
+         overflow-y: auto; font-size: 12px; }
+#audit[hidden] { display: none; }
+.audit-head { padding: 8px 10px 4px; color: #cba6f7; font-weight: 600; text-transform: uppercase;
+              letter-spacing: .04em; font-size: 11px; }
+.sess { padding: 6px 10px; border-bottom: 1px solid #1e1e2e; }
+.sess .id { color: #6c7086; }
+.sess .who { color: #a6e3a1; }
+.sess .prev { color: #6c7086; font-family: ui-monospace, monospace; white-space: nowrap;
+              overflow: hidden; text-overflow: ellipsis; }
+.sess button { float: right; background: #f38ba8; color: #1e1e2e; border: 0; border-radius: 4px;
+               padding: 1px 6px; cursor: pointer; font-size: 11px; }
+.rec-row { padding: 3px 10px; font-family: ui-monospace, monospace; color: #bac2de; }
+.rec-row .k { color: #f9e2af; }
+.muted { padding: 8px 10px; color: #6c7086; }

@@ -10,8 +10,23 @@
   <script src="/vendor/addon-fit.min.js"></script>
 </head>
 <body>
-  <div id="bar"></div>
-  <div id="term"></div>
+  <div id="tabbar">
+    <div id="tabs"></div>
+    <button id="new-shell" title="New shell pane">＋ shell</button>
+    <div id="plugins" class="group"></div>
+    <div class="spacer"></div>
+    <button id="rec-toggle" title="Toggle recording">● rec</button>
+    <button id="audit-toggle" title="Audit panel">⚖ audit</button>
+  </div>
+  <div id="main">
+    <div id="panes"></div>
+    <aside id="audit" hidden>
+      <div class="audit-head">Sessions</div>
+      <div id="sessions"></div>
+      <div class="audit-head">Record</div>
+      <div id="record"></div>
+    </aside>
+  </div>
   <script src="/app.js"></script>
 </body>
 </html>
