@@ -224,6 +224,7 @@
   <button class="badge btn" id="idchip" title="claimed identity for new sessions — click to change (attribution, not authentication)"> <b></b></button>
   <button class="badge btn" id="audit-btn" title="audit — live sessions, event timeline, replay, kill"><span class="dot"></span>audit</button>
   <span class="badge" id="conn" title="the warden you're connected to"><span class="dot"></span>⌂ <b id="warden-name">warden</b></span>
+  <button class="badge btn" id="newwin-btn" title="new window (Ctrl+Shift+N) — a separate window, shared warden">⊞ window</button>
   <button class="badge btn" id="settings-btn" title="settings — theme, font, cursor, layout">⚙</button>
 </header>
 
@@ -238,7 +239,7 @@
     </svg>
     <div class="wordmark">KEDI</div>
   </div>
-  <div id="hint">double-click for a terminal · drag to draw one · <kbd>Ctrl+Shift+↵</kbd> new · <kbd>Ctrl+Shift+P</kbd> sessions</div>
+  <div id="hint">double-click for a terminal · drag to draw one · <kbd>Ctrl+Shift+↵</kbd> new pane · <kbd>Ctrl+Shift+N</kbd> new window · <kbd>Ctrl+Shift+P</kbd> sessions</div>
   <div id="ctxmenu"></div>
   <div id="palette"><div id="pal-box">
     <input id="pal-in" type="text" placeholder="type to filter every pane across your tabs — ↵ focus / move here · esc close" autocomplete="off" spellcheck="false">
@@ -497,6 +498,13 @@
 // control-line protocol the browser wrote to the WebTransport stream.
 const { invoke, Channel } = window.__TAURI__.core;
 const { listen } = window.__TAURI__.event;
+// Native clipboard + opener via Tauri plugins — navigator.clipboard is blocked on the kedi:// scheme,
+// and window.open won't reach the system browser from a Tauri webview.
+const CLIP = window.__TAURI__.clipboardManager;
+const OPENER = window.__TAURI__.opener;
+async function clipWrite(t) { try { if (CLIP) return await CLIP.writeText(t); } catch (_) {} try { await navigator.clipboard.writeText(t); } catch (_) {} }
+async function clipRead() { try { if (CLIP) return (await CLIP.readText()) || ""; } catch (_) {} try { return (await navigator.clipboard.readText()) || ""; } catch (_) { return ""; } }
+async function openExternal(u) { try { if (OPENER) return await OPENER.openUrl(u); } catch (_) {} try { window.open(u); } catch (_) {} }
 function b64ToBytes(b64) { const s = atob(b64); const a = new Uint8Array(s.length); for (let i = 0; i < s.length; i++) a[i] = s.charCodeAt(i); return a; }
 let recOn = false;              // synced from get_recording at boot
 const WARDEN = "kedi";          // shown in the header
@@ -809,16 +817,19 @@ async function makePane(app, attachId) {
   pane.title = "pane " + pane.id;
   title.textContent = pane.title;
 
-  const term = new Terminal({ ...xtermOpts(), allowProposedApi: true, macOptionIsMeta: true });
+  // macOptionIsMeta OFF: let macOS compose Option chars (e.g. Shift+Option+/ = backslash on many
+  // layouts) instead of turning Option into a Meta/ESC prefix.
+  const term = new Terminal({ ...xtermOpts(), allowProposedApi: true, macOptionIsMeta: false });
   const fit = new FitAddon.FitAddon();
   const search = new SearchAddon.SearchAddon();
   term.loadAddon(fit); term.loadAddon(search);
-  try { term.loadAddon(new WebLinksAddon.WebLinksAddon()); } catch (_) {}
+  // open clicked links in the system browser (Tauri opener) — not inside the app webview.
+  try { term.loadAddon(new WebLinksAddon.WebLinksAddon((event, uri) => openExternal(uri))); } catch (_) {}
   // Unicode 11 widths so xterm agrees with the shell on glyph widths (a mismatch drifts the cursor
   // on prompt/autocomplete redraws — the #1 cause of "cursor won't return to origin")
   try { term.loadAddon(new Unicode11Addon.Unicode11Addon()); term.unicode.activeVersion = "11"; } catch (_) {}
   pane.term = term; pane.fit = fit; pane.search = search;
-  pane.send = (o) => { if (pane.connected) invoke("pane_send", { paneId: pane.id, line: JSON.stringify(o) }); };
+  pane.send = (o) => { if (pane.connected) invoke("pane_send", { sid: pane.sid, line: JSON.stringify(o) }); };
   // open only once the wrapper is in the live DOM (detached open leaves input/focus unwired), and
   // let the FIRST resize be the real fitted size (so the server spawns the shell at the true size)
   pane.open = () => {
@@ -855,7 +866,7 @@ async function makePane(app, attachId) {
   // too: with copy-on-select, Linux select→middle-click muscle memory just works.
   term.onSelectionChange(() => {
     const s = term.getSelection();
-    if (s) navigator.clipboard.writeText(s).catch(() => {});
+    if (s) clipWrite(s);
   });
   termEl.addEventListener("contextmenu", (e) => { e.preventDefault(); e.stopPropagation(); pasteInto(pane); });
   termEl.addEventListener("mousedown", (e) => { if (e.button === 1) e.preventDefault(); }); // no autoscroll
@@ -902,7 +913,7 @@ async function makePane(app, attachId) {
     }
     term.write(bytes, () => syncRender(term));
   };
-  await invoke("open_pane", { paneId: pane.id, onOutput }); // set up this pane's IPC transport
+  pane.sid = await invoke("open_pane", { onOutput }); // backend assigns a globally-unique pane sid
   pane.connected = true;
   if (attachId) pane.send({ attach: attachId }); // MOVE an existing session here (before the hello)
   else if (app) { pane.app = app; pane.send({ app }); } // a plugin pane: request the WASM app first
@@ -1346,20 +1357,22 @@ $("search-input").addEventListener("keydown", (e) => {
   if (e.key === "Enter") { e.preventDefault(); focused && focused.search[e.shiftKey ? "findPrevious" : "findNext"]($("search-input").value); }
   else if (e.key === "Escape") { e.preventDefault(); toggleSearch(false); }
 });
-function copySel(p) { const s = p.term.getSelection(); if (s) navigator.clipboard.writeText(s).catch(() => {}); }
-function pasteInto(p) {
-  // try an image on the clipboard first (→ save-and-type-path via the pty op); else paste text
-  if (navigator.clipboard.read) {
-    navigator.clipboard.read().then(async (items) => {
+function copySel(p) { const s = p.term.getSelection(); if (s) clipWrite(s); }
+async function pasteInto(p) {
+  // try an image on the clipboard first (→ save-and-type-path via the pty op); else paste text. The
+  // image path uses navigator.clipboard.read when the webview allows it (best-effort); text always
+  // goes through the Tauri clipboard plugin, which works on the kedi:// scheme.
+  if (navigator.clipboard && navigator.clipboard.read) {
+    try {
+      const items = await navigator.clipboard.read();
       for (const it of items) {
         const type = it.types.find((t) => t.startsWith("image/"));
         if (type) { const blob = await it.getType(type); sendImage(p, blob); return; }
       }
-      navigator.clipboard.readText().then((t) => t && p.send({ input: t })).catch(() => {});
-    }).catch(() => { navigator.clipboard.readText().then((t) => t && p.send({ input: t })).catch(() => {}); });
-  } else {
-    navigator.clipboard.readText().then((t) => t && p.send({ input: t })).catch(() => {});
+    } catch (_) { /* fall through to text */ }
   }
+  const t = await clipRead();
+  if (t) p.send({ input: t });
 }
 
 // shell-quote a path so spaces/specials survive being typed at the prompt (single-quote wrap; any
@@ -1608,6 +1621,7 @@ function syncSettingsForm() {
 // One helper: mutate SETTINGS[key], apply live, and reflect back into the form.
 const setOpt = (key, val) => { SETTINGS[key] = val; applySettings(); syncSettingsForm(); };
 
+$("newwin-btn").addEventListener("click", () => invoke("new_window").catch(() => {}));
 $("settings-btn").addEventListener("click", () => toggleSettings(true));
 $("settings").addEventListener("mousedown", (e) => { if (e.target === $("settings")) toggleSettings(false); });
 $("set-theme").addEventListener("change", (e) => setOpt("theme", e.target.value));
@@ -1637,6 +1651,11 @@ document.addEventListener("keydown", (e) => {
   // opens a pane inside the current kedi.
   if (e.ctrlKey && e.shiftKey && (e.key === "Enter" || k === "enter")) {
     e.preventDefault(); spawnFloatCascade(); return;
+  }
+  // NEW WINDOW — Ctrl+Shift+N (a separate OS window, its own canvas; sessions shared via the warden).
+  // Parallels Ctrl+Shift+Enter (new pane); free in the Tauri webview (no browser reserving it).
+  if (e.ctrlKey && e.shiftKey && k === "n") {
+    e.preventDefault(); invoke("new_window").catch(() => {}); return;
   }
   // SESSION PALETTE — Ctrl+Shift+P (Chrome may reserve it in a normal tab; works in the --app window)
   if (e.ctrlKey && e.shiftKey && k === "p" && !$("palette").classList.contains("show")) {
@@ -1828,7 +1847,7 @@ function overlay(html) { const o = $("overlay"); o.style.display = "grid"; o.inn
 
 // A pane's session ended host-side (shell exit / kill / self-exit) → close its window.
 listen("pane-exit", (e) => {
-  const p = allPanes().find((x) => x.id === e.payload);
+  const p = allPanes().find((x) => x.sid === e.payload);
   if (p) { p.connected = false; closePane(p); }
 });
 

@@ -27,8 +27,10 @@ struct AppState {
     rec: kedi::RecordControl,
     rt: tokio::runtime::Runtime,
     next_sid: AtomicU64,
-    /// paneId → the control-line sender feeding that pane's `run_pane`.
-    panes: Mutex<HashMap<u32, UnboundedSender<Vec<u8>>>>,
+    next_win: AtomicU64,
+    /// sid → the control-line sender feeding that pane's `run_pane`. Keyed by the backend-assigned sid
+    /// (globally unique), so panes never collide across multiple windows.
+    panes: Mutex<HashMap<u64, UnboundedSender<Vec<u8>>>>,
 }
 
 /// The hot-swappable UI directory: ~/Library/Application Support/com.unblu.kedi/ui (macOS).
@@ -149,9 +151,8 @@ fn mime_for(path: &Path) -> &'static str {
 fn open_pane(
     app: tauri::AppHandle,
     state: State<AppState>,
-    pane_id: u32,
     on_output: Channel<String>,
-) -> Result<(), String> {
+) -> Result<u64, String> {
     let (msg_tx, msg_rx) = unbounded_channel::<Vec<u8>>();
     let (out_tx, mut out_rx) = unbounded_channel::<Vec<u8>>();
     let handle = state.rt.handle().clone();
@@ -175,21 +176,21 @@ fn open_pane(
     handle.spawn(async move {
         kedi::run_pane(warden, sid, shell, msg_rx, out_tx).await;
         // session ended (shell exit / kill / self-exit) → tell the frontend to close this pane
-        let _ = app.emit("pane-exit", pane_id);
+        let _ = app.emit("pane-exit", sid);
     });
 
-    state.panes.lock().unwrap().insert(pane_id, msg_tx);
-    Ok(())
+    state.panes.lock().unwrap().insert(sid, msg_tx);
+    Ok(sid)
 }
 
 /// Forward one newline-JSON control line to a pane's run_pane — the generic mirror of the browser's
 /// `pane.send(obj)` over the WebTransport stream ({"hello"|"app"|"attach"|"tab"|"input"|"resize"|
 /// "title"|"kill"|"close"|"pasteImage"}). A `{"close"}`/`{"kill"}` ends the session; drop the sender.
 #[tauri::command]
-fn pane_send(state: State<AppState>, pane_id: u32, line: String) {
+fn pane_send(state: State<AppState>, sid: u64, line: String) {
     let ends = {
         let panes = state.panes.lock().unwrap();
-        match panes.get(&pane_id) {
+        match panes.get(&sid) {
             Some(tx) => {
                 let _ = tx.send(line.clone().into_bytes());
                 line.contains("\"close\"") || line.contains("\"kill\"")
@@ -198,8 +199,26 @@ fn pane_send(state: State<AppState>, pane_id: u32, line: String) {
         }
     };
     if ends {
-        state.panes.lock().unwrap().remove(&pane_id);
+        state.panes.lock().unwrap().remove(&sid);
     }
+}
+
+/// Open another kedi window — a full, independent canvas sharing the same in-process warden (so its
+/// sessions appear in every window's palette/audit). Panes are keyed by backend sid, so no collision.
+#[tauri::command]
+fn new_window(app: tauri::AppHandle, state: State<AppState>) -> Result<(), String> {
+    let n = state.next_win.fetch_add(1, Ordering::Relaxed);
+    let label = format!("kedi-{n}");
+    tauri::WebviewWindowBuilder::new(
+        &app,
+        &label,
+        WebviewUrl::External("kedi://localhost/index.html".parse().unwrap()),
+    )
+    .title("kedi — governed terminal")
+    .inner_size(960.0, 640.0)
+    .build()
+    .map_err(|e| e.to_string())?;
+    Ok(())
 }
 
 /// {clients, sessions} — the browser polled this to decide "am I the last tab?" before offering to
@@ -335,6 +354,8 @@ fn is_content_change(ev: &notify::Event) -> bool {
 
 fn main() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_clipboard_manager::init()) // copy/paste (navigator.clipboard is blocked on kedi://)
+        .plugin(tauri_plugin_opener::init()) // open clicked links in the system browser
         // Serve the hot-swappable ui/ dir. Read fresh + no-store so edits show on reload.
         .register_asynchronous_uri_scheme_protocol("kedi", |ctx, request, responder| {
             let base = ui_dir(ctx.app_handle());
@@ -380,6 +401,7 @@ fn main() {
                 rec,
                 rt,
                 next_sid: AtomicU64::new(1),
+                next_win: AtomicU64::new(2), // window 1 is "main"; extras are kedi-2, kedi-3, …
                 panes: Mutex::new(HashMap::new()),
             });
 
@@ -411,6 +433,7 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             open_pane,
             pane_send,
+            new_window,
             clients_json,
             shutdown,
             sessions_json,

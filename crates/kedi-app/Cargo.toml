@@ -12,6 +12,8 @@ tauri-build = { version = "2", features = [] }
 
 [dependencies]
 tauri = { version = "2", features = [] }
+tauri-plugin-clipboard-manager = "2"          # reliable copy/paste in WKWebView (navigator.clipboard is blocked on kedi://)
+tauri-plugin-opener = "2"                      # open clicked links in the system browser
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 notify = "6"                                # watch ui/ → auto-reload the window on edit (hot-swap)
