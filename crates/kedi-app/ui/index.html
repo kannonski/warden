@@ -466,6 +466,12 @@
       <button data-v="bar">bar</button>
     </div>
 
+    <label for="set-renderer">renderer <span class="valtag">new panes</span></label>
+    <div class="seg" id="set-renderer">
+      <button data-v="webgl">webgl (gpu)</button>
+      <button data-v="canvas">canvas</button>
+    </div>
+
     <label for="set-blink">cursor blink</label>
     <label class="switch"><input type="checkbox" id="set-blink"><span></span></label>
 
@@ -547,6 +553,7 @@ const DEFAULT_SETTINGS = {
   fontFamily: FONT,
   cursorStyle: "block",   // block | underline | bar
   cursorBlink: true,
+  renderer: "webgl",      // webgl (GPU) | canvas (fallback) — applies to newly opened panes
   lineHeight: 1.0,
   letterSpacing: 0,
   scrollback: 10000,
@@ -817,13 +824,15 @@ async function makePane(app, attachId) {
   pane.open = () => {
     if (pane.opened) return; pane.opened = true;
     term.open(termEl);
-    // GPU renderer. Its glyph atlas is built eagerly, so rebuild it once the vendored Nerd Font is
-    // actually ready (WKWebView would otherwise cache tofu for the prompt glyphs).
-    try {
-      const webgl = new WebglAddon.WebglAddon();
-      term.loadAddon(webgl);
-      document.fonts.ready.then(() => { try { webgl.clearTextureAtlas(); } catch (_) {} });
-    } catch (e) { console.error("[kedi] webgl addon:", e); }
+    // GPU renderer (unless the user picked canvas). Its glyph atlas is built eagerly, so rebuild it
+    // once the vendored Nerd Font is ready (WKWebView would otherwise cache tofu for prompt glyphs).
+    if (SETTINGS.renderer !== "canvas") {
+      try {
+        const webgl = new WebglAddon.WebglAddon();
+        term.loadAddon(webgl);
+        document.fonts.ready.then(() => { try { webgl.clearTextureAtlas(); } catch (_) {} });
+      } catch (e) { console.error("[kedi] webgl addon:", e); }
+    }
     requestAnimationFrame(() => {
       try { fit.fit(); } catch (e) { console.error("[kedi] fit:", e); }
       size.textContent = `${term.cols}×${term.rows}`;
@@ -1442,11 +1451,13 @@ function openAudit() {
   if (!au.term) {
     au.term = new Terminal({ fontFamily: SETTINGS.fontFamily, fontSize: 13, lineHeight: 1.0, cursorBlink: false, scrollback: 8000, disableStdin: true, theme: activeTheme() });
     au.fit = new FitAddon.FitAddon(); au.term.loadAddon(au.fit); au.term.open($("au-term"));
-    try {
-      const awgl = new WebglAddon.WebglAddon();
-      au.term.loadAddon(awgl);
-      document.fonts.ready.then(() => { try { awgl.clearTextureAtlas(); } catch (_) {} });
-    } catch (_) {}
+    if (SETTINGS.renderer !== "canvas") {
+      try {
+        const awgl = new WebglAddon.WebglAddon();
+        au.term.loadAddon(awgl);
+        document.fonts.ready.then(() => { try { awgl.clearTextureAtlas(); } catch (_) {} });
+      } catch (_) {}
+    }
   }
   requestAnimationFrame(() => { try { au.fit.fit(); } catch (_) {} });
   renderRecState();
@@ -1590,6 +1601,7 @@ function syncSettingsForm() {
   $("set-ls").value = SETTINGS.letterSpacing; $("set-ls-val").textContent = SETTINGS.letterSpacing;
   $("set-scroll").value = SETTINGS.scrollback; $("set-scroll-val").textContent = SETTINGS.scrollback.toLocaleString();
   for (const b of $("set-cursor").children) b.classList.toggle("on", b.dataset.v === SETTINGS.cursorStyle);
+  for (const b of $("set-renderer").children) b.classList.toggle("on", b.dataset.v === SETTINGS.renderer);
   for (const b of $("set-layout").children) b.classList.toggle("on", b.dataset.v === SETTINGS.layout);
   for (const b of $("set-wc").children) b.classList.toggle("on", b.dataset.v === SETTINGS.winControls);
 }
@@ -1608,6 +1620,8 @@ $("set-lh").addEventListener("input", (e) => setOpt("lineHeight", Number(e.targe
 $("set-ls").addEventListener("input", (e) => setOpt("letterSpacing", Number(e.target.value)));
 $("set-scroll").addEventListener("input", (e) => setOpt("scrollback", Number(e.target.value)));
 $("set-cursor").addEventListener("click", (e) => { const b = e.target.closest("button"); if (b) setOpt("cursorStyle", b.dataset.v); });
+// renderer applies to newly opened panes (can't hot-swap a live term's renderer) → just persist + reflect
+$("set-renderer").addEventListener("click", (e) => { const b = e.target.closest("button"); if (b) { SETTINGS.renderer = b.dataset.v; saveSettings(); syncSettingsForm(); } });
 $("set-layout").addEventListener("click", (e) => { const b = e.target.closest("button"); if (b) setLayout(b.dataset.v); });
 $("set-wc").addEventListener("click", (e) => { const b = e.target.closest("button"); if (b) { SETTINGS.winControls = b.dataset.v; applyPlatform(); saveSettings(); syncSettingsForm(); } });
 $("set-reset").addEventListener("click", () => { SETTINGS = { ...DEFAULT_SETTINGS }; setLayout(SETTINGS.layout); applySettings(); syncSettingsForm(); });

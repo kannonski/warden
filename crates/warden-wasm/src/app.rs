@@ -355,6 +355,15 @@ mod tests {
             "key count not shown"
         );
 
+        // resize drives the guest's on-resize (host parses `COLSxROWS`) → a repaint frame. This is the
+        // same path a plugin pane takes when its window is resized.
+        cap.perform("resize", b"100x40").await.expect("resize");
+        let after_resize = frames.next().await.expect("a frame after resize");
+        assert!(
+            String::from_utf8_lossy(&after_resize).contains("kedi:app fixture"),
+            "resize did not repaint"
+        );
+
         cap.perform("key", b"q").await.expect("q");
         for _ in 0..50 {
             if cap.finished() {
