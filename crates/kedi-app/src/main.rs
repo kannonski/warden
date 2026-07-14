@@ -36,28 +36,90 @@ fn ui_dir(app: &tauri::AppHandle) -> PathBuf {
     app.path().app_data_dir().expect("app_data_dir").join("ui")
 }
 
-/// Seed the ui/ dir from baked-in defaults, never overwriting — your edits stick. (Deleting the dir
-/// re-seeds the current defaults; a future slice can version this to push updates.)
+/// Seed / update the ui/ dir from baked-in defaults, versioned so shipped changes propagate past first
+/// run WITHOUT clobbering the user's hot-swap edits. `.kedi-seed.json` records the hash of each default
+/// we last wrote. Per file: missing → write; unchanged-by-user (on-disk == last-shipped) → overwrite
+/// with the new default; user-edited AND default changed → keep theirs, drop `<file>.new` to diff.
+/// Vendored assets (vendor/) are library code, always refreshed.
 fn seed_ui(dir: &Path) {
     std::fs::create_dir_all(dir).ok();
-    seed_dir(&DEFAULT_UI, dir);
+    let seed_file = dir.join(".kedi-seed.json");
+    let mut baseline: std::collections::BTreeMap<String, String> = std::fs::read(&seed_file)
+        .ok()
+        .and_then(|b| serde_json::from_slice(&b).ok())
+        .unwrap_or_default();
+    reconcile_ui(&DEFAULT_UI, dir, "", &mut baseline);
+    if let Ok(bytes) = serde_json::to_vec_pretty(&baseline) {
+        std::fs::write(&seed_file, bytes).ok();
+    }
 }
 
-fn seed_dir(src: &include_dir::Dir, dst: &Path) {
+fn sha256_hex(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    let mut h = Sha256::new();
+    h.update(bytes);
+    format!("{:x}", h.finalize())
+}
+
+fn reconcile_ui(
+    src: &include_dir::Dir,
+    root: &Path,
+    prefix: &str,
+    baseline: &mut std::collections::BTreeMap<String, String>,
+) {
     for f in src.files() {
-        if let Some(name) = f.path().file_name() {
-            let target = dst.join(name);
-            if !target.exists() {
-                std::fs::write(&target, f.contents()).ok();
+        let Some(name) = f.path().file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        let rel = if prefix.is_empty() {
+            name.to_string()
+        } else {
+            format!("{prefix}/{name}")
+        };
+        let target = root.join(&rel);
+        let emb = f.contents();
+        let emb_hash = sha256_hex(emb);
+        let is_vendor = rel.starts_with("vendor/");
+        match std::fs::read(&target) {
+            Err(_) => {
+                if let Some(p) = target.parent() {
+                    std::fs::create_dir_all(p).ok();
+                }
+                std::fs::write(&target, emb).ok();
+            }
+            Ok(disk) => {
+                let disk_hash = sha256_hex(&disk);
+                let default_changed = baseline.get(&rel) != Some(&emb_hash);
+                if disk_hash == emb_hash {
+                    // already current
+                } else if is_vendor {
+                    // library asset: keep it exactly as shipped (don't let edits break xterm)
+                    std::fs::write(&target, emb).ok();
+                } else if !default_changed {
+                    // the default is unchanged since last ship — the difference is the user's edit → keep it
+                } else if baseline.get(&rel) == Some(&disk_hash) {
+                    // default changed AND the user hadn't touched it → push the update
+                    std::fs::write(&target, emb).ok();
+                } else {
+                    // default changed AND the user edited it → keep theirs, drop the new default to diff
+                    let side = target.with_file_name(format!("{name}.new"));
+                    std::fs::write(&side, emb).ok();
+                }
             }
         }
+        baseline.insert(rel, emb_hash);
     }
     for d in src.dirs() {
-        if let Some(name) = d.path().file_name() {
-            let sub = dst.join(name);
-            std::fs::create_dir_all(&sub).ok();
-            seed_dir(d, &sub);
-        }
+        let Some(name) = d.path().file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        let rel = if prefix.is_empty() {
+            name.to_string()
+        } else {
+            format!("{prefix}/{name}")
+        };
+        std::fs::create_dir_all(root.join(&rel)).ok();
+        reconcile_ui(d, root, &rel, baseline);
     }
 }
 
@@ -85,17 +147,19 @@ fn mime_for(path: &Path) -> &'static str {
 fn open_pane(
     state: State<AppState>,
     pane_id: u32,
-    on_output: Channel<Vec<u8>>,
+    on_output: Channel<String>,
     app: Option<String>,
 ) -> Result<(), String> {
     let (msg_tx, msg_rx) = unbounded_channel::<Vec<u8>>();
     let (out_tx, mut out_rx) = unbounded_channel::<Vec<u8>>();
     let handle = state.rt.handle().clone();
 
-    // output pump: warden pane bytes → the webview channel. Ends when run_pane drops `out_tx`.
+    // output pump: warden pane bytes → the webview channel, base64-framed (pty output is binary and
+    // not always valid UTF-8; base64 is ~1.33x vs a ~3-6x JSON number array). Ends when out_tx drops.
     handle.spawn(async move {
+        use base64::{Engine, engine::general_purpose::STANDARD};
         while let Some(bytes) = out_rx.recv().await {
-            if on_output.send(bytes).is_err() {
+            if on_output.send(STANDARD.encode(&bytes)).is_err() {
                 break;
             }
         }
