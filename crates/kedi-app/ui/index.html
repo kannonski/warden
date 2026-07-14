@@ -99,6 +99,8 @@
   body.plat-mac .wc { width:12px; height:12px; border-radius:50%; opacity:.92; }
   body.plat-mac .wc:hover { opacity:1; transform:scale(1.12); }
   body.plat-mac .wc.min { background:#f9e2af; } body.plat-mac .wc.max { background:#a6e3a1; } body.plat-mac .wc.close { background:#f38ba8; }
+  /* macOS traffic-light order: close · minimize · maximize (the DOM order min,max,close suits win/linux) */
+  body.plat-mac .wc.close { order:1; } body.plat-mac .wc.min { order:2; } body.plat-mac .wc.max { order:3; }
 
   /* Windows — square, flat, full-bleed on the RIGHT; close goes red on hover */
   body.plat-win .wcgroup { gap:0; margin:-3px -9px -3px 4px; align-self:stretch; } /* cancel panebar padding → flush corner */
