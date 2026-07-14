@@ -1,32 +1,1854 @@
 <!doctype html>
 <html lang="en">
 <head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>kedi</title>
-  <link rel="stylesheet" href="/vendor/xterm.min.css" />
-  <link rel="stylesheet" href="/styles.css" />
-  <script src="/vendor/xterm.min.js"></script>
-  <script src="/vendor/addon-fit.min.js"></script>
+<meta charset="utf-8">
+<title>kedi — governed terminal</title>
+<!-- favicon: the cat glyph, inline so the single binary carries its own tab icon (no extra route/asset) -->
+<link rel="icon" href="data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20width%3D%22128%22%20height%3D%22128%22%20viewBox%3D%220%200%20128%20128%22%20role%3D%22img%22%20aria-label%3D%22kedi%22%3E%20%3Cdefs%3E%20%3ClinearGradient%20id%3D%22bg%22%20x1%3D%220%22%20y1%3D%220%22%20x2%3D%220%22%20y2%3D%221%22%3E%20%3Cstop%20offset%3D%220%22%20stop-color%3D%22%233a2f5c%22%2F%3E%20%3Cstop%20offset%3D%221%22%20stop-color%3D%22%231e1e2e%22%2F%3E%20%3C%2FlinearGradient%3E%20%3ClinearGradient%20id%3D%22cat%22%20x1%3D%220%22%20y1%3D%220%22%20x2%3D%221%22%20y2%3D%221%22%3E%20%3Cstop%20offset%3D%220%22%20stop-color%3D%22%23cba6f7%22%2F%3E%20%3Cstop%20offset%3D%221%22%20stop-color%3D%22%23b48ef0%22%2F%3E%20%3C%2FlinearGradient%3E%20%3C%2Fdefs%3E%20%3Crect%20width%3D%22128%22%20height%3D%22128%22%20rx%3D%2228%22%20fill%3D%22url%28%23bg%29%22%2F%3E%20%3Cg%20stroke%3D%22%23cba6f7%22%20stroke-width%3D%224.5%22%20stroke-linecap%3D%22round%22%20opacity%3D%22.55%22%3E%20%3Cpath%20d%3D%22M22%2060%20H8%20M23%2071%20H12%22%2F%3E%20%3Cpath%20d%3D%22M106%2060%20h14%20M105%2071%20h11%22%2F%3E%20%3C%2Fg%3E%20%3Cpath%20fill%3D%22url%28%23cat%29%22%20d%3D%22M40%2044%20L38%2022%20L55%2034%20Q64%2030%2073%2034%20L90%2022%20L88%2044%20Q99%2055%2099%2068%20Q99%2096%2064%2096%20Q29%2096%2029%2068%20Q29%2055%2040%2044%20Z%22%2F%3E%20%3Cg%20fill%3D%22none%22%20stroke%3D%22%231e1e2e%22%20stroke-width%3D%224.2%22%20stroke-linecap%3D%22round%22%3E%20%3Cpath%20d%3D%22M46%2064%20q7%207%2014%200%22%2F%3E%20%3Cpath%20d%3D%22M68%2064%20q7%207%2014%200%22%2F%3E%20%3C%2Fg%3E%20%3Cpath%20fill%3D%22%231e1e2e%22%20d%3D%22M59%2074%20h10%20l-5%206%20Z%22%2F%3E%20%3C%2Fsvg%3E">
+<!-- PWA: installable as a standalone macOS/desktop app with the kedi icon (Chrome ▸ Install page as app…) -->
+<meta name="theme-color" content="#1e1e2e">
+<link rel="manifest" href="/manifest.webmanifest">
+<link rel="apple-touch-icon" href="/icon-192.png">
+<link rel="stylesheet" href="/vendor/xterm.min.css">
+<script src="/vendor/xterm.min.js"></script>
+<script src="/vendor/addon-fit.min.js"></script>
+<script src="/vendor/addon-search.min.js"></script>
+<script src="/vendor/addon-web-links.min.js"></script>
+<script src="/vendor/addon-unicode11.min.js"></script>
+<script src="/vendor/addon-webgl.min.js"></script>
+<style>
+  /* Vendor the Nerd Font as a real @font-face so document.fonts can track it — WKWebView can't warm a
+     system font, so the WebGL glyph atlas would build before it's ready (→ tofu). This makes fonts.ready
+     meaningful; the WebGL atlas is then rebuilt once ready (see pane.open). */
+  @font-face { font-family: "FiraCode Nerd Font Mono"; src: url("/vendor/FiraCodeNerdFontMono-Regular.ttf") format("truetype"); font-weight: 400; font-style: normal; font-display: block; }
+  @font-face { font-family: "FiraCode Nerd Font Mono"; src: url("/vendor/FiraCodeNerdFontMono-Bold.ttf") format("truetype"); font-weight: 700; font-style: normal; font-display: block; }
+  :root {
+    /* Catppuccin Mocha (matches the user's kitty / p10k / syntax-highlighting) */
+    --bg:#1e1e2e; --panel:#181825; --edge:#313244; --fg:#cdd6f4; --dim:#6c7086;
+    --cyan:#89dceb; --green:#a6e3a1; --red:#f38ba8; --focus:#cba6f7;
+    --term-bg:#1e1e2e; /* the active theme's terminal background — set by applySettings() */
+  }
+  * { box-sizing:border-box; }
+  html,body { height:100%; margin:0; }
+  body { background:var(--bg); color:var(--fg); display:flex; flex-direction:column;
+         font:13px/1.5 "FiraCode Nerd Font", ui-monospace, monospace; overflow:hidden; }
+  header { display:flex; align-items:center; gap:9px; padding:8px 14px; border-bottom:1px solid var(--edge); flex:0 0 auto; }
+  body.no-header header { display:none; }  /* optional top banner (settings ▸ show header) → canvas reclaims the space */
+  header h1 { margin:0; font-size:16px; font-weight:600; letter-spacing:.06em; }
+  header h1 .k { color:var(--focus); }
+  .badge { background:var(--panel); border:1px solid var(--edge); border-radius:999px; padding:4px 12px; font-size:12px; color:var(--dim); white-space:nowrap; display:inline-flex; align-items:center; gap:7px; }
+  .badge b { color:var(--fg); font-weight:600; }
+  #conn .dot { width:8px; height:8px; border-radius:50%; background:var(--dim); }
+  #conn.on .dot { background:var(--green); } #conn.off .dot { background:var(--red); }
+  /* the single governance entry point — its dot IS the recording indicator */
+  #audit-btn .dot { width:8px; height:8px; border-radius:50%; background:var(--dim); }
+  #audit-btn.rec .dot { background:var(--red); animation:recpulse 2.4s ease-in-out infinite; }
+  #audit-btn.rec { color:var(--fg); }
+  .spacer { flex:1; }
+
+  /* depth via the real Catppuccin surfaces (base → mantle → crust vignette), no off-palette tones */
+  #canvas { flex:1 1 auto; min-height:0; position:relative; overflow:hidden; cursor:crosshair;
+            background: radial-gradient(1300px 900px at 30% 8%, color-mix(in srgb, var(--term-bg) 88%, #000) 0%, color-mix(in srgb, var(--term-bg) 70%, #000) 64%, #0c0c12 100%);
+            transition: background .18s ease; }
+  /* the kedi mark — always there, quietly, behind every window */
+  #watermark { position:absolute; inset:0; display:flex; flex-direction:column; align-items:center; justify-content:center;
+               gap:6px; color:#cba6f7; opacity:.08; pointer-events:none; user-select:none; }
+  #watermark .wordmark { font-size:34px; font-weight:600; letter-spacing:.42em; margin-left:.42em; }
+  #hint { position:absolute; left:0; right:0; top:68%; color:var(--dim); pointer-events:none; text-align:center; }
+
+  .floatwin { position:absolute; display:flex; min-width:200px; min-height:130px; border:1px solid var(--edge);
+              border-radius:9px; overflow:hidden; background:var(--term-bg); will-change:transform; opacity:.97;
+              box-shadow:0 6px 20px rgba(0,0,0,.45);
+              transition: box-shadow .14s ease, opacity .14s ease, border-color .14s ease;
+              animation: winIn .12s ease-out; }
+  .floatwin.focused { opacity:1; border-color:var(--focus); box-shadow:0 10px 30px rgba(0,0,0,.55), 0 0 0 1px var(--focus); }
+  .floatwin.dropping { border-color:var(--green); box-shadow:0 0 0 2px var(--green), 0 10px 30px rgba(0,0,0,.55); } /* file/image drag hovering */
+  .floatwin.animate { transition: left .14s ease, top .14s ease, width .14s ease, height .14s ease, box-shadow .14s ease; }
+  .floatwin.closing { opacity:0; transform:scale(.985); transition: opacity .1s ease, transform .1s ease; }
+  .floatwin.stowed { display:none; }  /* minimized → lives in the taskbar (when that setting is on) */
+  .floatwin.stowing { opacity:0; transform:scale(.92) translateY(28px); transition:opacity .13s ease, transform .13s ease; }
+  /* minified in place ("window shade"): collapse to the title bar, hide the terminal body. The bar's
+     click handler expands it again. min-height override lets it shrink below the normal floor. */
+  .floatwin.shaded { min-height:0 !important; }
+  .floatwin.shaded .paneterm, .floatwin.shaded .grip { display:none; }
+  .floatwin.shaded .panebar { cursor:pointer; }
+  .floatwin.shaded .ptitle::after { content:" ▸"; color:var(--dim); } /* affordance: click to expand */
+  @keyframes winIn { from { opacity:0; transform:scale(.985); } to { opacity:1; transform:scale(1); } }
+
+  .pane { flex:1 1 0; min-width:0; min-height:0; display:flex; flex-direction:column; background:var(--term-bg); overflow:hidden; }
+  .panebar { display:flex; align-items:center; gap:8px; padding:3px 9px; font-size:11px; color:var(--dim);
+             background:linear-gradient(var(--panel), #15151f); border-bottom:1px solid var(--edge); flex:0 0 auto; user-select:none; cursor:move; }
+  .ptitle { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color:var(--fg); }
+  .ptitle::before { content:"\f120"; color:var(--dim); margin-right:7px; font-size:11px; } /* nf-fa-terminal */
+  .psize { color:var(--dim); font-size:10px; white-space:nowrap; }
+  .prec { display:none; color:var(--red); font-size:10px; white-space:nowrap; animation: recpulse 2.4s ease-in-out infinite; }
+  body.rec .prec { display:inline; } /* the per-pane "● rec" badge only shows while recording is on */
+  @keyframes recpulse { 0%,100% { opacity:.9; } 50% { opacity:.45; } }
+  .pkill { background:none; border:1px solid var(--edge); color:var(--dim); border-radius:5px; font:inherit; font-size:10px; padding:1px 8px; cursor:pointer; transition: color .12s, border-color .12s, background .12s; }
+  .pkill:hover { color:#1e1e2e; background:var(--red); border-color:var(--red); } /* kill = deliberate governance action, filled red */
+  /* Window controls adapt to the OS (auto-detected, overridable in settings). Three flavors keyed
+     off a body class — plat-mac | plat-win | plat-linux. The buttons carry a glyph (::before) that
+     only the win/linux flavors reveal; macOS shows bare traffic-light dots. */
+  .wcgroup { display:flex; align-items:center; }
+  .wc { border:none; padding:0; cursor:pointer; background:none; color:var(--dim);
+        font-family:ui-monospace,monospace; line-height:1; transition:background .12s, color .12s, opacity .12s, transform .12s; }
+  .wc::before { display:none; }
+
+  /* macOS — traffic lights on the LEFT (order:-1 pulls the group before the title) */
+  body.plat-mac .wcgroup { order:-1; gap:7px; margin-right:4px; }
+  body.plat-mac .wc { width:12px; height:12px; border-radius:50%; opacity:.92; }
+  body.plat-mac .wc:hover { opacity:1; transform:scale(1.12); }
+  body.plat-mac .wc.min { background:#f9e2af; } body.plat-mac .wc.max { background:#a6e3a1; } body.plat-mac .wc.close { background:#f38ba8; }
+
+  /* Windows — square, flat, full-bleed on the RIGHT; close goes red on hover */
+  body.plat-win .wcgroup { gap:0; margin:-3px -9px -3px 4px; align-self:stretch; } /* cancel panebar padding → flush corner */
+  body.plat-win .wc { width:34px; align-self:stretch; font-size:11px; border-radius:0; }
+  body.plat-win .wc::before { display:inline; }
+  body.plat-win .wc.min::before { content:"\2013"; }   /* – */
+  body.plat-win .wc.max::before { content:"\25a1"; }   /* ▢ */
+  body.plat-win .wc.close::before { content:"\2715"; } /* ✕ */
+  body.plat-win .wc:hover { background:rgba(255,255,255,.09); color:var(--fg); }
+  body.plat-win .wc.close:hover { background:#e81123; color:#fff; }
+
+  /* Linux (GNOME/Adwaita) — soft round buttons with glyphs on the RIGHT */
+  body.plat-linux .wcgroup { gap:6px; margin-left:4px; }
+  body.plat-linux .wc { width:20px; height:20px; border-radius:50%; background:rgba(255,255,255,.06); font-size:10px; }
+  body.plat-linux .wc::before { display:inline; }
+  body.plat-linux .wc.min::before { content:"\2013"; }
+  body.plat-linux .wc.max::before { content:"\25a1"; }
+  body.plat-linux .wc.close::before { content:"\2715"; }
+  body.plat-linux .wc:hover { background:rgba(255,255,255,.14); color:var(--fg); }
+  body.plat-linux .wc.close:hover { background:var(--red); color:#1e1e2e; }
+  /* taskbar: a floating dock of minimized windows. Hidden entirely when empty; when it has chips it
+     AUTO-HIDES — tucked just below the bottom edge so it peeks, and slides fully into view on hover
+     (or when a chip has focus, for keyboard users). Never permanently occupies the bottom strip. */
+  #taskbar { position:fixed; left:50%; bottom:0; z-index:9996; display:none;
+             gap:8px; align-items:center; max-width:92vw; overflow-x:auto; padding:7px 9px; border-radius:13px 13px 0 0;
+             background:rgba(24,24,37,.72); backdrop-filter:blur(12px); -webkit-backdrop-filter:blur(12px);
+             border:1px solid var(--edge); border-bottom:none; box-shadow:0 8px 28px rgba(0,0,0,.5);
+             transform:translateX(-50%) translateY(calc(100% - 6px)); transition:transform .18s ease; }
+  #taskbar.show { display:flex; }
+  #taskbar:hover, #taskbar:focus-within { transform:translateX(-50%) translateY(0); }
+  /* a hairline handle so the tucked dock is discoverable */
+  #taskbar::before { content:""; position:absolute; top:3px; left:50%; transform:translateX(-50%);
+                     width:34px; height:3px; border-radius:2px; background:var(--dim); opacity:.6; }
+  .taskchip { display:flex; align-items:center; gap:7px; max-width:210px; cursor:pointer; padding:5px 11px; border-radius:8px;
+              font:inherit; font-size:12px; color:var(--fg); background:var(--panel); border:1px solid var(--edge);
+              transition:border-color .12s, background .12s, transform .12s; animation:chipIn .14s ease-out; }
+  .taskchip:hover { border-color:var(--focus); background:#20202e; transform:translateY(-1px); }
+  .taskchip .tdot { width:7px; height:7px; border-radius:50%; background:var(--green); flex:0 0 auto; }
+  .taskchip .tlabel { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  @keyframes chipIn { from { opacity:0; transform:translateY(8px); } to { opacity:1; transform:translateY(0); } }
+  .paneterm { flex:1 1 auto; min-height:0; min-width:0; position:relative; }
+  .paneterm .xterm { height:100%; width:100%; }
+  .xterm-viewport::-webkit-scrollbar { width:9px; }
+  .xterm-viewport::-webkit-scrollbar-thumb { background:#45475a; border-radius:6px; border:2px solid transparent; background-clip:padding-box; }
+  .xterm-viewport::-webkit-scrollbar-thumb:hover { background:#585b70; }
+  .xterm-viewport::-webkit-scrollbar-track { background:transparent; }
+
+  .grip { position:absolute; right:0; bottom:0; width:15px; height:15px; cursor:nwse-resize; z-index:2;
+          background:linear-gradient(135deg, transparent 45%, var(--dim) 45%, var(--dim) 55%, transparent 55%); }
+  #snap { position:absolute; display:none; border:2px solid var(--cyan); background:rgba(86,200,216,.12); border-radius:6px; pointer-events:none; z-index:9998; }
+  /* snap-up chooser: maximize vs split top/bottom, floated at the top-center */
+  #snapchoose { position:fixed; display:none; z-index:10002; top:16px; left:50%; transform:translateX(-50%);
+    gap:8px; padding:7px; background:rgba(24,24,37,.97); backdrop-filter:blur(12px); -webkit-backdrop-filter:blur(12px);
+    border:1px solid var(--edge); border-radius:12px; box-shadow:0 14px 40px rgba(0,0,0,.5); }
+  #snapchoose.show { display:flex; }
+  .sc-opt { display:flex; flex-direction:column; align-items:center; gap:7px; width:120px; padding:12px 10px; cursor:pointer;
+    border:1px solid var(--edge); border-radius:9px; color:var(--fg); font-size:12px; transition:border-color .12s, background .12s; }
+  .sc-opt:hover, .sc-opt.sel { border-color:var(--focus); background:#252539; }
+  .sc-diagram { width:66px; height:40px; border:1.5px solid var(--dim); border-radius:4px; display:flex; flex-direction:column; overflow:hidden; }
+  .sc-diagram > i { flex:1; background:var(--dim); opacity:.28; }
+  .sc-diagram.split > i:first-child { border-bottom:1.5px solid var(--focus); background:var(--focus); opacity:.5; }
+  .sc-diagram.split > i:last-child { opacity:.18; }
+  .sc-diagram.maxi > i { background:var(--focus); opacity:.4; }
+  .marquee { position:absolute; border:1px dashed var(--cyan); background:rgba(137,220,235,.08); pointer-events:none; }
+  #ctxmenu { position:absolute; display:none; min-width:190px; z-index:9997; padding:5px; border-radius:10px;
+             background:rgba(24,24,37,.88); backdrop-filter:blur(12px); -webkit-backdrop-filter:blur(12px);
+             border:1px solid var(--edge); box-shadow:0 10px 30px rgba(0,0,0,.5); }
+  .cm-item { display:flex; justify-content:space-between; gap:14px; padding:6px 10px; border-radius:6px; font-size:12px;
+             color:var(--fg); cursor:pointer; white-space:nowrap; }
+  .cm-item:hover { background:#20202e; color:var(--focus); }
+  .cm-item .cm-k { color:var(--dim); font-size:11px; }
+  #overlay { position:absolute; inset:0; display:none; place-items:center; text-align:center; z-index:9999; background:rgba(11,14,20,.7); color:var(--dim); }
+  #toast { position:fixed; left:50%; bottom:22px; transform:translateX(-50%) translateY(12px); z-index:10001;
+           background:rgba(24,24,37,.95); color:var(--fg); border:1px solid var(--edge); border-radius:9px;
+           padding:8px 14px; font-size:12px; max-width:80vw; opacity:0; pointer-events:none; transition:opacity .18s, transform .18s; }
+  #toast.show { opacity:1; transform:translateX(-50%) translateY(0); }
+  #overlay button { background:var(--panel); border:1px solid var(--cyan); color:var(--cyan); border-radius:7px; padding:6px 16px; font:inherit; cursor:pointer; margin-top:10px; }
+  /* command palette: search sessions across all browser tabs (focus here / move here) */
+  /* ── session exposé: Ctrl+Shift+P → a zoomed-out grid of every pane across every tab ── */
+  #palette { position:fixed; inset:0; display:none; z-index:10000; background:rgba(9,11,16,.62); backdrop-filter:blur(3px); -webkit-backdrop-filter:blur(3px); }
+  #palette.show { display:flex; flex-direction:column; align-items:center; }
+  #pal-box { width:min(1040px,94vw); margin-top:8vh; display:flex; flex-direction:column; min-height:0; max-height:82vh; }
+  #pal-in {
+    width:100%; box-sizing:border-box; background:rgba(24,24,37,.96); color:var(--fg);
+    font:14px/1.4 var(--mono,monospace); padding:13px 18px; outline:none;
+    border:1px solid var(--edge); border-radius:12px; box-shadow:0 16px 50px rgba(0,0,0,.5);
+  }
+  #pal-in:focus { border-color:var(--focus); }
+  #pal-grid {
+    margin-top:14px; overflow-y:auto; padding:4px 2px 8px; display:grid;
+    grid-template-columns:repeat(auto-fill,minmax(230px,1fr)); gap:14px; align-content:start;
+  }
+  .tile {
+    display:flex; flex-direction:column; gap:0; cursor:pointer; overflow:hidden;
+    background:rgba(24,24,37,.96); border:1px solid var(--edge); border-radius:12px;
+    box-shadow:0 10px 28px rgba(0,0,0,.35); transition:transform .12s ease, border-color .12s, box-shadow .12s;
+  }
+  .tile:hover, .tile.sel { transform:translateY(-3px); border-color:var(--focus); box-shadow:0 16px 40px rgba(0,0,0,.5); }
+  .tile.sel { outline:2px solid var(--focus); outline-offset:-1px; }
+  /* the preview "screen" — a mini terminal-ish surface */
+  .tile-screen {
+    background:var(--bg,#0b0e14); color:var(--dim); font:11.5px/1.5 var(--mono,monospace);
+    padding:12px 13px; height:96px; overflow:hidden; white-space:pre-wrap; word-break:break-word;
+    border-bottom:1px solid var(--edge); position:relative;
+  }
+  .tile-screen.empty { display:grid; place-items:center; color:var(--dim); font-size:11px; opacity:.5; }
+  .tile-screen .glyph { position:absolute; top:10px; right:12px; font-size:15px; opacity:.5; }
+  .tile-foot { display:flex; flex-direction:column; gap:3px; padding:9px 12px 11px; }
+  .tile-title { font-size:13px; font-weight:600; color:var(--fg); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .tile-meta { display:flex; align-items:center; gap:7px; font-size:11px; color:var(--dim); }
+  .tile-where { color:var(--cyan); }
+  .tile-where.remote { color:var(--amber,#e0a54a); }
+  .tile-act { margin-left:auto; font-size:10.5px; letter-spacing:.03em; color:var(--focus); opacity:0; transition:opacity .12s; }
+  .tile:hover .tile-act, .tile.sel .tile-act { opacity:1; }
+  #pal-empty { color:var(--dim); padding:40px; text-align:center; font-size:13px; grid-column:1/-1; }
+  #pal-hint { color:var(--dim); font-size:11px; margin-top:10px; text-align:center; opacity:.7; }
+</style>
 </head>
 <body>
-  <div id="tabbar">
-    <div id="tabs"></div>
-    <button id="new-shell" title="New shell pane">＋ shell</button>
-    <div id="plugins" class="group"></div>
-    <div class="spacer"></div>
-    <button id="rec-toggle" title="Toggle recording">● rec</button>
-    <button id="audit-toggle" title="Audit panel">⚖ audit</button>
+<header>
+  <h1>🐱 <span class="k">kedi</span></h1>
+  <span class="spacer"></span>
+  <button class="badge btn" id="idchip" title="claimed identity for new sessions — click to change (attribution, not authentication)"> <b></b></button>
+  <button class="badge btn" id="audit-btn" title="audit — live sessions, event timeline, replay, kill"><span class="dot"></span>audit</button>
+  <span class="badge" id="conn" title="the warden you're connected to"><span class="dot"></span>⌂ <b id="warden-name">warden</b></span>
+  <button class="badge btn" id="settings-btn" title="settings — theme, font, cursor, layout">⚙</button>
+</header>
+
+<div id="tabstrip"></div>
+<div id="canvas">
+  <div id="watermark">
+    <svg width="150" height="150" viewBox="0 0 100 100" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M25 35 L24 15 L38 26 Q50 21 62 26 L76 15 L75 35 Q83 45 83 56 Q83 79 50 79 Q17 79 17 56 Q17 45 25 35 Z"/>
+      <path d="M35 52 q5 5 10 0"/><path d="M55 52 q5 5 10 0"/>
+      <path d="M46.5 63 h7 l-3.5 4.5 Z"/>
+      <path d="M13 55 H3 M14 62 H5"/><path d="M87 55 h10 M86 62 h9"/>
+    </svg>
+    <div class="wordmark">KEDI</div>
   </div>
-  <div id="main">
-    <div id="panes"></div>
-    <aside id="audit" hidden>
-      <div class="audit-head">Sessions</div>
-      <div id="sessions"></div>
-      <div class="audit-head">Record</div>
-      <div id="record"></div>
-    </aside>
+  <div id="hint">double-click for a terminal · drag to draw one · <kbd>Ctrl+Shift+↵</kbd> new · <kbd>Ctrl+Shift+P</kbd> sessions</div>
+  <div id="ctxmenu"></div>
+  <div id="palette"><div id="pal-box">
+    <input id="pal-in" type="text" placeholder="type to filter every pane across your tabs — ↵ focus / move here · esc close" autocomplete="off" spellcheck="false">
+    <div id="pal-grid"></div>
+    <div id="pal-hint">every pane, every browser tab · click or ↵ to focus (this tab) or move here (another tab)</div>
+  </div></div>
+  <div id="snap"></div>
+  <div id="snapchoose">
+    <div class="sc-opt" data-choice="max"><div class="sc-diagram maxi"><i></i></div>maximize</div>
+    <div class="sc-opt" data-choice="split"><div class="sc-diagram split"><i></i><i></i></div>split top / bottom</div>
   </div>
-  <script src="/app.js"></script>
+  <div id="overlay"></div>
+</div>
+<div id="taskbar"></div>
+
+<div id="search">
+  <input id="search-input" placeholder="find in window…" autocomplete="off" spellcheck="false">
+  <span class="hint2">↵ next · ⇧↵ prev · esc close</span>
+</div>
+<style>
+  #search { position:absolute; right:16px; bottom:14px; display:none; gap:6px; align-items:center; z-index:9997;
+            background:var(--panel); border:1px solid var(--edge); border-radius:8px; padding:6px 10px; }
+  #search input { background:var(--bg); border:1px solid var(--edge); color:var(--fg); border-radius:5px; padding:4px 8px; font:inherit; outline:none; width:220px; }
+  #search input:focus { border-color:var(--cyan); }
+  .hint2 { color:var(--dim); font-size:11px; }
+  .btn { cursor:pointer; color:var(--fg); transition:border-color .12s, color .12s; }
+  .btn:hover { border-color:var(--focus); color:var(--focus); }
+</style>
+
+<!-- audit: one governance surface — live sessions + timeline + reconstruction, live or scrubbed back -->
+<div id="audit" class="hide">
+  <div class="au-top">
+    <span class="au-title">audit</span>
+    <span id="au-verify" class="badge">…</span>
+    <span class="spacer"></span>
+    <button id="au-rec" class="au-btn" title="turn recording on/off — writes to the tamper-evident log"><span class="dot"></span><span id="au-rec-label">record</span></button>
+    <button id="au-close" class="wc close" title="close (esc)"></button>
+  </div>
+  <div class="au-main">
+    <div class="au-side">
+      <div class="au-h">sessions</div>
+      <div id="au-sessions"></div>
+    </div>
+    <div class="au-right">
+      <div class="au-mid">
+        <div class="au-h">timeline</div>
+        <div id="au-feed"></div>
+      </div>
+      <div class="au-recon">
+        <div class="au-h" id="au-recon-h">reconstruction</div>
+        <div id="au-term"></div>
+      </div>
+    </div>
+  </div>
+  <div class="au-ctrl">
+    <button class="au-btn" data-a="start" title="start">⏮</button>
+    <button class="au-btn" data-a="back" title="step back">◀</button>
+    <button class="au-btn" data-a="fwd" title="step forward">▶</button>
+    <button class="au-btn" data-a="end" title="end">⏭</button>
+    <input id="au-scrub" type="range" min="0" max="0" value="0" title="scrub the selected session">
+    <button class="au-btn live on" id="au-live" title="follow live"><span class="dot"></span>live</button>
+    <span id="au-pos" class="au-pos"></span>
+  </div>
+</div>
+<style>
+  #audit { position:fixed; inset:22px; z-index:9999; display:flex; flex-direction:column; gap:11px; padding:14px 16px;
+           background:rgba(24,24,37,.92); backdrop-filter:blur(16px); -webkit-backdrop-filter:blur(16px);
+           border:1px solid var(--edge); border-radius:14px; box-shadow:0 20px 60px rgba(0,0,0,.6); }
+  #audit.hide { display:none; }
+  .au-top { display:flex; align-items:center; gap:12px; }
+  .au-title { font-size:15px; font-weight:600; letter-spacing:.05em; }
+  #au-verify.ok { color:var(--green); border-color:var(--green); }
+  #au-verify.bad { color:#1e1e2e; background:var(--red); border-color:var(--red); }
+  #au-verify.off { color:var(--dim); }
+  .au-main { flex:1; min-height:0; display:flex; gap:12px; }
+  .au-h { color:var(--dim); font-size:11px; letter-spacing:.1em; text-transform:uppercase; padding:0 2px 6px; }
+  .au-side { width:240px; flex:0 0 auto; display:flex; flex-direction:column; min-height:0; }
+  #au-sessions { flex:1; min-height:0; overflow-y:auto; display:flex; flex-direction:column; gap:7px; }
+  .au-sess { display:flex; flex-direction:column; gap:4px; padding:8px 10px; border:1px solid var(--edge); border-radius:9px; background:var(--panel); cursor:pointer; transition:border-color .12s; }
+  .au-sess:hover { border-color:var(--focus); }
+  .au-sess.sel { border-color:var(--focus); background:#20202e; }
+  .au-sess.ended { opacity:.5; }
+  .au-sess .r1 { display:flex; align-items:center; gap:7px; }
+  .au-sess .sid { color:var(--cyan); font-weight:600; }
+  .au-sess .who { flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .au-sess .live-dot { width:7px; height:7px; border-radius:50%; background:var(--green); }
+  .au-sess.ended .live-dot { background:var(--dim); }
+  .au-sess .r2 { display:flex; align-items:center; gap:8px; font-size:11px; color:var(--dim); }
+  .au-sess .caps { flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .au-kill { background:none; border:1px solid var(--edge); color:var(--dim); border-radius:5px; font:inherit; font-size:11px; padding:1px 9px; cursor:pointer; transition:color .12s, background .12s, border-color .12s; }
+  .au-kill:hover { color:#1e1e2e; background:var(--red); border-color:var(--red); }
+  .au-right { flex:1; min-width:0; display:flex; flex-direction:column; gap:11px; }
+  .au-mid { flex:0 0 40%; display:flex; flex-direction:column; min-height:0; }
+  #au-feed { flex:1; min-height:0; overflow-y:auto; border:1px solid var(--edge); border-radius:9px; background:#181825; padding:6px; }
+  .au-recon { flex:1; display:flex; flex-direction:column; min-height:0; }
+  #au-term { flex:1; min-height:0; border:1px solid var(--edge); border-radius:9px; overflow:hidden; background:var(--bg); padding:4px 6px; }
+  .au-ev { display:flex; gap:9px; align-items:baseline; padding:3px 7px; border-radius:6px; cursor:pointer; font-size:12px; white-space:nowrap; overflow:hidden; }
+  .au-ev:hover { background:#20202e; }
+  .au-ev.at { background:rgba(203,166,247,.16); outline:1px solid var(--focus); }
+  .au-ev .i { color:var(--dim); font-size:10px; min-width:34px; flex:0 0 auto; text-align:right; }
+  .au-ev .d { overflow:hidden; text-overflow:ellipsis; }
+  .au-ev.t-session { color:#cba6f7; } .au-ev.t-grant { color:var(--green); } .au-ev.t-call { color:var(--dim); }
+  .au-ev.t-output { color:#89b4fa; } .au-ev.t-kill { color:var(--red); } .au-ev.t-deny { color:var(--red); }
+  .au-empty { color:var(--dim); font-size:12px; padding:14px 4px; text-align:center; line-height:1.7; }
+  .au-ctrl { display:flex; align-items:center; gap:9px; }
+  .au-btn { background:var(--panel); border:1px solid var(--edge); color:var(--fg); border-radius:6px; padding:4px 11px; font:inherit; cursor:pointer; transition:border-color .12s; display:inline-flex; align-items:center; gap:6px; }
+  .au-btn:hover { border-color:var(--focus); }
+  .au-btn.live .dot { width:7px; height:7px; border-radius:50%; background:var(--dim); }
+  .au-btn.live.on { border-color:var(--green); color:var(--green); }
+  .au-btn.live.on .dot { background:var(--green); animation:recpulse 2s ease-in-out infinite; }
+  #au-scrub { flex:1; accent-color:var(--focus); cursor:pointer; }
+  .au-pos { color:var(--dim); font-size:11px; white-space:nowrap; min-width:110px; text-align:right; }
+  #au-rec .dot { width:8px; height:8px; border-radius:50%; background:var(--dim); }
+  #au-rec.on { border-color:var(--red); color:var(--red); }
+  #au-rec.on .dot { background:var(--red); animation:recpulse 2s ease-in-out infinite; }
+
+  /* keyboard cheatsheet */
+  /* ── settings panel ── */
+  #settings.hide { display:none; }
+  #settings { position:fixed; inset:0; z-index:10000; display:grid; place-items:center; background:rgba(11,17,27,.6); }
+  .settings-card { background:rgba(24,24,37,.97); backdrop-filter:blur(18px); border:1px solid var(--edge); border-radius:16px;
+                   box-shadow:0 24px 70px rgba(0,0,0,.65); padding:22px 26px; max-width:520px; width:92%; max-height:88vh; overflow:auto; }
+  .settings-card h2 { margin:0 0 18px; font-size:15px; font-weight:600; letter-spacing:.05em; }
+  .setgrid { display:grid; grid-template-columns:132px 1fr; gap:13px 18px; align-items:center; }
+  .setgrid .sec { grid-column:1/-1; color:var(--dim); font-size:10px; letter-spacing:.13em; text-transform:uppercase; margin-top:8px;
+                  padding-bottom:5px; border-bottom:1px solid var(--edge); }
+  .setgrid .sec:first-child { margin-top:0; }
+  .setgrid > label { color:var(--fg); font-size:12.5px; display:flex; align-items:center; gap:8px; }
+  .valtag { color:var(--focus); font-size:11px; opacity:.85; }
+  /* controls */
+  #settings select, #settings input[type=text] {
+    background:var(--bg); border:1px solid var(--edge); color:var(--fg); border-radius:8px; padding:6px 10px;
+    font:inherit; font-size:12.5px; outline:none; width:100%; }
+  #settings select:focus, #settings input[type=text]:focus { border-color:var(--focus); }
+  #settings input[type=range] { -webkit-appearance:none; appearance:none; width:100%; height:4px; border-radius:2px;
+    background:var(--edge); outline:none; }
+  #settings input[type=range]::-webkit-slider-thumb { -webkit-appearance:none; width:15px; height:15px; border-radius:50%;
+    background:var(--focus); cursor:pointer; border:2px solid var(--panel); box-shadow:0 1px 4px rgba(0,0,0,.5); }
+  #settings input[type=range]::-moz-range-thumb { width:15px; height:15px; border-radius:50%; background:var(--focus);
+    cursor:pointer; border:2px solid var(--panel); }
+  /* segmented control (cursor / layout) */
+  .seg { display:inline-flex; background:var(--bg); border:1px solid var(--edge); border-radius:8px; overflow:hidden; }
+  .seg button { background:none; border:none; color:var(--dim); font:inherit; font-size:12px; padding:6px 13px; cursor:pointer;
+    border-right:1px solid var(--edge); transition:background .12s, color .12s; }
+  .seg button:last-child { border-right:none; }
+  .seg button:hover { color:var(--fg); }
+  .seg button.on { background:var(--focus); color:#1e1e2e; font-weight:600; }
+  /* toggle switch */
+  .switch { position:relative; display:inline-block; width:40px; height:22px; }
+  .switch input { opacity:0; width:0; height:0; }
+  .switch span { position:absolute; inset:0; background:var(--edge); border-radius:22px; cursor:pointer; transition:background .15s; }
+  .switch span::before { content:""; position:absolute; height:16px; width:16px; left:3px; top:3px; background:var(--fg);
+    border-radius:50%; transition:transform .15s; }
+  .switch input:checked + span { background:var(--focus); }
+  .switch input:checked + span::before { transform:translateX(18px); background:#1e1e2e; }
+  .setfoot { display:flex; align-items:center; gap:10px; margin-top:20px; padding-top:14px; border-top:1px solid var(--edge); }
+  .setfoot .btn { cursor:pointer; }
+  .setfoot .btn:hover { color:var(--fg); border-color:var(--focus); }
+  .hintline { color:var(--dim); font-size:11px; }
+
+  /* ── tab-mode layout ── */
+  #tabstrip { display:none; align-items:center; gap:4px; padding:6px 10px 0; background:var(--panel);
+              border-bottom:1px solid var(--edge); overflow-x:auto; flex:0 0 auto; scrollbar-width:none; }
+  #tabstrip::-webkit-scrollbar { display:none; }
+  #tabstrip.show { display:flex; }
+  .tab { display:inline-flex; align-items:center; gap:8px; background:var(--bg); border:1px solid var(--edge);
+         border-bottom:none; border-radius:8px 8px 0 0; color:var(--dim); font:inherit; font-size:12px;
+         padding:7px 12px; max-width:220px; cursor:pointer; transition:color .12s, background .12s; position:relative; top:1px; }
+  .tab:hover { color:var(--fg); }
+  .tab.active { background:var(--term-bg); color:var(--fg); border-color:var(--focus); }
+  .tab .tlabel { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .tab .tclose { color:var(--dim); font-size:14px; line-height:1; border-radius:4px; padding:0 3px; }
+  .tab .tclose:hover { color:#1e1e2e; background:var(--red); }
+  .tab.tadd { color:var(--dim); font-size:15px; padding:6px 12px; max-width:none; }
+  .tab.tadd:hover { color:var(--focus); }
+  /* in tab mode every window fills the canvas; only the active one shows, drag/resize/chrome off */
+  body.tabmode .floatwin { inset:0 !important; left:0 !important; top:0 !important;
+                           width:100% !important; height:100% !important; border-radius:0; border:none;
+                           box-shadow:none; z-index:1 !important; animation:none; display:none; }
+  body.tabmode .floatwin.tab-active { display:flex; }
+  body.tabmode .floatwin .panebar { cursor:default; }
+  body.tabmode .floatwin .wcgroup, body.tabmode .floatwin .grip { display:none; } /* window controls off in tabs */
+  body.tabmode #canvas { cursor:default; }
+  body.tabmode #taskbar { display:none !important; } /* minimize is a floating-mode concept */
+</style>
+
+<div id="settings" class="hide"><div class="card settings-card">
+  <h2>⚙ settings</h2>
+  <div class="setgrid">
+    <div class="sec">appearance</div>
+    <label for="set-theme">theme</label>
+    <select id="set-theme"></select>
+
+    <label for="set-layout">layout</label>
+    <div class="seg" id="set-layout">
+      <button data-v="floating">floating</button>
+      <button data-v="tab">tabs</button>
+    </div>
+
+    <label for="set-wc">window buttons</label>
+    <div class="seg" id="set-wc">
+      <button data-v="auto">auto</button>
+      <button data-v="mac">macOS</button>
+      <button data-v="win">Windows</button>
+      <button data-v="linux">Linux</button>
+    </div>
+
+    <label for="set-taskbar">minimize to taskbar</label>
+    <label class="switch"><input type="checkbox" id="set-taskbar"><span></span></label>
+
+    <label for="set-header">show top bar</label>
+    <label class="switch"><input type="checkbox" id="set-header"><span></span></label>
+
+    <div class="sec">terminal</div>
+    <label for="set-font">font size <span id="set-font-val" class="valtag"></span></label>
+    <input type="range" id="set-font" min="8" max="28" step="1">
+
+    <label for="set-family">font family</label>
+    <input type="text" id="set-family" spellcheck="false" placeholder="monospace">
+
+    <label for="set-cursor">cursor</label>
+    <div class="seg" id="set-cursor">
+      <button data-v="block">block</button>
+      <button data-v="underline">underline</button>
+      <button data-v="bar">bar</button>
+    </div>
+
+    <label for="set-blink">cursor blink</label>
+    <label class="switch"><input type="checkbox" id="set-blink"><span></span></label>
+
+    <label for="set-lh">line height <span id="set-lh-val" class="valtag"></span></label>
+    <input type="range" id="set-lh" min="0.8" max="1.6" step="0.05">
+
+    <label for="set-ls">letter spacing <span id="set-ls-val" class="valtag"></span></label>
+    <input type="range" id="set-ls" min="0" max="4" step="0.5">
+
+    <label for="set-scroll">scrollback <span id="set-scroll-val" class="valtag"></span></label>
+    <input type="range" id="set-scroll" min="1000" max="50000" step="1000">
+  </div>
+  <div class="setfoot">
+    <button class="badge btn" id="set-reset">reset to defaults</button>
+    <span class="spacer"></span>
+    <span class="hintline">saved automatically · esc to close</span>
+  </div>
+</div></div>
+
+<script>
+// kedi-app: the terminal I/O rides Tauri IPC (not WebTransport). A pane is opened with `open_pane`
+// (output streams back on a per-pane Channel, base64-framed) and driven with `pane_send` — the exact
+// control-line protocol the browser wrote to the WebTransport stream.
+const { invoke, Channel } = window.__TAURI__.core;
+const { listen } = window.__TAURI__.event;
+function b64ToBytes(b64) { const s = atob(b64); const a = new Uint8Array(s.length); for (let i = 0; i < s.length; i++) a[i] = s.charCodeAt(i); return a; }
+let recOn = false;              // synced from get_recording at boot
+const WARDEN = "kedi";          // shown in the header
+const FONT = '"FiraCode Nerd Font Mono", "MesloLGS NF", "FiraCode Nerd Font", ui-monospace, monospace';
+
+// ── themes ─────────────────────────────────────────────────────────────────────────────────────
+// Each entry is a full xterm ITheme (the official ANSI mapping for that palette). `dark` drives the
+// app chrome (header/panels) so the whole UI tracks the terminal palette, not just the grid.
+const THEMES = {
+  "mocha": { label:"Catppuccin Mocha", dark:true, term:{
+    background:"#1e1e2e", foreground:"#cdd6f4", cursor:"#f5e0dc", cursorAccent:"#1e1e2e", selectionBackground:"#585b70",
+    black:"#45475a", red:"#f38ba8", green:"#a6e3a1", yellow:"#f9e2af", blue:"#89b4fa",
+    magenta:"#f5c2e7", cyan:"#94e2d5", white:"#bac2de",
+    brightBlack:"#585b70", brightRed:"#f38ba8", brightGreen:"#a6e3a1", brightYellow:"#f9e2af",
+    brightBlue:"#89b4fa", brightMagenta:"#f5c2e7", brightCyan:"#94e2d5", brightWhite:"#a6adc8" } },
+  "latte": { label:"Catppuccin Latte", dark:false, term:{
+    background:"#eff1f5", foreground:"#4c4f69", cursor:"#dc8a78", cursorAccent:"#eff1f5", selectionBackground:"#bcc0cc",
+    black:"#5c5f77", red:"#d20f39", green:"#40a02b", yellow:"#df8e1d", blue:"#1e66f5",
+    magenta:"#ea76cb", cyan:"#179299", white:"#acb0be",
+    brightBlack:"#6c6f85", brightRed:"#d20f39", brightGreen:"#40a02b", brightYellow:"#df8e1d",
+    brightBlue:"#1e66f5", brightMagenta:"#ea76cb", brightCyan:"#179299", brightWhite:"#bcc0cc" } },
+  "dracula": { label:"Dracula", dark:true, term:{
+    background:"#282a36", foreground:"#f8f8f2", cursor:"#f8f8f2", cursorAccent:"#282a36", selectionBackground:"#44475a",
+    black:"#21222c", red:"#ff5555", green:"#50fa7b", yellow:"#f1fa8c", blue:"#bd93f9",
+    magenta:"#ff79c6", cyan:"#8be9fd", white:"#f8f8f2",
+    brightBlack:"#6272a4", brightRed:"#ff6e6e", brightGreen:"#69ff94", brightYellow:"#ffffa5",
+    brightBlue:"#d6acff", brightMagenta:"#ff92df", brightCyan:"#a4ffff", brightWhite:"#ffffff" } },
+  "nord": { label:"Nord", dark:true, term:{
+    background:"#2e3440", foreground:"#d8dee9", cursor:"#d8dee9", cursorAccent:"#2e3440", selectionBackground:"#434c5e",
+    black:"#3b4252", red:"#bf616a", green:"#a3be8c", yellow:"#ebcb8b", blue:"#81a1c1",
+    magenta:"#b48ead", cyan:"#88c0d0", white:"#e5e9f0",
+    brightBlack:"#4c566a", brightRed:"#bf616a", brightGreen:"#a3be8c", brightYellow:"#ebcb8b",
+    brightBlue:"#81a1c1", brightMagenta:"#b48ead", brightCyan:"#8fbcbb", brightWhite:"#eceff4" } },
+  "gruvbox": { label:"Gruvbox Dark", dark:true, term:{
+    background:"#282828", foreground:"#ebdbb2", cursor:"#ebdbb2", cursorAccent:"#282828", selectionBackground:"#504945",
+    black:"#282828", red:"#cc241d", green:"#98971a", yellow:"#d79921", blue:"#458588",
+    magenta:"#b16286", cyan:"#689d6a", white:"#a89984",
+    brightBlack:"#928374", brightRed:"#fb4934", brightGreen:"#b8bb26", brightYellow:"#fabd2f",
+    brightBlue:"#83a598", brightMagenta:"#d3869b", brightCyan:"#8ec07c", brightWhite:"#ebdbb2" } },
+  "solarized": { label:"Solarized Dark", dark:true, term:{
+    background:"#002b36", foreground:"#839496", cursor:"#93a1a1", cursorAccent:"#002b36", selectionBackground:"#073642",
+    black:"#073642", red:"#dc322f", green:"#859900", yellow:"#b58900", blue:"#268bd2",
+    magenta:"#d33682", cyan:"#2aa198", white:"#eee8d5",
+    brightBlack:"#586e75", brightRed:"#cb4b16", brightGreen:"#586e75", brightYellow:"#657b83",
+    brightBlue:"#839496", brightMagenta:"#6c71c4", brightCyan:"#93a1a1", brightWhite:"#fdf6e3" } },
+};
+
+// ── settings store ───────────────────────────────────────────────────────────────────────────
+// Persisted like kedi.who: one JSON blob in localStorage, merged over defaults so new keys added in
+// a later build don't break an old saved blob. applySettings() pushes live to every open pane.
+const DEFAULT_SETTINGS = {
+  theme: "mocha",
+  fontSize: 14,
+  fontFamily: FONT,
+  cursorStyle: "block",   // block | underline | bar
+  cursorBlink: true,
+  lineHeight: 1.0,
+  letterSpacing: 0,
+  scrollback: 10000,
+  layout: "floating",     // floating | tab
+  winControls: "auto",    // auto | mac | win | linux — window-button flavor
+  taskbar: false,         // minimize → taskbar dock (on) vs. collapse-to-title in place (off, default)
+  header: true,           // show the top banner (🐱 kedi · identity · audit · settings); off = more room
+};
+
+// Best-effort OS guess for the "auto" window-control flavor. userAgentData is the modern signal;
+// fall back to the UA string. Returns "mac" | "win" | "linux".
+function detectPlatform() {
+  const p = ((navigator.userAgentData && navigator.userAgentData.platform) || navigator.platform || navigator.userAgent || "").toLowerCase();
+  if (p.includes("mac") || p.includes("iphone") || p.includes("ipad")) return "mac";
+  if (p.includes("win")) return "win";
+  return "linux";
+}
+const controlFlavor = () => SETTINGS.winControls === "auto" ? detectPlatform() : SETTINGS.winControls;
+// Stamp the flavor on <body> so the CSS picks the right window-control style.
+function applyPlatform() {
+  const f = controlFlavor();
+  document.body.classList.remove("plat-mac", "plat-win", "plat-linux");
+  document.body.classList.add("plat-" + f);
+}
+function loadSettings() {
+  let s = {};
+  try { s = JSON.parse(localStorage.getItem("kedi.settings") || "{}"); } catch (_) {}
+  const merged = { ...DEFAULT_SETTINGS, ...s };
+  if (!THEMES[merged.theme]) merged.theme = DEFAULT_SETTINGS.theme;
+  return merged;
+}
+let SETTINGS = loadSettings();
+function saveSettings() { try { localStorage.setItem("kedi.settings", JSON.stringify(SETTINGS)); } catch (_) {} }
+const activeTheme = () => THEMES[SETTINGS.theme].term;
+
+// Per-pane xterm options derived from SETTINGS (both new panes and live updates read this).
+function xtermOpts() {
+  return {
+    fontFamily: SETTINGS.fontFamily, fontSize: SETTINGS.fontSize,
+    lineHeight: SETTINGS.lineHeight, letterSpacing: SETTINGS.letterSpacing,
+    cursorStyle: SETTINGS.cursorStyle, cursorBlink: SETTINGS.cursorBlink,
+    scrollback: SETTINGS.scrollback, theme: activeTheme(),
+  };
+}
+// Push the current settings to every live pane + the audit terminal, tint the canvas to the theme
+// background (so a light theme doesn't float on a dark void), then refit. The app chrome stays the
+// dark Catppuccin shell — the theme recolors the terminals, which is what the palette is about.
+function applySettings() {
+  applyPlatform();
+  const t = THEMES[SETTINGS.theme];
+  document.documentElement.style.setProperty("--term-bg", t.term.background);
+  document.body.classList.toggle("no-header", !SETTINGS.header); // hide the top banner when off
+  const o = xtermOpts();
+  for (const p of allPanes()) Object.assign(p.term.options, o);
+  if (typeof au !== "undefined" && au.term) Object.assign(au.term.options, { theme: o.theme, fontFamily: o.fontFamily });
+  fontSize = SETTINGS.fontSize;
+  fitAll();
+  saveSettings();
+}
+
+// ── low-latency rendering ────────────────────────────────────────────────────────────────────
+// The engine round-trip is ~45µs (measured); the gap to a native terminal like kitty is entirely
+// the browser's render+display path. The biggest browser-side lever: a DESYNCHRONIZED canvas.
+// xterm's WebGL addon requests a plain context, so every frame detours through Chromium's compositor
+// (1–2 extra frames ≈ 16–33ms @60Hz). `desynchronized:true` lets the canvas scan straight to the
+// display controller (WHATWG canvas spec; Chrome's own low-latency-terminal use case). Chromium-only
+// (kedi needs it anyway) and may tear slightly — fine for a terminal. Patch getContext before any
+// WebGL context is created; log once whether the browser actually granted it.
+let _desyncLogged = false;
+const _getContext = HTMLCanvasElement.prototype.getContext;
+HTMLCanvasElement.prototype.getContext = function (type, attrs) {
+  if (type === "webgl2" || type === "webgl") {
+    const ctx = _getContext.call(this, type, Object.assign({}, attrs, { desynchronized: true }));
+    if (ctx && !_desyncLogged) {
+      _desyncLogged = true;
+      try { console.log("[kedi] webgl desynchronized:", ctx.getContextAttributes().desynchronized); } catch (_) {}
+    }
+    return ctx;
+  }
+  return _getContext.call(this, type, attrs);
+};
+
+// Second lever: SYNC RENDER on interactive writes. xterm coalesces paints onto requestAnimationFrame,
+// adding up to a frame (~8–17ms @60Hz) between the bytes arriving and pixels. There's no public
+// sync-render option, and the `sync` param only exists on xterm master (not 5.5.0 or even 6.0.0) —
+// BUT RenderService's private `_renderRows()` renders immediately; it's the very method the rAF
+// debouncer calls. Invoke it directly, from write()'s parse-complete callback so the buffer already
+// holds the new bytes. Rate-cap to ~120/s so bursty output (ls, cat) still batches via rAF and never
+// pins the GPU — this mirrors kitty (render immediately on input, throttle bulk repaints). Guarded:
+// if the private shape ever changes, it silently falls back to xterm's normal rAF rendering.
+function syncRender(term) {
+  const now = performance.now();
+  if (now - (term.__lastSync || 0) < 8) return;
+  term.__lastSync = now;
+  try {
+    term._core._renderService._renderRows(0, term.rows - 1);
+    if (!term.__syncLogged) { term.__syncLogged = true; console.log("[kedi] sync-render active (bypassing rAF debounce)"); }
+  } catch (e) {
+    if (!term.__syncLogged) { term.__syncLogged = true; console.warn("[kedi] sync-render unavailable, falling back to rAF:", e.message); }
+  }
+}
+
+const $ = (id) => document.getElementById(id);
+const setState = (t, ok) => { const c = $("conn"); c.className = "badge " + (ok ? "on" : "off"); c.title = "warden — " + t; };
+
+let fontSize = 14, focused = null, paneCount = 0, zTop = 100, cascade = 0;
+
+// claimed identity — sent as {"hello":WHO} on each new pane's stream; the session policy requires
+// one and can blocklist names (try `root`: the session is visibly refused). ?who= overrides.
+const sanitizeWho = (w) => (w || "").replace(/[^\w.@-]/g, "_").slice(0, 32);
+let WHO = sanitizeWho(new URLSearchParams(location.search).get("who") || localStorage.getItem("kedi.who")) || "operator";
+localStorage.setItem("kedi.who", WHO);
+function renderWho() { $("idchip").querySelector("b").textContent = WHO; }
+
+// A random id for THIS browser tab. Each pane pushes a `<TAB_ID>:<pane.id>` key to the server (the
+// {"tab"} frame), so the cross-tab session palette can tell "a pane in this tab" (focus) from "a
+// session in another tab" (move here), and map a /sessions row back to its own pane.
+const TAB_ID = (crypto.randomUUID ? crypto.randomUUID() : String(Math.random())).replace(/[^a-z0-9]/gi, "").slice(0, 16);
+const paneKey = (p) => `${TAB_ID}:${p.id}`;
+
+
+// Live panes only — a pane mid-close (DOM removal is deferred ~110ms for the animation) must not
+// count, or a closed tab's chip lingers in the strip pointing at a disposed pane.
+const allPanes = () => [...document.querySelectorAll(".pane")].map((w) => w._pane).filter((p) => p && !p.closing);
+
+function setFocus(p) {
+  if (!p) return;
+  focused = p;
+  for (const w of document.querySelectorAll(".floatwin")) {
+    const has = w.contains(p.wrapper);
+    w.classList.toggle("focused", has);
+    w.classList.toggle("tab-active", has); // in tab mode only the active window is shown (CSS)
+  }
+  document.title = (p.title || ("pane " + p.id)) + " · kedi";
+  if (SETTINGS.layout === "tab") { renderTabs(); requestAnimationFrame(() => { try { p.fit.fit(); } catch (_) {} }); }
+  try { p.term.focus(); } catch (_) {}
+}
+
+// ── layout mode: floating ⇄ tab ──────────────────────────────────────────────────────────────
+// Tab mode is a class on <body>: CSS makes every .floatwin fill the canvas and hides all but the
+// .tab-active one, so the whole window/stream/close machinery is reused untouched — only which
+// window is visible changes. A tab strip mirrors the open windows.
+function setLayout(mode) {
+  SETTINGS.layout = mode === "tab" ? "tab" : "floating";
+  document.body.classList.toggle("tabmode", SETTINGS.layout === "tab");
+  if (SETTINGS.layout === "tab" && focused) setFocus(focused);
+  renderTabs();
+  requestAnimationFrame(fitAll);
+  saveSettings();
+  if (!$("settings").classList.contains("hide")) syncSettingsForm();
+}
+function renderTabs() {
+  const strip = $("tabstrip");
+  if (SETTINGS.layout !== "tab") { strip.classList.remove("show"); strip.innerHTML = ""; return; }
+  strip.classList.add("show");
+  strip.innerHTML = "";
+  for (const p of allPanes()) {
+    const tab = document.createElement("button");
+    tab.className = "tab" + (p === focused ? " active" : "");
+    const label = document.createElement("span"); label.className = "tlabel";
+    label.textContent = p.title || ("pane " + p.id);
+    const x = document.createElement("span"); x.className = "tclose"; x.textContent = "×"; x.title = "close";
+    x.addEventListener("click", (e) => { e.stopPropagation(); closePane(p); });
+    tab.append(label, x);
+    tab.addEventListener("click", () => setFocus(p));
+    strip.appendChild(tab);
+  }
+  const add = document.createElement("button"); add.className = "tab tadd"; add.textContent = "+"; add.title = "new terminal";
+  add.addEventListener("click", () => spawnFloatCascade());
+  strip.appendChild(add);
+}
+function fitAll() { for (const p of allPanes()) { try { p.fit.fit(); } catch (_) {} p.send({ resize: [p.term.cols, p.term.rows] }); } }
+
+// On a browser resize, reflow floating windows to the new canvas so nothing is lost off-screen:
+//  - a SNAPPED/maximized window re-snaps to its region recomputed for the new size (a left-half
+//    window stays the left half — never stranded at old pixels off the edge);
+//  - a free-floating window scales its position + size PROPORTIONALLY (50%-wide stays 50%-wide),
+//    then is clamped so at least its title bar stays reachable inside the canvas.
+// Skips tab mode (windows fill the canvas there) and stowed windows. Refits terminals at the end.
+let _lastCanvas = null;
+function reflowWindows() {
+  const c = $("canvas");
+  const nw = c.clientWidth, nh = c.clientHeight;
+  if (!nw || !nh) return;
+  const prev = _lastCanvas;
+  _lastCanvas = { w: nw, h: nh };
+  if (SETTINGS.layout === "tab") { fitAll(); return; }
+  const rx = prev ? nw / prev.w : 1, ry = prev ? nh / prev.h : 1;
+  for (const p of allPanes()) {
+    const win = p.floatwin;
+    if (!win || win.classList.contains("stowed")) continue;
+    win.classList.remove("animate"); // don't animate during a live resize stream
+    if (win._snap) {
+      // recompute the snap region for the NEW canvas size and re-apply it directly (no animation,
+      // no queued fit) — this is what keeps a snapped pane on-screen and correctly sized after resize
+      const [x, y, w, h] = snapRegion(win._snap);
+      win.style.left = x + "px"; win.style.top = y + "px";
+      win.style.width = w + "px"; win.style.height = h + "px";
+      // its saved pre-snap geometry should scale too, so un-snapping later lands somewhere sensible
+      if (win._restore) win._restore = win._restore.map((v, i) => Math.round(v * (i % 2 ? ry : rx)));
+      continue;
+    }
+    let x = (parseFloat(win.style.left) || 0) * rx;
+    let y = (parseFloat(win.style.top) || 0) * ry;
+    let w = Math.max(200, (parseFloat(win.style.width) || win.offsetWidth) * rx);
+    // clamp so the window (or at least a graspable strip of its title bar) stays inside the canvas
+    x = Math.min(Math.max(0, x), Math.max(0, nw - 80));
+    y = Math.min(Math.max(0, y), Math.max(0, nh - 40));
+    win.style.left = Math.round(x) + "px";
+    win.style.top = Math.round(y) + "px";
+    win.style.width = Math.round(w) + "px";
+    if (!p.shaded) {
+      const h = Math.max(130, (parseFloat(win.style.height) || win.offsetHeight) * ry);
+      win.style.height = Math.round(h) + "px";
+    } else if (p._fullHeight) {
+      p._fullHeight = Math.max(130, Math.round((parseFloat(p._fullHeight) || 480) * ry)) + "px";
+    }
+  }
+  fitAll();
+}
+// Tidy the shell's raw OSC title: drop a "user@host: " prefix, collapse an absolute home dir to ~,
+// and fall back to the pane id when the shell sets no title at all (e.g. `zsh -f`).
+function fmtTitle(raw, pane) {
+  let s = (raw || "").trim();
+  if (!s) return "pane " + pane.id;
+  s = s.replace(/^[^\s@]+@[^\s:]+[:\s]+/, "");                          // user@host: …
+  s = s.replace(/^\/home\/[^/]+/, "~").replace(/^\/root(?=\/|$)/, "~"); // home → ~
+  return s.trim() || ("pane " + pane.id);
+}
+function zoom(dir) {
+  SETTINGS.fontSize = dir === 0 ? (14) : Math.max(8, Math.min(28, SETTINGS.fontSize + dir));
+  fontSize = SETTINGS.fontSize;
+  for (const p of allPanes()) p.term.options.fontSize = SETTINGS.fontSize;
+  fitAll(); saveSettings();
+  if (!$("settings").classList.contains("hide")) syncSettingsForm();
+}
+
+// `app` → open a WASM plugin pane by name; `attachId` → instead of opening a fresh session, MOVE the
+// existing durable session with that id into this tab (re-attach — its prior tab's view detaches).
+async function makePane(app, attachId) {
+  const wrapper = document.createElement("div"); wrapper.className = "pane";
+  const bar = document.createElement("div"); bar.className = "panebar";
+  const title = document.createElement("span"); title.className = "ptitle";
+  const spacer = document.createElement("span"); spacer.className = "spacer";
+  const size = document.createElement("span"); size.className = "psize"; size.textContent = "–"; // live grid size (cols×rows)
+  const rec = document.createElement("span"); rec.className = "prec"; rec.textContent = "● rec";
+  bar.append(title, spacer, size, rec);
+  const termEl = document.createElement("div"); termEl.className = "paneterm";
+  wrapper.append(bar, termEl);
+
+  const pane = { wrapper, bar, titleEl: title, id: ++paneCount, writer: null, closing: false, floatwin: null };
+  wrapper._pane = pane;
+  pane.title = "pane " + pane.id;
+  title.textContent = pane.title;
+
+  const term = new Terminal({ ...xtermOpts(), allowProposedApi: true, macOptionIsMeta: true });
+  const fit = new FitAddon.FitAddon();
+  const search = new SearchAddon.SearchAddon();
+  term.loadAddon(fit); term.loadAddon(search);
+  try { term.loadAddon(new WebLinksAddon.WebLinksAddon()); } catch (_) {}
+  // Unicode 11 widths so xterm agrees with the shell on glyph widths (a mismatch drifts the cursor
+  // on prompt/autocomplete redraws — the #1 cause of "cursor won't return to origin")
+  try { term.loadAddon(new Unicode11Addon.Unicode11Addon()); term.unicode.activeVersion = "11"; } catch (_) {}
+  pane.term = term; pane.fit = fit; pane.search = search;
+  pane.send = (o) => { if (pane.connected) invoke("pane_send", { paneId: pane.id, line: JSON.stringify(o) }); };
+  // open only once the wrapper is in the live DOM (detached open leaves input/focus unwired), and
+  // let the FIRST resize be the real fitted size (so the server spawns the shell at the true size)
+  pane.open = () => {
+    if (pane.opened) return; pane.opened = true;
+    term.open(termEl);
+    // GPU renderer. Its glyph atlas is built eagerly, so rebuild it once the vendored Nerd Font is
+    // actually ready (WKWebView would otherwise cache tofu for the prompt glyphs).
+    try {
+      const webgl = new WebglAddon.WebglAddon();
+      term.loadAddon(webgl);
+      document.fonts.ready.then(() => { try { webgl.clearTextureAtlas(); } catch (_) {} });
+    } catch (e) { console.error("[kedi] webgl addon:", e); }
+    requestAnimationFrame(() => {
+      try { fit.fit(); } catch (e) { console.error("[kedi] fit:", e); }
+      size.textContent = `${term.cols}×${term.rows}`;
+      pane.send({ resize: [term.cols, term.rows] });
+      setFocus(pane);
+    });
+  };
+
+  term.onTitleChange((t) => {
+    const s = fmtTitle(t, pane); pane.title = s;
+    title.textContent = s;
+    if (pane.taskChip) pane.taskChip.querySelector(".tlabel").textContent = s;
+    if (SETTINGS.layout === "tab") renderTabs();
+    if (focused === pane) document.title = s + " · kedi";
+    pane.send({ title: s }); // publish to the server so the cross-tab palette can search it
+  });
+
+  // kitty/PuTTY-style clipboard: selecting COPIES, right-click PASTES (replaces the browser menu
+  // inside the terminal — the canvas right-click menu outside panes stays). Middle-click pastes
+  // too: with copy-on-select, Linux select→middle-click muscle memory just works.
+  term.onSelectionChange(() => {
+    const s = term.getSelection();
+    if (s) navigator.clipboard.writeText(s).catch(() => {});
+  });
+  termEl.addEventListener("contextmenu", (e) => { e.preventDefault(); e.stopPropagation(); pasteInto(pane); });
+  termEl.addEventListener("mousedown", (e) => { if (e.button === 1) e.preventDefault(); }); // no autoscroll
+  termEl.addEventListener("auxclick", (e) => { if (e.button === 1) { e.preventDefault(); pasteInto(pane); } });
+
+  // drag a file (or files) onto the terminal → type its path at the prompt. Browsers hide the real
+  // filesystem path for security, so we prefer a text/uri-list `file://` URI (most Linux file
+  // managers send it → the true absolute path) and fall back to the bare filename otherwise.
+  // NB: xterm.js renders a hidden textarea + canvases inside `termEl` that would otherwise eat the
+  // drop, so we listen in the CAPTURE phase on the whole pane wrapper — beating xterm's internals —
+  // and must preventDefault on EVERY dragover (else the browser rejects the drop and navigates).
+  wrapper.addEventListener("dragenter", (e) => { e.preventDefault(); pane.floatwin?.classList.add("dropping"); }, true);
+  wrapper.addEventListener("dragover", (e) => { e.preventDefault(); if (e.dataTransfer) e.dataTransfer.dropEffect = "copy"; }, true);
+  wrapper.addEventListener("dragleave", (e) => { if (!wrapper.contains(e.relatedTarget)) pane.floatwin?.classList.remove("dropping"); }, true);
+  wrapper.addEventListener("drop", (e) => {
+    e.preventDefault(); e.stopPropagation();
+    pane.floatwin?.classList.remove("dropping");
+    // a dragged image (from a browser/app) drops as a file → save-and-type-path too
+    const img = e.dataTransfer && [...(e.dataTransfer.files || [])].find((f) => f.type.startsWith("image/"));
+    if (img) { sendImage(pane, img); return; }
+    dropPaths(pane, e.dataTransfer);
+  }, true);
+  // Ctrl+V of an image: the native paste event carries clipboard items even though xterm handles keys
+  termEl.addEventListener("paste", (e) => {
+    const items = e.clipboardData && e.clipboardData.items;
+    if (!items) return;
+    for (const it of items) {
+      if (it.type.startsWith("image/")) { e.preventDefault(); e.stopPropagation(); sendImage(pane, it.getAsFile()); return; }
+    }
+  }, true);
+  term.attachCustomKeyEventHandler((e) => keyHandler(e, pane));
+  term.onData((d) => pane.send({ input: d }));
+  term.onResize(({ cols, rows }) => { pane.send({ resize: [cols, rows] }); size.textContent = `${cols}×${rows}`; });
+  wrapper.addEventListener("mousedown", () => setFocus(pane));
+
+  // Output: Rust streams this pane's bytes over a per-pane Channel (base64). Session end (shell exit /
+  // kill) arrives as a `pane-exit` event (see the global listener) → closePane.
+  const onOutput = new Channel();
+  onOutput.onmessage = (b64) => {
+    const bytes = b64ToBytes(b64);
+    // a small chunk carrying a [warden] notice (e.g. policy refusal) → keep it readable
+    if (!pane.notice && bytes.length < 256) {
+      try { if (new TextDecoder().decode(bytes).includes("[warden]")) pane.notice = true; } catch (_) {}
+    }
+    term.write(bytes, () => syncRender(term));
+  };
+  await invoke("open_pane", { paneId: pane.id, onOutput }); // set up this pane's IPC transport
+  pane.connected = true;
+  if (attachId) pane.send({ attach: attachId }); // MOVE an existing session here (before the hello)
+  else if (app) { pane.app = app; pane.send({ app }); } // a plugin pane: request the WASM app first
+  pane.send({ tab: paneKey(pane) }); // tag this session with our per-pane key (for the palette)
+  pane.send({ hello: WHO }); // introduce the claimed identity — first control line
+  pane.moved = !!attachId; // a moved pane: its title/size arrive from the session's replayed output
+  return pane;
+}
+
+function closePane(p) {
+  if (!p || p.closing) return; p.closing = true;
+  const wait = p.notice ? 2400 : 0; // a [warden] refusal stays on screen long enough to read
+  setTimeout(() => {
+    try { if (p.connected) { p.send({ close: null }); p.connected = false; } } catch (_) {}
+    try { p.term.dispose(); } catch (_) {}
+    if (p.taskChip) { p.taskChip.remove(); p.taskChip = null; taskbarSync(); }
+    if (p.floatwin) { const w = p.floatwin; w.classList.add("closing"); setTimeout(() => w.remove(), 110); }
+    if (focused === p) focused = null;
+    // allPanes() already excludes p (p.closing is set). In tab mode, reveal a survivor; either way
+    // rebuild the strip so the closed tab's chip is gone.
+    const next = allPanes()[0];
+    if (SETTINGS.layout === "tab" && next) setFocus(next); // setFocus() calls renderTabs()
+    else renderTabs();
+    // closed the last window in this tab → maybe offer to stop the whole server (if we're the last tab)
+    if (!document.querySelector(".floatwin")) maybeOfferShutdown();
+  }, wait);
+}
+
+// The hint (empty) screen — shown when this tab has no open windows.
+function resetToHint() { $("hint").style.display = "grid"; document.title = "kedi"; }
+
+// Closing the last window in THIS tab: ask the server if we're the last connected client. If so,
+// offer to stop the whole server; otherwise (another tab is still attached) just show the hint. The
+// server is the only place that knows about other browser tabs, so it's the source of truth.
+async function maybeOfferShutdown() {
+  let info = { clients: 2, sessions: 0 }; // fail-safe: assume others exist → never stop on error
+  try { info = JSON.parse(await invoke("clients_json")); } catch (_) {}
+  // <= 1 because our own connection (still open until the page unloads) counts as the 1.
+  if ((info.clients ?? 2) > 1) { resetToHint(); return; }
+  confirmShutdown(info.sessions | 0);
+}
+
+// "Also stop the kedi server?" — [keep running] / [stop]. `sessions` > 0 warns that stopping will
+// end running work. keep/Esc = leave the daemon up (its whole point is to outlive a tab); stop =
+// POST /shutdown (server closes sessions + exits). Reuses the #overlay modal.
+function confirmShutdown(sessions) {
+  const warn = sessions > 0
+    ? "<div style='color:#f9e2af;font-size:12px;margin-top:6px'>" + sessions +
+      " session" + (sessions === 1 ? "" : "s") + " still running — stopping ends them.</div>"
+    : "";
+  overlay(
+    "<div>Also stop the kedi server?" +
+    "<div style='color:var(--dim);font-size:12px;margin-top:6px'>This was the last kedi window.</div>" +
+    warn +
+    "<div style='margin-top:12px;display:flex;gap:10px;justify-content:center'>" +
+      "<button id='sd-keep'>keep running</button>" +
+      "<button id='sd-stop' style='border-color:var(--red);color:var(--red)'>stop</button>" +
+    "</div></div>"
+  );
+  const onKey = (e) => { if (e.key === "Escape") { e.preventDefault(); done(false); } };
+  const done = (stop) => {
+    document.removeEventListener("keydown", onKey, true);
+    $("overlay").style.display = "none"; $("overlay").innerHTML = "";
+    if (stop) { weStoppedIt = true; invoke("shutdown").catch(() => {}); }
+    resetToHint();
+  };
+  document.addEventListener("keydown", onKey, true);
+  $("sd-keep").onclick = () => done(false);
+  $("sd-stop").onclick = () => done(true);
+}
+let weStoppedIt = false; // set when WE asked the server to stop → friendlier wt.closed message
+
+// ── float windows ──
+function spawnFloat(x, y, w, h, app, attachId) {
+  makePane(app, attachId).then((pane) => {
+    const win = document.createElement("div");
+    win.className = "floatwin";
+    win.style.cssText = `left:${x}px;top:${y}px;width:${w}px;height:${h}px;z-index:${++zTop}`;
+    win.appendChild(pane.wrapper);
+    pane.floatwin = win;
+    const bar = pane.bar;
+    const min = document.createElement("button"); min.className = "wc min"; min.title = "minimize";
+    const max = document.createElement("button"); max.className = "wc max"; max.title = "maximize / restore";
+    const cls = document.createElement("button"); cls.className = "wc close"; cls.title = "close";
+    const wcg = document.createElement("div"); wcg.className = "wcgroup"; wcg.append(min, max, cls);
+    bar.append(wcg); // no per-window kill — closing is close; kill (attributed) lives in the audit panel
+    min.addEventListener("click", (e) => { e.stopPropagation(); minimizePane(pane); });
+    max.addEventListener("click", (e) => { e.stopPropagation(); if (pane.shaded) unshadePane(pane); else snapWin(win, pane, "max"); });
+    cls.addEventListener("click", (e) => { e.stopPropagation(); closePane(pane); });
+    // title-bar click: a shaded (minified) window expands on a single click; otherwise double-click
+    // toggles maximize. (A shaded window's body is hidden, so the click can only hit the bar.)
+    bar.addEventListener("click", (e) => { if (pane.shaded && !e.target.closest(".wc")) { e.stopPropagation(); unshadePane(pane); } });
+    bar.addEventListener("dblclick", (e) => { if (!pane.shaded && !e.target.closest(".wc")) snapWin(win, pane, "max"); });
+
+    const grip = document.createElement("div"); grip.className = "grip"; win.appendChild(grip);
+    $("canvas").appendChild(win);
+    dragWin(win, bar, pane);
+    resizeWin(win, grip, pane);
+    win.addEventListener("mousedown", () => { win.style.zIndex = ++zTop; setFocus(pane); });
+    $("hint").style.display = "none";
+    pane.open();
+    if (SETTINGS.layout === "tab") setFocus(pane); // new tab becomes the visible one
+    renderTabs();
+  });
+}
+function spawnFloatCascade() { const o = (cascade++ % 6) * 30; spawnFloat(40 + o, 30 + o, 760, 480); }
+// MOVE an existing durable session (from another tab) into this tab: open a floating pane that
+// re-attaches to it. Its prior tab's view detaches server-side; the process keeps running.
+function moveSessionHere(sessionId) {
+  const o = (cascade++ % 6) * 30;
+  spawnFloat(40 + o, 30 + o, 760, 480, null, sessionId);
+}
+// open a floating pane hosting a WASM-TUI plugin (kedi:app) by name; falls back to a shell pane
+// server-side if the app isn't installed. `x`/`y` optional (cascades if absent).
+function spawnApp(name, x, y) {
+  const o = (cascade++ % 6) * 30;
+  spawnFloat(x ?? 40 + o, y ?? 30 + o, 760, 480, name);
+}
+
+// the app launcher: fetch the installed plugins from /plugins (read from plugins.toml server-side,
+// fresh each time → no restart to see a new plugin) and show them as a clickable menu. Reuses the
+// context-menu chrome. Empty → a hint about the registry.
+async function openLauncher(x, y) {
+  let plugins = [];
+  try { plugins = JSON.parse(await invoke("plugins_json")); } catch (_) {}
+  const m = $("ctxmenu");
+  m.innerHTML = "";
+  if (!plugins.length) {
+    const it = document.createElement("div"); it.className = "cm-item";
+    it.innerHTML = "<span>no plugins</span><span class='cm-k'>edit plugins.toml</span>";
+    m.appendChild(it);
+  }
+  for (const p of plugins) {
+    const it = document.createElement("div"); it.className = "cm-item";
+    it.innerHTML = "<span></span><span class='cm-k'></span>";
+    it.firstChild.textContent = `${p.icon || "▸"}  ${p.name}`;
+    it.addEventListener("click", () => { hideCtx(); spawnApp(p.name, x, y); });
+    m.appendChild(it);
+  }
+  m.style.cssText = `display:block;left:${x}px;top:${y}px`;
+}
+
+// ── snapping (drag-to-edge + keyboard) ──
+function snapRegion(name) {
+  const c = $("canvas"), W = c.clientWidth, H = c.clientHeight, h = Math.round(W / 2), v = Math.round(H / 2);
+  return { left:[0,0,h,H], right:[W-h,0,h,H], top:[0,0,W,v], bottom:[0,H-v,W,v],
+           tl:[0,0,h,v], tr:[W-h,0,h,v], bl:[0,H-v,h,v], br:[W-h,H-v,h,v], max:[0,0,W,H] }[name];
+}
+function applyGeom(win, pane, [x, y, w, h]) {
+  // animate the move (snap/grid/restore), then fit ONCE at the end — fitting mid-transition would
+  // spam the pty with resizes; the terminal briefly stretches then snaps to the exact grid
+  win.classList.add("animate");
+  win.style.left = x + "px"; win.style.top = y + "px"; win.style.width = w + "px"; win.style.height = h + "px";
+  setTimeout(() => {
+    win.classList.remove("animate");
+    try { pane.fit.fit(); } catch (_) {}
+    pane.send({ resize: [pane.term.cols, pane.term.rows] });
+  }, 150);
+}
+function snapWin(win, pane, name) {
+  if (name === "max" && win._snap === "max") { restoreWin(win, pane); return; }
+  if (!win._restore) win._restore = [win.offsetLeft, win.offsetTop, win.offsetWidth, win.offsetHeight];
+  win._snap = name;
+  applyGeom(win, pane, snapRegion(name));
+}
+function restoreWin(win, pane) { if (win._restore) { applyGeom(win, pane, win._restore); win._restore = null; win._snap = null; } }
+
+// ── snap-up chooser: maximize, or split the pane into a top/bottom pair ──
+// Snapping up (key or drag-to-top-edge) doesn't just maximize — it PROPOSES: maximize the pane, or
+// split it top/bottom (this pane → top half, then pick another pane for the bottom half).
+function askSnapUp(win, pane) {
+  const box = $("snapchoose");
+  const opts = [...box.querySelectorAll(".sc-opt")];
+  let sel = 0;
+  const paint = () => opts.forEach((o, i) => o.classList.toggle("sel", i === sel));
+  const close = () => {
+    box.classList.remove("show");
+    document.removeEventListener("keydown", onKey, true);
+    document.removeEventListener("mousedown", onOutside, true);
+  };
+  const apply = (choice) => {
+    close();
+    if (choice === "max") snapWin(win, pane, "max");
+    else splitTopBottom(pane);
+  };
+  const onKey = (e) => {
+    if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); close(); }
+    else if (e.key === "ArrowLeft" || e.key === "ArrowRight") {
+      e.preventDefault(); e.stopPropagation(); sel = (sel + (e.key === "ArrowRight" ? 1 : opts.length - 1)) % opts.length; paint();
+    } else if (e.key === "Enter") { e.preventDefault(); e.stopPropagation(); apply(opts[sel].dataset.choice); }
+  };
+  const onOutside = (e) => { if (!box.contains(e.target)) close(); };
+  opts.forEach((o, i) => {
+    o.onmouseenter = () => { sel = i; paint(); };
+    o.onclick = () => apply(o.dataset.choice);
+  });
+  paint();
+  box.classList.add("show");
+  document.addEventListener("keydown", onKey, true);
+  // defer the outside-click listener so the click that opened it doesn't immediately close it
+  setTimeout(() => document.addEventListener("mousedown", onOutside, true), 0);
+}
+
+// snap the pane to the TOP half, then pick another pane to fill the BOTTOM half.
+function splitTopBottom(pane) {
+  const win = pane.floatwin;
+  if (!win) return;
+  win._restore = win._restore || [win.offsetLeft, win.offsetTop, win.offsetWidth, win.offsetHeight];
+  win._snap = "top";
+  applyGeom(win, pane, snapRegion("top"));
+  pickPaneForBottom(pane);
+}
+
+// a compact picker of the OTHER panes in this tab → the chosen one snaps to the bottom half.
+function pickPaneForBottom(topPane) {
+  const others = allPanes().filter((p) => p !== topPane && !p.stowed);
+  if (!others.length) {
+    overlayFlash("split: open another terminal first (Ctrl+Shift+↵), then snap up → split");
+    return;
+  }
+  const grid = $("pal-grid");
+  const input = $("pal-in");
+  $("palette").classList.add("show");
+  input.value = ""; input.placeholder = "pick a pane for the bottom half — esc to cancel";
+  $("pal-hint").textContent = "the chosen pane fills the bottom half; " + (topPane.title || "the current pane") + " keeps the top";
+  grid.innerHTML = "";
+  let sel = 0;
+  const tiles = [];
+  const finish = () => {
+    $("palette").classList.remove("show");
+    input.placeholder = "type to filter every pane across your tabs — ↵ focus / move here · esc close";
+    input.onkeydown = null;
+    if (focused) try { focused.term.focus(); } catch (_) {}
+  };
+  const choose = (p) => {
+    finish();
+    const w = p.floatwin;
+    if (!w) return;
+    w._restore = w._restore || [w.offsetLeft, w.offsetTop, w.offsetWidth, w.offsetHeight];
+    w._snap = "bottom";
+    w.style.zIndex = ++zTop;
+    applyGeom(w, p, snapRegion("bottom"));
+    setFocus(topPane);
+  };
+  others.forEach((p, i) => {
+    const tile = document.createElement("div");
+    tile.className = "tile" + (i === sel ? " sel" : "");
+    const preview = localPreview(p) || "no output yet";
+    const isApp = !!p.app;
+    tile.innerHTML =
+      `<div class="tile-screen"><span class="glyph">${isApp ? "▤" : "❯"}</span></div>` +
+      `<div class="tile-foot"><div class="tile-title"></div><div class="tile-meta"><span>this tab</span><span class="tile-act">bottom half →</span></div></div>`;
+    tile.querySelector(".tile-screen").insertBefore(document.createTextNode(preview), tile.querySelector(".glyph"));
+    tile.querySelector(".tile-title").textContent = p.title || ("pane " + p.id);
+    tile.addEventListener("mouseenter", () => { sel = i; tiles.forEach((t, j) => t.classList.toggle("sel", j === i)); });
+    tile.addEventListener("click", () => choose(p));
+    grid.appendChild(tile); tiles.push(tile);
+  });
+  input.onkeydown = (e) => {
+    if (e.key === "Escape") { e.preventDefault(); finish(); }
+    else if (e.key === "ArrowRight" || e.key === "ArrowDown") { e.preventDefault(); sel = Math.min(others.length - 1, sel + 1); tiles.forEach((t, j) => t.classList.toggle("sel", j === sel)); }
+    else if (e.key === "ArrowLeft" || e.key === "ArrowUp") { e.preventDefault(); sel = Math.max(0, sel - 1); tiles.forEach((t, j) => t.classList.toggle("sel", j === sel)); }
+    else if (e.key === "Enter") { e.preventDefault(); choose(others[sel]); }
+  };
+  input.focus();
+}
+
+// ── minimize: two modes ──
+// Default is "minify" — collapse the window to its title bar IN PLACE (macOS window-shade); click
+// the bar to expand. If the `taskbar` setting is on, minimize stows to the bottom dock instead.
+function taskbarSync() { $("taskbar").classList.toggle("show", !!$("taskbar").querySelector(".taskchip")); }
+function minimizePane(pane) {
+  const win = pane.floatwin;
+  if (!win || pane.stowed || pane.shaded || pane.closing) return;
+  if (SETTINGS.taskbar) { stowToTaskbar(pane); return; }
+  shadePane(pane); // default: collapse to the title bar in place
+}
+// collapse-to-title in place: remember the full height, drop to the panebar's height.
+function shadePane(pane) {
+  const win = pane.floatwin;
+  pane.shaded = true;
+  pane._fullHeight = win.style.height || win.offsetHeight + "px";
+  win.classList.add("animate", "shaded");
+  win.style.height = pane.bar.offsetHeight + "px";
+  if (focused === pane) {
+    const rest = allPanes().filter((p) => p !== pane && !p.stowed && !p.shaded);
+    focused = null;
+    if (rest.length) setFocus(rest[rest.length - 1]);
+  }
+}
+function unshadePane(pane) {
+  const win = pane.floatwin;
+  pane.shaded = false;
+  win.classList.add("animate");
+  win.classList.remove("shaded");
+  win.style.height = pane._fullHeight || "480px";
+  win.style.zIndex = ++zTop;
+  requestAnimationFrame(() => { try { pane.fit.fit(); } catch (_) {} pane.send({ resize: [pane.term.cols, pane.term.rows] }); setFocus(pane); });
+}
+function stowToTaskbar(pane) {
+  const win = pane.floatwin;
+  pane.stowed = true;
+  win.classList.add("stowing");
+  setTimeout(() => { win.classList.remove("stowing"); win.classList.add("stowed"); }, 130);
+  const chip = document.createElement("button");
+  chip.className = "taskchip"; chip.title = "restore";
+  chip.innerHTML = '<span class="tdot"></span><span class="tlabel"></span>';
+  chip.querySelector(".tlabel").textContent = pane.titleEl.textContent || ("pane " + pane.id);
+  chip.addEventListener("click", () => restoreFromTaskbar(pane));
+  pane.taskChip = chip;
+  $("taskbar").appendChild(chip); taskbarSync();
+  if (focused === pane) { const rest = allPanes().filter((p) => p !== pane && !p.stowed); focused = null; if (rest.length) setFocus(rest[rest.length - 1]); }
+}
+function restoreFromTaskbar(pane) {
+  const win = pane.floatwin;
+  if (!win) return;
+  pane.stowed = false;
+  win.classList.remove("stowed", "stowing");
+  win.style.zIndex = ++zTop;
+  if (pane.taskChip) { pane.taskChip.remove(); pane.taskChip = null; taskbarSync(); }
+  requestAnimationFrame(() => { try { pane.fit.fit(); } catch (_) {} pane.send({ resize: [pane.term.cols, pane.term.rows] }); setFocus(pane); });
+}
+// layout manager (start): arrange all (non-minimized) windows into an even grid
+function tileGrid() {
+  const wins = [...$("canvas").querySelectorAll(".floatwin")].filter((w) => !w.classList.contains("stowed"));
+  if (!wins.length) return;
+  const cols = Math.ceil(Math.sqrt(wins.length)), rows = Math.ceil(wins.length / cols);
+  const c = $("canvas"), cw = Math.floor(c.clientWidth / cols), ch = Math.floor(c.clientHeight / rows);
+  wins.forEach((win, i) => {
+    const gx = i % cols, gy = Math.floor(i / cols);
+    win._restore = null; win._snap = null;
+    applyGeom(win, win.querySelector(".pane")._pane, [gx * cw, gy * ch, cw, ch]);
+  });
+}
+function edgeZone(x, y, W, H) {
+  const M = 34, nl = x < M, nr = x > W - M, nt = y < M, nb = y > H - M;
+  if (nt && nl) return "tl"; if (nt && nr) return "tr"; if (nb && nl) return "bl"; if (nb && nr) return "br";
+  if (nl) return "left"; if (nr) return "right"; if (nt) return "max"; if (nb) return "bottom";
+  return null;
+}
+
+function dragWin(win, handle, pane) {
+  handle.addEventListener("mousedown", (e) => {
+    if (e.target.classList.contains("pkill")) return;
+    e.preventDefault();
+    win.style.zIndex = ++zTop;
+    if (win._snap) { win._restore = null; win._snap = null; } // dragging off a snap
+    const sx = e.clientX, sy = e.clientY, ox = win.offsetLeft, oy = win.offsetTop;
+    const c = $("canvas"), vr = c.getBoundingClientRect(), snap = $("snap");
+    let pending = null;
+    const move = (ev) => {
+      win.style.left = ox + ev.clientX - sx + "px"; win.style.top = Math.max(0, oy + ev.clientY - sy) + "px";
+      pending = edgeZone(ev.clientX - vr.left, ev.clientY - vr.top, c.clientWidth, c.clientHeight);
+      if (pending) { const [x, y, w, h] = snapRegion(pending); snap.style.cssText = `display:block;left:${x}px;top:${y}px;width:${w}px;height:${h}px`; }
+      else snap.style.display = "none";
+    };
+    const up = () => {
+      document.removeEventListener("mousemove", move); document.removeEventListener("mouseup", up); snap.style.display = "none";
+      if (pending === "max") askSnapUp(win, pane); // top edge → propose maximize vs split
+      else if (pending) snapWin(win, pane, pending);
+    };
+    document.addEventListener("mousemove", move); document.addEventListener("mouseup", up);
+  });
+}
+function resizeWin(win, grip, pane) {
+  grip.addEventListener("mousedown", (e) => {
+    e.preventDefault(); e.stopPropagation();
+    const sx = e.clientX, sy = e.clientY, ow = win.offsetWidth, oh = win.offsetHeight;
+    const move = (ev) => { win.style.width = Math.max(200, ow + ev.clientX - sx) + "px"; win.style.height = Math.max(130, oh + ev.clientY - sy) + "px"; try { pane.fit.fit(); } catch (_) {} };
+    const up = () => { document.removeEventListener("mousemove", move); document.removeEventListener("mouseup", up); try { pane.fit.fit(); } catch (_) {} pane.send({ resize: [pane.term.cols, pane.term.rows] }); };
+    document.addEventListener("mousemove", move); document.addEventListener("mouseup", up);
+  });
+}
+
+// draw a rectangle on the empty canvas → a window there. A plain CLICK does nothing (accidental
+// clicks were spawning terminals); the marquee appears only after real movement, and a drag under
+// the minimum size is treated as a click. Double-click = default-size window at the pointer.
+const onCanvas = (e) => e.target === $("canvas") || e.target.closest("#hint,#watermark");
+$("canvas").addEventListener("mousedown", (e) => {
+  if (e.button !== 0 || !onCanvas(e)) return;
+  const c = $("canvas"), r = c.getBoundingClientRect();
+  const x0 = e.clientX - r.left, y0 = e.clientY - r.top;
+  let m = null; // marquee only materializes past the drag threshold
+  const box = (ev) => { const x = ev.clientX - r.left, y = ev.clientY - r.top; return { L: Math.min(x, x0), T: Math.min(y, y0), W: Math.abs(x - x0), H: Math.abs(y - y0) }; };
+  const move = (ev) => {
+    const q = box(ev);
+    if (!m && (q.W > 8 || q.H > 8)) { m = document.createElement("div"); m.className = "marquee"; c.appendChild(m); }
+    if (m) m.style.cssText = `left:${q.L}px;top:${q.T}px;width:${q.W}px;height:${q.H}px`;
+  };
+  const up = (ev) => {
+    document.removeEventListener("mousemove", move); document.removeEventListener("mouseup", up);
+    if (m) m.remove();
+    const q = box(ev);
+    if (q.W > 100 && q.H > 80) spawnFloat(q.L, q.T, q.W, q.H); // a click / tiny drag spawns nothing
+  };
+  document.addEventListener("mousemove", move); document.addEventListener("mouseup", up);
+});
+$("canvas").addEventListener("dblclick", (e) => {
+  if (!onCanvas(e)) return;
+  const r = $("canvas").getBoundingClientRect();
+  spawnFloat(Math.max(0, e.clientX - r.left - 100), Math.max(0, e.clientY - r.top - 60), 760, 480);
+});
+
+// right-click on the EMPTY canvas → kedi menu; inside a terminal the native menu stays (copy/paste)
+function hideCtx() { $("ctxmenu").style.display = "none"; }
+$("canvas").addEventListener("contextmenu", (e) => {
+  if (!onCanvas(e)) return; // panes keep the browser menu
+  e.preventDefault();
+  const r = $("canvas").getBoundingClientRect();
+  const x = e.clientX - r.left, y = e.clientY - r.top;
+  const items = [
+    ["new terminal here", "dbl-click", () => spawnFloat(Math.max(0, x - 100), Math.max(0, y - 60), 760, 480)],
+    ["apps ▸", "", () => openLauncher(x, y)], // WASM-TUI plugins, discovered from the registry
+    ["arrange grid", "C-S-g", tileGrid],
+    ["audit", "", openAudit],
+    ["settings", "C-S-,", () => toggleSettings(true)],
+  ];
+  const m = $("ctxmenu"); m.innerHTML = "";
+  for (const [label, key, fn] of items) {
+    const it = document.createElement("div"); it.className = "cm-item";
+    it.innerHTML = `<span></span><span class="cm-k"></span>`;
+    it.firstChild.textContent = label; it.lastChild.textContent = key;
+    it.addEventListener("click", () => { hideCtx(); fn(); });
+    m.appendChild(it);
+  }
+  m.style.display = "block";
+  m.style.left = Math.min(x, $("canvas").clientWidth - m.offsetWidth - 8) + "px";
+  m.style.top = Math.min(y, $("canvas").clientHeight - m.offsetHeight - 8) + "px";
+});
+document.addEventListener("mousedown", (e) => { if (!e.target.closest("#ctxmenu")) hideCtx(); });
+document.addEventListener("keydown", (e) => { if (e.key === "Escape") hideCtx(); });
+
+// ── search / clipboard ──
+function toggleSearch(show) {
+  const box = $("search"); const on = show ?? box.style.display !== "flex";
+  box.style.display = on ? "flex" : "none";
+  if (on) { $("search-input").value = ""; $("search-input").focus(); } else if (focused) focused.term.focus();
+}
+$("search-input").addEventListener("input", (e) => focused && focused.search.findNext(e.target.value, { incremental: true }));
+$("search-input").addEventListener("keydown", (e) => {
+  if (e.key === "Enter") { e.preventDefault(); focused && focused.search[e.shiftKey ? "findPrevious" : "findNext"]($("search-input").value); }
+  else if (e.key === "Escape") { e.preventDefault(); toggleSearch(false); }
+});
+function copySel(p) { const s = p.term.getSelection(); if (s) navigator.clipboard.writeText(s).catch(() => {}); }
+function pasteInto(p) {
+  // try an image on the clipboard first (→ save-and-type-path via the pty op); else paste text
+  if (navigator.clipboard.read) {
+    navigator.clipboard.read().then(async (items) => {
+      for (const it of items) {
+        const type = it.types.find((t) => t.startsWith("image/"));
+        if (type) { const blob = await it.getType(type); sendImage(p, blob); return; }
+      }
+      navigator.clipboard.readText().then((t) => t && p.send({ input: t })).catch(() => {});
+    }).catch(() => { navigator.clipboard.readText().then((t) => t && p.send({ input: t })).catch(() => {}); });
+  } else {
+    navigator.clipboard.readText().then((t) => t && p.send({ input: t })).catch(() => {});
+  }
+}
+
+// shell-quote a path so spaces/specials survive being typed at the prompt (single-quote wrap; any
+// embedded single quote becomes '\'' ). Keeps a dropped "/home/okkan/my file.txt" intact.
+const shquote = (s) => "'" + s.replace(/'/g, "'\\''") + "'";
+
+// A dropped file → its path at the prompt. Prefer a text/uri-list `file://` URI (real absolute path
+// from the file manager); fall back to text/plain, then to the bare filename (browsers withhold the
+// full path of a raw File for security). Multiple files → space-separated.
+function dropPaths(pane, dt) {
+  if (!dt) return;
+  const toPath = (u) => {
+    u = u.trim();
+    try { return u.startsWith("file://") ? decodeURIComponent(new URL(u).pathname) : decodeURIComponent(u); }
+    catch (_) { return u; }
+  };
+  let paths = [];
+  // text/uri-list (freedesktop standard — Nautilus/Dolphin/Thunar send it)
+  const uris = dt.getData("text/uri-list");
+  if (uris) paths = uris.split(/\r?\n/).filter((l) => l && !l.startsWith("#")).map(toPath);
+  // text/x-moz-url (Firefox / some GTK apps): alternating URL / title lines
+  if (!paths.length) {
+    const moz = dt.getData("text/x-moz-url") || dt.getData("text/x-moz-url-data");
+    if (moz) paths = moz.split(/\r?\n/).filter((l, i) => l && i % 2 === 0).map(toPath);
+  }
+  // text/plain: often a file:// URI or a bare path
+  if (!paths.length) {
+    const txt = dt.getData("text/plain");
+    if (txt && txt.trim()) paths = txt.split(/\r?\n/).filter(Boolean).map(toPath);
+  }
+  // last resort: a raw File (browsers give only the basename here, not the directory)
+  if (!paths.length && dt.files && dt.files.length) paths = [...dt.files].map((f) => f.name);
+  if (paths.length) {
+    pane.send({ input: paths.map(shquote).join(" ") + " " });
+  } else {
+    // nothing extractable — surface what the drag DID carry so the failure is diagnosable, not silent
+    const types = (dt.types ? [...dt.types] : []).join(", ") || "(none)";
+    console.warn("[kedi] drop carried no usable path; dataTransfer types:", types);
+    overlayFlash(`drop carried no path — types: ${types}`);
+  }
+}
+// brief non-blocking toast in the corner (for drop diagnostics / small notices)
+function overlayFlash(msg) {
+  let t = $("toast");
+  if (!t) { t = document.createElement("div"); t.id = "toast"; document.body.appendChild(t); }
+  t.textContent = msg; t.classList.add("show");
+  clearTimeout(overlayFlash._t); overlayFlash._t = setTimeout(() => t.classList.remove("show"), 3500);
+}
+
+// Send a clipboard/dropped image blob to the pty's `paste-image` op (base64 in JSON); the server
+// writes it under ~/.cache/kedi and types the path back at the prompt.
+function sendImage(pane, blob) {
+  const ext = (blob.type.split("/")[1] || "png").replace(/[^a-z0-9]/gi, "") || "png";
+  blob.arrayBuffer().then((buf) => {
+    let bin = ""; const b = new Uint8Array(buf);
+    for (let i = 0; i < b.length; i++) bin += String.fromCharCode(b[i]);
+    pane.send({ pasteImage: btoa(bin), ext });
+  }).catch(() => {});
+}
+
+// ── audit: one governance surface (live sessions · timeline · reconstruction) ──
+// The record is the source of truth. While open we poll /record?since=N incrementally, fold events
+// into per-session state, append to the timeline, and reconstruct the SELECTED session's screen from
+// its OUTPUT events (exactly what the operator saw — never raw input). "live" follows the tail;
+// grabbing the scrub detaches into replay of that session at a point in time. Kill lives next to the
+// session it acts on. Recording off → the panel explains audit needs a record (control still works
+// via close/policy; there's simply no trail to show).
+const hexToBytes = (h) => { const n = (h || "").length >> 1, u = new Uint8Array(n); for (let i = 0; i < n; i++) u[i] = parseInt(h.slice(i * 2, i * 2 + 2), 16); return u; };
+const evClass = (e) => ({ session_opened: "t-session", session_closed: "t-session", cap_granted: "t-grant", output: "t-output", killed: "t-kill", denied: "t-deny", rejected: "t-deny" }[e.t] || "t-call");
+function evLabel(e) {
+  switch (e.t) {
+    case "session_opened": return `▷ opened · ${e.identity}`;
+    case "session_closed": return "◁ closed";
+    case "cap_granted": return `⚿ granted ${e.kind}`;
+    case "call": return e.op === "resize" ? "⤢ resize" : "⌨ input"; // no raw content — keystroke bytes are control-char noise
+    case "result": return "· result";
+    case "output": return `» output · ${((e.bytes || "").length >> 1)}B`;
+    case "killed": return `✖ killed by ${e.by}`;
+    case "denied": return `⛔ denied · ${e.subject}${e.why ? " — " + e.why : ""}`;
+    case "revoked": return "⊘ revoked";
+    default: return e.t;
+  }
+}
+
+const au = { term: null, fit: null, timer: null, raf: 0, seen: 0, events: [], sessions: [], sel: null, live: true };
+
+function openAudit() {
+  $("audit").classList.remove("hide");
+  if (!au.term) {
+    au.term = new Terminal({ fontFamily: SETTINGS.fontFamily, fontSize: 13, lineHeight: 1.0, cursorBlink: false, scrollback: 8000, disableStdin: true, theme: activeTheme() });
+    au.fit = new FitAddon.FitAddon(); au.term.loadAddon(au.fit); au.term.open($("au-term"));
+    try {
+      const awgl = new WebglAddon.WebglAddon();
+      au.term.loadAddon(awgl);
+      document.fonts.ready.then(() => { try { awgl.clearTextureAtlas(); } catch (_) {} });
+    } catch (_) {}
+  }
+  requestAnimationFrame(() => { try { au.fit.fit(); } catch (_) {} });
+  renderRecState();
+  clearInterval(au.timer); pollAudit(); au.timer = setInterval(pollAudit, 1200);
+}
+function closeAudit() { clearInterval(au.timer); au.timer = null; $("audit").classList.add("hide"); }
+function auVerify(cls, msg) { const v = $("au-verify"); v.className = "badge " + cls; v.textContent = msg; }
+
+async function pollAudit() {
+  // 1) live sessions — from the warden's own state, so the list + kill work even with recording off
+  try { const sj = JSON.parse(await invoke("sessions_json")); au.sessions = sj.sessions || []; }
+  catch (_) { au.sessions = []; }
+  if (au.sel === null || !au.sessions.some((s) => s.id === au.sel)) {
+    au.sel = au.sessions.length ? au.sessions[au.sessions.length - 1].id : au.sel;
+  }
+  renderSessions();
+  // 2) the record — timeline + reconstruction (has content only while/after recording is on)
+  let d;
+  try { d = JSON.parse(await invoke("record_json", { since: au.seen })); }
+  catch (_) { auVerify("bad", "✗ record fetch failed"); return; }
+  if (!d.ok) { auVerify("bad", "✗ " + (d.error || "chain broken")); return; }
+  if (d.count < au.seen) { au.seen = 0; au.events = []; $("au-feed").innerHTML = ""; } // record reset (server restart)
+  const feed = $("au-feed");
+  for (let i = 0; i < d.events.length; i++) {
+    const e = d.events[i]; au.events.push(e);
+    const row = document.createElement("div"); row.className = "au-ev " + evClass(e);
+    const n = document.createElement("span"); n.className = "i"; n.textContent = d.since + i + 1;
+    const t = document.createElement("span"); t.className = "d"; t.textContent = `s${e.session} · ` + evLabel(e);
+    row.append(n, t); feed.appendChild(row);
+  }
+  while (feed.children.length > 250) feed.removeChild(feed.firstChild);
+  if (d.events.length && au.live) feed.scrollTop = feed.scrollHeight;
+  au.seen = d.count;
+  if (d.count === 0) auVerify(recOn ? "ok" : "off", recOn ? "✓ recording · 0 events" : "recording off · flip record on →");
+  else auVerify("ok", `✓ chain verified · ${d.count} events`);
+  if (au.live) reconLive();
+}
+
+function renderSessions() {
+  const box = $("au-sessions"); box.innerHTML = "";
+  if (!au.sessions.length) { box.innerHTML = '<div class="au-empty">no live sessions — open a terminal.</div>'; return; }
+  for (const s of au.sessions) {
+    const row = document.createElement("div"); row.className = "au-sess" + (s.id === au.sel ? " sel" : "");
+    const r1 = document.createElement("div"); r1.className = "r1";
+    const dot = document.createElement("span"); dot.className = "live-dot";
+    const sid = document.createElement("span"); sid.className = "sid"; sid.textContent = "#" + s.id;
+    const who = document.createElement("span"); who.className = "who"; who.textContent = s.who;
+    r1.append(dot, sid, who);
+    const r2 = document.createElement("div"); r2.className = "r2";
+    const caps = document.createElement("span"); caps.className = "caps"; caps.textContent = (s.caps || []).join(" ") || "—";
+    const kill = document.createElement("button"); kill.className = "au-kill"; kill.textContent = "kill";
+    kill.title = "kill — records an attributed Event::Killed, then ends the session";
+    kill.addEventListener("click", async (e) => {
+      e.stopPropagation();
+      try { await invoke("kill_session", { session: s.id, by: WHO }); } catch (_) {}
+      setTimeout(pollAudit, 300);
+    });
+    r2.append(caps, kill);
+    row.append(r1, r2);
+    row.addEventListener("click", () => selectSession(s.id));
+    box.appendChild(row);
+  }
+}
+const selEvents = () => (au.sel === null ? [] : au.events.filter((e) => e.session === au.sel));
+function selectSession(id) { au.sel = id; goLive(); renderSessions(); }
+function reconLive() {
+  const evs = selEvents();
+  $("au-scrub").max = evs.length; $("au-scrub").value = evs.length;
+  renderRecon(evs, evs.length);
+}
+function renderRecon(evs, k) {
+  k = Math.max(0, Math.min(k, evs.length));
+  $("au-pos").textContent = au.sel === null ? "" : `#${au.sel} · ${k}/${evs.length}`;
+  let total = 0; const chunks = [];
+  for (let i = 0; i < k; i++) { const e = evs[i]; if (e.t === "output" && e.bytes) { const u = hexToBytes(e.bytes); chunks.push(u); total += u.length; } }
+  const buf = new Uint8Array(total); let off = 0;
+  for (const c of chunks) { buf.set(c, off); off += c.length; }
+  au.term.reset();
+  if (buf.length) au.term.write(buf);
+}
+function scrubTo(k) {
+  setLive(false);
+  if (au.raf) cancelAnimationFrame(au.raf);
+  au.raf = requestAnimationFrame(() => renderRecon(selEvents(), k));
+}
+function setLive(on) { au.live = on; $("au-live").classList.toggle("on", on); }
+function goLive() { setLive(true); reconLive(); }
+
+$("au-scrub").addEventListener("input", (e) => scrubTo(Number(e.target.value)));
+$("au-live").addEventListener("click", goLive);
+document.querySelectorAll(".au-btn[data-a]").forEach((b) => b.addEventListener("click", () => {
+  const a = b.dataset.a, evs = selEvents(), k = Number($("au-scrub").value);
+  if (a === "end") return goLive();
+  const nk = Math.max(0, Math.min(a === "start" ? 0 : a === "back" ? k - 1 : k + 1, evs.length));
+  $("au-scrub").value = nk; scrubTo(nk);
+}));
+$("au-close").addEventListener("click", closeAudit);
+
+// ── recording toggle: activate/deactivate the tamper-evident record at runtime ──
+function renderRecState() {
+  document.body.classList.toggle("rec", recOn); // drives every pane's "● rec" badge at once
+  $("audit-btn").classList.toggle("rec", recOn);
+  $("au-rec").classList.toggle("on", recOn);
+  $("au-rec-label").textContent = recOn ? "recording" : "record";
+}
+async function setRec(on) {
+  try { recOn = !!(await invoke("set_recording", { on })); } catch (_) {}
+  renderRecState(); pollAudit();
+}
+$("au-rec").addEventListener("click", () => setRec(!recOn));
+
+// ── header: identity, warden, the audit entry point, help ──
+$("warden-name").textContent = WARDEN;
+renderWho(); renderRecState();
+$("idchip").addEventListener("click", () => {
+  const w = sanitizeWho(prompt("identity for new sessions (claimed, unauthenticated):", WHO));
+  if (w) { WHO = w; localStorage.setItem("kedi.who", WHO); renderWho(); }
+});
+$("audit-btn").addEventListener("click", () => $("audit").classList.contains("hide") ? openAudit() : closeAudit());
+
+// ── settings panel ─────────────────────────────────────────────────────────────────────────────
+function toggleSettings(show) {
+  const s = $("settings");
+  const open = show ?? s.classList.contains("hide");
+  s.classList.toggle("hide", !open);
+  if (open) syncSettingsForm();
+}
+// Populate the theme dropdown once from THEMES.
+for (const [k, v] of Object.entries(THEMES)) {
+  const o = document.createElement("option"); o.value = k; o.textContent = v.label; $("set-theme").appendChild(o);
+}
+// Reflect SETTINGS into the form controls (also called after zoom / reset so they stay in sync).
+function syncSettingsForm() {
+  $("set-theme").value = SETTINGS.theme;
+  $("set-font").value = SETTINGS.fontSize; $("set-font-val").textContent = SETTINGS.fontSize + "px";
+  $("set-family").value = SETTINGS.fontFamily;
+  $("set-blink").checked = SETTINGS.cursorBlink;
+  $("set-taskbar").checked = SETTINGS.taskbar;
+  $("set-header").checked = SETTINGS.header;
+  $("set-lh").value = SETTINGS.lineHeight; $("set-lh-val").textContent = SETTINGS.lineHeight.toFixed(2);
+  $("set-ls").value = SETTINGS.letterSpacing; $("set-ls-val").textContent = SETTINGS.letterSpacing;
+  $("set-scroll").value = SETTINGS.scrollback; $("set-scroll-val").textContent = SETTINGS.scrollback.toLocaleString();
+  for (const b of $("set-cursor").children) b.classList.toggle("on", b.dataset.v === SETTINGS.cursorStyle);
+  for (const b of $("set-layout").children) b.classList.toggle("on", b.dataset.v === SETTINGS.layout);
+  for (const b of $("set-wc").children) b.classList.toggle("on", b.dataset.v === SETTINGS.winControls);
+}
+// One helper: mutate SETTINGS[key], apply live, and reflect back into the form.
+const setOpt = (key, val) => { SETTINGS[key] = val; applySettings(); syncSettingsForm(); };
+
+$("settings-btn").addEventListener("click", () => toggleSettings(true));
+$("settings").addEventListener("mousedown", (e) => { if (e.target === $("settings")) toggleSettings(false); });
+$("set-theme").addEventListener("change", (e) => setOpt("theme", e.target.value));
+$("set-font").addEventListener("input", (e) => setOpt("fontSize", Number(e.target.value)));
+$("set-family").addEventListener("change", (e) => setOpt("fontFamily", e.target.value.trim() || FONT));
+$("set-blink").addEventListener("change", (e) => setOpt("cursorBlink", e.target.checked));
+$("set-taskbar").addEventListener("change", (e) => { SETTINGS.taskbar = e.target.checked; saveSettings(); syncSettingsForm(); });
+$("set-header").addEventListener("change", (e) => { SETTINGS.header = e.target.checked; applySettings(); });
+$("set-lh").addEventListener("input", (e) => setOpt("lineHeight", Number(e.target.value)));
+$("set-ls").addEventListener("input", (e) => setOpt("letterSpacing", Number(e.target.value)));
+$("set-scroll").addEventListener("input", (e) => setOpt("scrollback", Number(e.target.value)));
+$("set-cursor").addEventListener("click", (e) => { const b = e.target.closest("button"); if (b) setOpt("cursorStyle", b.dataset.v); });
+$("set-layout").addEventListener("click", (e) => { const b = e.target.closest("button"); if (b) setLayout(b.dataset.v); });
+$("set-wc").addEventListener("click", (e) => { const b = e.target.closest("button"); if (b) { SETTINGS.winControls = b.dataset.v; applyPlatform(); saveSettings(); syncSettingsForm(); } });
+$("set-reset").addEventListener("click", () => { SETTINGS = { ...DEFAULT_SETTINGS }; setLayout(SETTINGS.layout); applySettings(); syncSettingsForm(); });
+
+// New-pane / palette shortcuts, from ANYWHERE (empty canvas, any pane, an overlay). We deliberately
+// use combos a browser does NOT reserve (Ctrl+Shift+Enter, Ctrl+Shift+P) — the browser keeps Ctrl+T
+// (new browser tab), Ctrl+Shift+N (incognito), etc. for itself and the page never sees them.
+document.addEventListener("keydown", (e) => {
+  if (e._kediHandled) return; // a focused terminal's keyHandler already handled this event
+  const k = e.key.toLowerCase();
+  // NEW PANE — Ctrl+Shift+Enter. NOT Ctrl+T: a browser reserves Ctrl+T for a new browser tab and the
+  // page never sees it (nothing kedi can do about that). This combo is free, so it reaches us and
+  // opens a pane inside the current kedi.
+  if (e.ctrlKey && e.shiftKey && (e.key === "Enter" || k === "enter")) {
+    e.preventDefault(); spawnFloatCascade(); return;
+  }
+  // SESSION PALETTE — Ctrl+Shift+P (Chrome may reserve it in a normal tab; works in the --app window)
+  if (e.ctrlKey && e.shiftKey && k === "p" && !$("palette").classList.contains("show")) {
+    e.preventDefault(); openPalette(); return;
+  }
+  // SETTINGS — Ctrl+Shift+, from anywhere. The escape hatch when the top bar is hidden (its ⚙ button
+  // is gone), so you can always get back to turn the bar on again.
+  if (e.ctrlKey && e.shiftKey && (k === "," || e.key === "<")) {
+    e.preventDefault(); toggleSettings(); return;
+  }
+  if (e.key !== "Escape") return;
+  if ($("palette").classList.contains("show")) closePalette();
+  else if (!$("settings").classList.contains("hide")) toggleSettings(false);
+  else if (!$("audit").classList.contains("hide")) closeAudit();
+});
+
+function keyHandler(e, pane) {
+  if (e.type !== "keydown") return true;
+  if (!e.ctrlKey || !e.shiftKey) return true;
+  const k = e.key.toLowerCase();
+  const fw = focused && focused.floatwin;
+  let ok = true;
+  switch (k) {
+    case "enter": case "n": case "d": spawnFloatCascade(); break; // Ctrl+Shift+Enter = new terminal
+    case "w": closePane(focused); break;
+    case "f": toggleSearch(true); break;
+    case "c": copySel(pane); break;
+    case "v": pasteInto(pane); break;
+    case "+": case "=": zoom(1); break;
+    case "-": case "_": zoom(-1); break;
+    case "0": zoom(0); break;
+    case "arrowleft": fw ? snapWin(fw, focused, "left") : (ok = false); break;
+    case "arrowright": fw ? snapWin(fw, focused, "right") : (ok = false); break;
+    case "arrowup": fw ? askSnapUp(fw, focused) : (ok = false); break; // propose: maximize · split
+    case "arrowdown": fw ? restoreWin(fw, focused) : (ok = false); break;
+    case "g": tileGrid(); break;
+    case "m": focused ? minimizePane(focused) : (ok = false); break;
+    case ",": case "<": toggleSettings(); break; // Ctrl+Shift+, → settings
+    case "p": openPalette(); break; // Ctrl+Shift+P → session palette (search / focus / move here)
+    default: ok = false;
+  }
+  if (ok) { e._kediHandled = true; e.preventDefault(); return false; } // flag: doc listener won't re-fire
+  return true;
+}
+
+// ── session palette: find any session across all browser tabs, focus it (if it's here) or move it
+// here (if it lives in another tab). The server's /sessions is the shared source of truth across all
+// tabs/connections; each session carries the per-pane `tab` key ("<tab-id>:<pane-id>") its owner
+// pushed, so we can tell our own panes apart from other tabs' and map a row back to a local pane.
+const pal = { rows: [], sel: 0 };
+
+// find the LOCAL pane that owns a session row (its tab key is "<our TAB_ID>:<pane.id>"), or null.
+function localPaneFor(row) {
+  const [tid, pid] = (row.tab || "").split(":");
+  if (tid !== TAB_ID) return null;
+  return allPanes().find((p) => String(p.id) === pid) || null;
+}
+
+async function fetchSessions() {
+  try { return JSON.parse(await invoke("sessions_json")).sessions || []; }
+  catch (_) { return []; }
+}
+
+async function openPalette() {
+  const box = $("palette");
+  if (box.classList.contains("show")) return; // idempotent (both keyHandler + document listener fire)
+  box.classList.add("show");
+  const input = $("pal-in");
+  input.value = ""; pal.sel = 0;
+  pal.all = await fetchSessions();
+  renderPalette();
+  input.focus();
+  // keep the tiles' previews fresh while the exposé is open (remote panes are snapshots from the ring)
+  clearInterval(pal.timer);
+  pal.timer = setInterval(async () => {
+    if (!box.classList.contains("show")) return;
+    pal.all = await fetchSessions();
+    renderPalette();
+  }, 1500);
+}
+function closePalette() {
+  clearInterval(pal.timer);
+  $("palette").classList.remove("show");
+  if (focused) try { focused.term.focus(); } catch (_) {}
+}
+
+// a live local pane's preview: the last non-blank line currently on its own xterm buffer (this tab
+// CAN read its own panes). Falls back to the server preview for remote panes.
+function localPreview(pane) {
+  try {
+    const buf = pane.term.buffer.active;
+    for (let y = buf.baseY + buf.cursorY; y >= 0 && y > buf.baseY + buf.cursorY - 40; y--) {
+      const line = buf.getLine(y); if (!line) continue;
+      const t = line.translateToString(true).trimEnd();
+      if (t.trim()) return t.slice(0, 120);
+    }
+  } catch (_) {}
+  return "";
+}
+
+function renderPalette() {
+  const q = $("pal-in").value.trim().toLowerCase();
+  const rows = (pal.all || []).filter((s) => {
+    if (!q) return true;
+    return (`${s.title || ""} ${s.who || ""} ${s.preview || ""} ${(s.caps || []).join(" ")}`).toLowerCase().includes(q);
+  });
+  pal.rows = rows;
+  if (pal.sel >= rows.length) pal.sel = Math.max(0, rows.length - 1);
+  const grid = $("pal-grid");
+  grid.innerHTML = "";
+  if (!rows.length) {
+    const e = document.createElement("div"); e.id = "pal-empty";
+    e.textContent = (pal.all || []).length ? "no pane matches your filter" : "no live sessions yet — open a terminal";
+    grid.appendChild(e);
+    return;
+  }
+  rows.forEach((s, i) => {
+    const local = localPaneFor(s);
+    const here = !!local;
+    const isApp = (s.caps || []).includes("app");
+    const glyph = isApp ? "▤" : "❯";
+    const title = (s.title && s.title.trim()) ? s.title : (here ? "pane " + local.id : "session " + s.id);
+    // live local preview if we can read the pane; else the server's ring preview
+    const preview = (here ? localPreview(local) : "") || s.preview || "";
+
+    const tile = document.createElement("div");
+    tile.className = "tile" + (i === pal.sel ? " sel" : "");
+    const screen = document.createElement("div");
+    screen.className = "tile-screen" + (preview ? "" : " empty");
+    if (preview) {
+      screen.textContent = preview;
+      const g = document.createElement("span"); g.className = "glyph"; g.textContent = glyph; screen.appendChild(g);
+    } else {
+      screen.textContent = glyph + "  no output yet";
+    }
+    const foot = document.createElement("div"); foot.className = "tile-foot";
+    const tt = document.createElement("div"); tt.className = "tile-title"; tt.textContent = title;
+    const meta = document.createElement("div"); meta.className = "tile-meta";
+    const who = document.createElement("span"); who.textContent = s.who || "?";
+    const where = document.createElement("span"); where.className = "tile-where" + (here ? "" : " remote");
+    where.textContent = here ? "this tab" : "another tab";
+    const act = document.createElement("span"); act.className = "tile-act"; act.textContent = here ? "focus →" : "move here →";
+    meta.append(who, where, act);
+    foot.append(tt, meta);
+    tile.append(screen, foot);
+
+    tile.addEventListener("mouseenter", () => selectTile(i));
+    tile.addEventListener("click", () => choosePalette(s));
+    grid.appendChild(tile);
+  });
+}
+
+function selectTile(i) {
+  pal.sel = i;
+  [...$("pal-grid").children].forEach((c, j) => c.classList.toggle("sel", j === i));
+  const sel = $("pal-grid").children[i];
+  if (sel && sel.scrollIntoView) sel.scrollIntoView({ block: "nearest" });
+}
+
+// columns in the current grid layout (for up/down arrow nav across rows)
+function palCols() {
+  const grid = $("pal-grid");
+  const style = getComputedStyle(grid).gridTemplateColumns;
+  return Math.max(1, style.split(" ").filter(Boolean).length);
+}
+
+// act on a tile: focus it if it's a pane in THIS tab, else move the live session here.
+function choosePalette(s) {
+  closePalette();
+  const local = localPaneFor(s);
+  if (local) setFocus(local);
+  else moveSessionHere(s.id);
+}
+
+$("pal-in").addEventListener("input", () => { pal.sel = 0; renderPalette(); });
+$("pal-in").addEventListener("keydown", (e) => {
+  const n = pal.rows.length; if (!n) return;
+  const cols = palCols();
+  if (e.key === "ArrowRight") { e.preventDefault(); selectTile(Math.min(n - 1, pal.sel + 1)); }
+  else if (e.key === "ArrowLeft") { e.preventDefault(); selectTile(Math.max(0, pal.sel - 1)); }
+  else if (e.key === "ArrowDown") { e.preventDefault(); selectTile(Math.min(n - 1, pal.sel + cols)); }
+  else if (e.key === "ArrowUp") { e.preventDefault(); selectTile(Math.max(0, pal.sel - cols)); }
+  else if (e.key === "Enter") { e.preventDefault(); const s = pal.rows[pal.sel]; if (s) choosePalette(s); }
+});
+// click the backdrop (outside a tile / the input) closes the exposé
+$("palette").addEventListener("mousedown", (e) => { if (e.target.id === "palette" || e.target.id === "pal-box") closePalette(); });
+
+function overlay(html) { const o = $("overlay"); o.style.display = "grid"; o.innerHTML = html; }
+
+// A pane's session ended host-side (shell exit / kill / self-exit) → close its window.
+listen("pane-exit", (e) => {
+  const p = allPanes().find((x) => x.id === e.payload);
+  if (p) { p.connected = false; closePane(p); }
+});
+
+async function boot() {
+  try {
+    await Promise.all([
+      document.fonts.load('14px "FiraCode Nerd Font Mono"'),
+      document.fonts.load('bold 14px "FiraCode Nerd Font Mono"'),
+    ]);
+    await document.fonts.ready;
+  } catch (_) {}
+  // no connection handshake: the warden is in-process and each pane opens its own IPC transport.
+  setState("connected", true);
+  try { recOn = !!(await invoke("get_recording")); } catch (_) {}
+  setLayout(SETTINGS.layout); applySettings(); // restore saved theme / font / cursor / layout
+  spawnFloatCascade(); // open with one terminal; draw or Ctrl+Shift+N for more
+  _lastCanvas = { w: $("canvas").clientWidth, h: $("canvas").clientHeight };
+  // coalesce the rapid resize-event stream to one reflow per frame (avoids spamming pty resizes)
+  let _reflowPending = false;
+  window.addEventListener("resize", () => {
+    if (_reflowPending) return;
+    _reflowPending = true;
+    requestAnimationFrame(() => { _reflowPending = false; reflowWindows(); });
+  });
+}
+boot();
+</script>
+<!-- Register the service worker so Chrome offers to install kedi as a standalone app (real Dock icon). -->
+<script>
+  if ('serviceWorker' in navigator) {
+    window.addEventListener('load', () => {
+      navigator.serviceWorker.register('/sw.js').catch(() => {});
+    });
+  }
+</script>
 </body>
 </html>

@@ -134,21 +134,23 @@ fn mime_for(path: &Path) -> &'static str {
         Some("png") => "image/png",
         Some("svg") => "image/svg+xml",
         Some("woff2") => "font/woff2",
+        Some("ttf") => "font/ttf",
         _ => "application/octet-stream",
     }
 }
 
 // ── pane IPC: the transport that replaces the WebTransport bidi stream ────────────────────────────
 
-/// Open a pane: start a warden session and stream its output back over `on_output`. `app = Some(name)`
-/// opens a WASM plugin pane (a `kedi:app` component) instead of a shell — the same run_pane path, it
-/// just sends `{"app":name}` before the hello. The frontend creates one Channel per pane.
+/// Open a pane's transport: start a warden session driver and stream its output back over `on_output`
+/// (base64-framed). This is setup only — the frontend then drives the pane with `pane_send` (hello,
+/// optional app/attach/tab, input, resize, …), exactly as the browser wrote control lines to the
+/// WebTransport stream. One Channel per pane.
 #[tauri::command]
 fn open_pane(
+    app: tauri::AppHandle,
     state: State<AppState>,
     pane_id: u32,
     on_output: Channel<String>,
-    app: Option<String>,
 ) -> Result<(), String> {
     let (msg_tx, msg_rx) = unbounded_channel::<Vec<u8>>();
     let (out_tx, mut out_rx) = unbounded_channel::<Vec<u8>>();
@@ -167,52 +169,66 @@ fn open_pane(
 
     let sid = state.next_sid.fetch_add(1, Ordering::Relaxed);
     let warden = state.warden.clone();
-    // "" → run_pane's pty broker spawns $SHELL; pass an explicit fallback for GUI launches where
-    // $SHELL may be unset. (Ignored for a plugin pane — an app cap doesn't run a shell.)
+    // "" → run_pane's pty broker spawns $SHELL; explicit fallback for GUI launches where $SHELL may
+    // be unset. Ignored for a plugin pane (the frontend sends {"app":name} → an app cap, not a shell).
     let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
     handle.spawn(async move {
         kedi::run_pane(warden, sid, shell, msg_rx, out_tx).await;
+        // session ended (shell exit / kill / self-exit) → tell the frontend to close this pane
+        let _ = app.emit("pane-exit", pane_id);
     });
 
-    // introduce the pane: optional {"app":name} (plugin pane) then the hello that opens the session.
-    if let Some(name) = app {
-        let _ = msg_tx.send(serde_json::json!({ "app": name }).to_string().into_bytes());
-    }
-    let _ = msg_tx.send(br#"{"hello":"kedi-app"}"#.to_vec());
     state.panes.lock().unwrap().insert(pane_id, msg_tx);
     Ok(())
 }
 
+/// Forward one newline-JSON control line to a pane's run_pane — the generic mirror of the browser's
+/// `pane.send(obj)` over the WebTransport stream ({"hello"|"app"|"attach"|"tab"|"input"|"resize"|
+/// "title"|"kill"|"close"|"pasteImage"}). A `{"close"}`/`{"kill"}` ends the session; drop the sender.
 #[tauri::command]
-fn pane_input(state: State<AppState>, pane_id: u32, data: String) {
-    send_line(&state, pane_id, serde_json::json!({ "input": data }));
-}
-
-#[tauri::command]
-fn pane_resize(state: State<AppState>, pane_id: u32, cols: u32, rows: u32) {
-    send_line(&state, pane_id, serde_json::json!({ "resize": [cols, rows] }));
-}
-
-#[tauri::command]
-fn pane_close(state: State<AppState>, pane_id: u32) {
-    if let Some(tx) = state.panes.lock().unwrap().remove(&pane_id) {
-        let _ = tx.send(br#"{"close":null}"#.to_vec());
+fn pane_send(state: State<AppState>, pane_id: u32, line: String) {
+    let ends = {
+        let panes = state.panes.lock().unwrap();
+        match panes.get(&pane_id) {
+            Some(tx) => {
+                let _ = tx.send(line.clone().into_bytes());
+                line.contains("\"close\"") || line.contains("\"kill\"")
+            }
+            None => false,
+        }
+    };
+    if ends {
+        state.panes.lock().unwrap().remove(&pane_id);
     }
 }
 
-/// Send one newline-JSON control line to a pane's run_pane (the same wire the browser used).
-fn send_line(state: &AppState, pane_id: u32, v: serde_json::Value) {
-    if let Some(tx) = state.panes.lock().unwrap().get(&pane_id) {
-        let _ = tx.send(v.to_string().into_bytes());
-    }
+/// {clients, sessions} — the browser polled this to decide "am I the last tab?" before offering to
+/// stop the server. A native window is a single client; report 1 + the live session count.
+#[tauri::command]
+fn clients_json(state: State<AppState>) -> String {
+    format!(
+        "{{\"clients\":1,\"sessions\":{}}}",
+        state.warden.session_views().len()
+    )
+}
+
+/// Stop kedi — the last-pane "stop" path. Closing the native window quits the app anyway; this lets
+/// the UI's explicit stop affordance work too.
+#[tauri::command]
+fn shutdown(app: tauri::AppHandle) {
+    app.exit(0);
 }
 
 // ── audit / governance IPC (ports of the old HTTP routes; same JSON shapes) ───────────────────────
 
-/// Live session list (JSON array of SessionView) — the palette + audit panel data source.
+/// Live sessions, in the browser's `/sessions` shape ({warden, sessions:[SessionView]}) — the palette
+/// + audit panel data source.
 #[tauri::command]
 fn sessions_json(state: State<AppState>) -> String {
-    kedi::sessions_json(&state.warden)
+    format!(
+        "{{\"warden\":\"live\",\"sessions\":{}}}",
+        kedi::sessions_json(&state.warden)
+    )
 }
 
 /// The verified record stream from index `since` on ({ok,count,since,events}) — audit timeline; poll
@@ -394,9 +410,9 @@ fn main() {
         })
         .invoke_handler(tauri::generate_handler![
             open_pane,
-            pane_input,
-            pane_resize,
-            pane_close,
+            pane_send,
+            clients_json,
+            shutdown,
             sessions_json,
             record_json,
             get_recording,
