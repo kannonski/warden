@@ -13,6 +13,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use tauri::ipc::Channel;
+use tauri::window::{Effect, EffectsBuilder};
 use tauri::{Emitter, Manager, State, WebviewUrl, WebviewWindowBuilder};
 use tokio::sync::mpsc::{UnboundedSender, unbounded_channel};
 
@@ -216,6 +217,8 @@ fn new_window(app: tauri::AppHandle, state: State<AppState>) -> Result<(), Strin
     )
     .title("kedi — governed terminal")
     .inner_size(960.0, 640.0)
+    .transparent(true)
+    .effects(EffectsBuilder::new().effect(Effect::HudWindow).build())
     .build()
     .map_err(|e| e.to_string())?;
     Ok(())
@@ -236,6 +239,20 @@ fn clients_json(state: State<AppState>) -> String {
 #[tauri::command]
 fn shutdown(app: tauri::AppHandle) {
     app.exit(0);
+}
+
+/// Open a URL in the system browser. Uses the OS opener directly (`open` on macOS, `xdg-open` on
+/// Linux) — dead simple and reliable, no plugin/permission/JS-global dependency.
+#[tauri::command]
+fn open_url(url: String) {
+    // only http(s) — don't hand arbitrary schemes/args to the OS opener from terminal content.
+    if !(url.starts_with("http://") || url.starts_with("https://")) {
+        return;
+    }
+    #[cfg(target_os = "macos")]
+    let _ = std::process::Command::new("/usr/bin/open").arg(&url).spawn();
+    #[cfg(target_os = "linux")]
+    let _ = std::process::Command::new("xdg-open").arg(&url).spawn();
 }
 
 // ── audit / governance IPC (ports of the old HTTP routes; same JSON shapes) ───────────────────────
@@ -413,6 +430,8 @@ fn main() {
             )
             .title("kedi — governed terminal")
             .inner_size(960.0, 640.0)
+            .transparent(true)
+            .effects(EffectsBuilder::new().effect(Effect::HudWindow).build())
             .build()?;
 
             // hot-swap watchers: ui/ → reload the window; plugins/ → notify the frontend (live list).
@@ -436,6 +455,7 @@ fn main() {
             new_window,
             clients_json,
             shutdown,
+            open_url,
             sessions_json,
             record_json,
             get_recording,

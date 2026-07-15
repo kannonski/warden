@@ -11,7 +11,7 @@ publish = false
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-tauri = { version = "2", features = [] }
+tauri = { version = "2", features = ["macos-private-api"] } # transparent window + vibrancy blur
 tauri-plugin-clipboard-manager = "2"          # reliable copy/paste in WKWebView (navigator.clipboard is blocked on kedi://)
 tauri-plugin-opener = "2"                      # open clicked links in the system browser
 serde = { version = "1", features = ["derive"] }
