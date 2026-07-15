@@ -14,6 +14,7 @@
 <script src="/vendor/addon-fit.min.js"></script>
 <script src="/vendor/addon-search.min.js"></script>
 <script src="/vendor/addon-web-links.min.js"></script>
+<script src="/vendor/addon-canvas.min.js"></script>
 <script src="/vendor/addon-unicode11.min.js"></script>
 <script src="/vendor/addon-webgl.min.js"></script>
 <style>
@@ -30,7 +31,7 @@
   }
   * { box-sizing:border-box; }
   html,body { height:100%; margin:0; }
-  body { background:var(--bg); color:var(--fg); display:flex; flex-direction:column;
+  body { background:transparent; color:var(--fg); display:flex; flex-direction:column;
          font:13px/1.5 "FiraCode Nerd Font", ui-monospace, monospace; overflow:hidden; }
   header { display:flex; align-items:center; gap:9px; padding:8px 14px; border-bottom:1px solid var(--edge); flex:0 0 auto; }
   body.no-header header { display:none; }  /* optional top banner (settings ▸ show header) → canvas reclaims the space */
@@ -48,7 +49,7 @@
 
   /* depth via the real Catppuccin surfaces (base → mantle → crust vignette), no off-palette tones */
   #canvas { flex:1 1 auto; min-height:0; position:relative; overflow:hidden; cursor:crosshair;
-            background: radial-gradient(1300px 900px at 30% 8%, color-mix(in srgb, var(--term-bg) 88%, #000) 0%, color-mix(in srgb, var(--term-bg) 70%, #000) 64%, #0c0c12 100%);
+            background: transparent; /* transparent so the window's native blur (vibrancy) shows through */
             transition: background .18s ease; }
   /* the kedi mark — always there, quietly, behind every window */
   #watermark { position:absolute; inset:0; display:flex; flex-direction:column; align-items:center; justify-content:center;
@@ -57,7 +58,7 @@
   #hint { position:absolute; left:0; right:0; top:68%; color:var(--dim); pointer-events:none; text-align:center; }
 
   .floatwin { position:absolute; display:flex; min-width:200px; min-height:130px; border:1px solid var(--edge);
-              border-radius:9px; overflow:hidden; background:var(--term-bg); will-change:transform; opacity:.97;
+              border-radius:9px; overflow:hidden; background:transparent; will-change:transform; opacity:.97;
               box-shadow:0 6px 20px rgba(0,0,0,.45);
               transition: box-shadow .14s ease, opacity .14s ease, border-color .14s ease;
               animation: winIn .12s ease-out; }
@@ -75,9 +76,12 @@
   .floatwin.shaded .ptitle::after { content:" ▸"; color:var(--dim); } /* affordance: click to expand */
   @keyframes winIn { from { opacity:0; transform:scale(.985); } to { opacity:1; transform:scale(1); } }
 
-  .pane { flex:1 1 0; min-width:0; min-height:0; display:flex; flex-direction:column; background:var(--term-bg); overflow:hidden; }
+  .pane { flex:1 1 0; min-width:0; min-height:0; display:flex; flex-direction:column; background:transparent; overflow:hidden; }
   .panebar { display:flex; align-items:center; gap:8px; padding:3px 9px; font-size:11px; color:var(--dim);
-             background:linear-gradient(var(--panel), #15151f); border-bottom:1px solid var(--edge); flex:0 0 auto; user-select:none; cursor:move; }
+             background:linear-gradient(
+               color-mix(in srgb, var(--panel) calc(var(--pane-opacity, 1) * 100%), transparent),
+               color-mix(in srgb, #15151f calc(var(--pane-opacity, 1) * 100%), transparent));
+             border-bottom:1px solid var(--edge); flex:0 0 auto; user-select:none; cursor:move; }
   .ptitle { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color:var(--fg); }
   .ptitle::before { content:"\f120"; color:var(--dim); margin-right:7px; font-size:11px; } /* nf-fa-terminal */
   .psize { color:var(--dim); font-size:10px; white-space:nowrap; }
@@ -469,11 +473,6 @@
       <button data-v="bar">bar</button>
     </div>
 
-    <label for="set-renderer">renderer <span class="valtag">new panes</span></label>
-    <div class="seg" id="set-renderer">
-      <button data-v="webgl">webgl (gpu)</button>
-      <button data-v="canvas">canvas</button>
-    </div>
 
     <label for="set-blink">cursor blink</label>
     <label class="switch"><input type="checkbox" id="set-blink"><span></span></label>
@@ -486,6 +485,9 @@
 
     <label for="set-scroll">scrollback <span id="set-scroll-val" class="valtag"></span></label>
     <input type="range" id="set-scroll" min="1000" max="50000" step="1000">
+
+    <label for="set-opacity">background opacity <span id="set-opacity-val" class="valtag"></span></label>
+    <input type="range" id="set-opacity" min="0.5" max="1" step="0.02">
   </div>
   <div class="setfoot">
     <button class="badge btn" id="set-reset">reset to defaults</button>
@@ -506,7 +508,12 @@ const CLIP = window.__TAURI__.clipboardManager;
 const OPENER = window.__TAURI__.opener;
 async function clipWrite(t) { try { if (CLIP) return await CLIP.writeText(t); } catch (_) {} try { await navigator.clipboard.writeText(t); } catch (_) {} }
 async function clipRead() { try { if (CLIP) return (await CLIP.readText()) || ""; } catch (_) {} try { return (await navigator.clipboard.readText()) || ""; } catch (_) { return ""; } }
-async function openExternal(u) { try { if (OPENER) return await OPENER.openUrl(u); } catch (_) {} try { window.open(u); } catch (_) {} }
+async function openExternal(u) {
+  // our own command → the OS opener (`open`/`xdg-open`). Reliable; no plugin/global/permission chain.
+  try { return await invoke("open_url", { url: u }); } catch (_) {}
+  try { if (OPENER) return await OPENER.openUrl(u); } catch (_) {}
+  try { window.open(u); } catch (_) {}
+}
 function b64ToBytes(b64) { const s = atob(b64); const a = new Uint8Array(s.length); for (let i = 0; i < s.length; i++) a[i] = s.charCodeAt(i); return a; }
 let recOn = false;              // synced from get_recording at boot
 const WARDEN = "kedi";          // shown in the header
@@ -563,7 +570,7 @@ const DEFAULT_SETTINGS = {
   fontFamily: FONT,
   cursorStyle: "block",   // block | underline | bar
   cursorBlink: true,
-  renderer: "webgl",      // webgl (GPU) | canvas (fallback) — applies to newly opened panes
+  opacity: 0.9,           // terminal background opacity (rest shows the window's native blur)
   lineHeight: 1.0,
   letterSpacing: 0,
   scrollback: 10000,
@@ -599,13 +606,24 @@ let SETTINGS = loadSettings();
 function saveSettings() { try { localStorage.setItem("kedi.settings", JSON.stringify(SETTINGS)); } catch (_) {} }
 const activeTheme = () => THEMES[SETTINGS.theme].term;
 
+// #rrggbb → rgba() at the given alpha (for translucent terminal backgrounds over the window blur).
+function hexToRgba(hex, a) {
+  const m = /^#?([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})$/i.exec(hex || "");
+  if (!m) return hex; // already rgba / named → leave as-is
+  const [r, g, b] = [1, 2, 3].map((i) => parseInt(m[i], 16));
+  return `rgba(${r}, ${g}, ${b}, ${a})`;
+}
+
 // Per-pane xterm options derived from SETTINGS (both new panes and live updates read this).
 function xtermOpts() {
+  const th = activeTheme();
   return {
     fontFamily: SETTINGS.fontFamily, fontSize: SETTINGS.fontSize,
     lineHeight: SETTINGS.lineHeight, letterSpacing: SETTINGS.letterSpacing,
     cursorStyle: SETTINGS.cursorStyle, cursorBlink: SETTINGS.cursorBlink,
-    scrollback: SETTINGS.scrollback, theme: activeTheme(),
+    scrollback: SETTINGS.scrollback,
+    allowTransparency: true, // let the translucent background reveal the window blur
+    theme: { ...th, background: hexToRgba(th.background, SETTINGS.opacity) },
   };
 }
 // Push the current settings to every live pane + the audit terminal, tint the canvas to the theme
@@ -615,6 +633,7 @@ function applySettings() {
   applyPlatform();
   const t = THEMES[SETTINGS.theme];
   document.documentElement.style.setProperty("--term-bg", t.term.background);
+  document.documentElement.style.setProperty("--pane-opacity", SETTINGS.opacity); // pane title-bar translucency
   document.body.classList.toggle("no-header", !SETTINGS.header); // hide the top banner when off
   const o = xtermOpts();
   for (const p of allPanes()) Object.assign(p.term.options, o);
@@ -632,19 +651,11 @@ function applySettings() {
 // display controller (WHATWG canvas spec; Chrome's own low-latency-terminal use case). Chromium-only
 // (kedi needs it anyway) and may tear slightly — fine for a terminal. Patch getContext before any
 // WebGL context is created; log once whether the browser actually granted it.
-let _desyncLogged = false;
-const _getContext = HTMLCanvasElement.prototype.getContext;
-HTMLCanvasElement.prototype.getContext = function (type, attrs) {
-  if (type === "webgl2" || type === "webgl") {
-    const ctx = _getContext.call(this, type, Object.assign({}, attrs, { desynchronized: true }));
-    if (ctx && !_desyncLogged) {
-      _desyncLogged = true;
-      try { console.log("[kedi] webgl desynchronized:", ctx.getContextAttributes().desynchronized); } catch (_) {}
-    }
-    return ctx;
-  }
-  return _getContext.call(this, type, attrs);
-};
+// NB: the browser build forced `desynchronized:true` WebGL contexts for lower latency (a Chromium
+// trick). In WKWebView that desynchronized presentation corrupts xterm's glyph atlas (scrambled /
+// overlapping glyphs), so the native app does NOT patch getContext — WebGL runs with a normal
+// synchronized context, which renders correctly on the GPU. (Native IPC already removed the network
+// latency the desync hack was compensating for.)
 
 // Second lever: SYNC RENDER on interactive writes. xterm coalesces paints onto requestAnimationFrame,
 // adding up to a frame (~8–17ms @60Hz) between the bytes arriving and pixels. There's no public
@@ -837,15 +848,10 @@ async function makePane(app, attachId) {
   pane.open = () => {
     if (pane.opened) return; pane.opened = true;
     term.open(termEl);
-    // GPU renderer (unless the user picked canvas). Its glyph atlas is built eagerly, so rebuild it
-    // once the vendored Nerd Font is ready (WKWebView would otherwise cache tofu for prompt glyphs).
-    if (SETTINGS.renderer !== "canvas") {
-      try {
-        const webgl = new WebglAddon.WebglAddon();
-        term.loadAddon(webgl);
-        document.fonts.ready.then(() => { try { webgl.clearTextureAtlas(); } catch (_) {} });
-      } catch (e) { console.error("[kedi] webgl addon:", e); }
-    }
+    // Canvas (2D) renderer: faster than the DOM renderer, and — unlike WebGL — it draws a translucent
+    // background cleanly (no flicker/brightness pulse or glyph corruption in WKWebView). WebGL stays
+    // vendored (window.WebglAddon) for a future opt-in "special feature" pane; normal panes use Canvas.
+    try { term.loadAddon(new CanvasAddon.CanvasAddon()); } catch (e) { console.error("[kedi] canvas addon:", e); }
     requestAnimationFrame(() => {
       try { fit.fit(); } catch (e) { console.error("[kedi] fit:", e); }
       size.textContent = `${term.cols}×${term.rows}`;
@@ -1466,13 +1472,7 @@ function openAudit() {
   if (!au.term) {
     au.term = new Terminal({ fontFamily: SETTINGS.fontFamily, fontSize: 13, lineHeight: 1.0, cursorBlink: false, scrollback: 8000, disableStdin: true, theme: activeTheme() });
     au.fit = new FitAddon.FitAddon(); au.term.loadAddon(au.fit); au.term.open($("au-term"));
-    if (SETTINGS.renderer !== "canvas") {
-      try {
-        const awgl = new WebglAddon.WebglAddon();
-        au.term.loadAddon(awgl);
-        document.fonts.ready.then(() => { try { awgl.clearTextureAtlas(); } catch (_) {} });
-      } catch (_) {}
-    }
+    try { au.term.loadAddon(new CanvasAddon.CanvasAddon()); } catch (_) {}
   }
   requestAnimationFrame(() => { try { au.fit.fit(); } catch (_) {} });
   renderRecState();
@@ -1615,8 +1615,8 @@ function syncSettingsForm() {
   $("set-lh").value = SETTINGS.lineHeight; $("set-lh-val").textContent = SETTINGS.lineHeight.toFixed(2);
   $("set-ls").value = SETTINGS.letterSpacing; $("set-ls-val").textContent = SETTINGS.letterSpacing;
   $("set-scroll").value = SETTINGS.scrollback; $("set-scroll-val").textContent = SETTINGS.scrollback.toLocaleString();
+  $("set-opacity").value = SETTINGS.opacity; $("set-opacity-val").textContent = Math.round(SETTINGS.opacity * 100) + "%";
   for (const b of $("set-cursor").children) b.classList.toggle("on", b.dataset.v === SETTINGS.cursorStyle);
-  for (const b of $("set-renderer").children) b.classList.toggle("on", b.dataset.v === SETTINGS.renderer);
   for (const b of $("set-layout").children) b.classList.toggle("on", b.dataset.v === SETTINGS.layout);
   for (const b of $("set-wc").children) b.classList.toggle("on", b.dataset.v === SETTINGS.winControls);
 }
@@ -1635,9 +1635,8 @@ $("set-header").addEventListener("change", (e) => { SETTINGS.header = e.target.c
 $("set-lh").addEventListener("input", (e) => setOpt("lineHeight", Number(e.target.value)));
 $("set-ls").addEventListener("input", (e) => setOpt("letterSpacing", Number(e.target.value)));
 $("set-scroll").addEventListener("input", (e) => setOpt("scrollback", Number(e.target.value)));
+$("set-opacity").addEventListener("input", (e) => setOpt("opacity", Number(e.target.value)));
 $("set-cursor").addEventListener("click", (e) => { const b = e.target.closest("button"); if (b) setOpt("cursorStyle", b.dataset.v); });
-// renderer applies to newly opened panes (can't hot-swap a live term's renderer) → just persist + reflect
-$("set-renderer").addEventListener("click", (e) => { const b = e.target.closest("button"); if (b) { SETTINGS.renderer = b.dataset.v; saveSettings(); syncSettingsForm(); } });
 $("set-layout").addEventListener("click", (e) => { const b = e.target.closest("button"); if (b) setLayout(b.dataset.v); });
 $("set-wc").addEventListener("click", (e) => { const b = e.target.closest("button"); if (b) { SETTINGS.winControls = b.dataset.v; applyPlatform(); saveSettings(); syncSettingsForm(); } });
 $("set-reset").addEventListener("click", () => { SETTINGS = { ...DEFAULT_SETTINGS }; setLayout(SETTINGS.layout); applySettings(); syncSettingsForm(); });
@@ -1681,7 +1680,8 @@ function keyHandler(e, pane) {
   const fw = focused && focused.floatwin;
   let ok = true;
   switch (k) {
-    case "enter": case "n": case "d": spawnFloatCascade(); break; // Ctrl+Shift+Enter = new terminal
+    case "enter": case "d": spawnFloatCascade(); break; // Ctrl+Shift+Enter / Ctrl+Shift+D = new pane
+    case "n": invoke("new_window").catch(() => {}); break; // Ctrl+Shift+N = new OS window
     case "w": closePane(focused); break;
     case "f": toggleSearch(true); break;
     case "c": copySel(pane); break;
