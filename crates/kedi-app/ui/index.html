@@ -245,6 +245,8 @@
   </div>
   <div id="hint">double-click for a terminal · drag to draw one · <kbd>Ctrl+Shift+↵</kbd> new pane · <kbd>Ctrl+Shift+N</kbd> new window · <kbd>Ctrl+Shift+P</kbd> sessions</div>
   <div id="ctxmenu"></div>
+  <div id="stagelabels"></div>
+  <button id="stageact"></button>
   <div id="palette"><div id="pal-box">
     <input id="pal-in" type="text" placeholder="type to filter every pane across your tabs — ↵ focus / move here · esc close" autocomplete="off" spellcheck="false">
     <div id="pal-grid"></div>
@@ -430,19 +432,43 @@
   body.tabmode #taskbar { display:none !important; } /* minimize is a floating-mode concept */
 
   /* Stage Manager: the focused window fills the stage; the others are LIVE, transform-scaled cards in
-     a left rail (positioned by stageLayout()). They stay real terminals — click one to stage it.
-     Replaces the taskbar. All windows share the stage size, so a swap only animates transform/position
-     (no reflow). */
+     an AUTO-HIDING left rail — they slide in when the mouse nears the left edge (body.stage-peek → the
+     --peek-x var) and out otherwise. Cards stay real terminals (click to stage). The staged window
+     fills the whole canvas; cards overlay it while peeking. All windows share the stage size, so a
+     swap only animates transform (no reflow). --peek-x hides the rail off-screen left. */
+  body.stagemode { --peek-x: 260px; }   /* rail hidden off the RIGHT edge (left stays clear for macOS Stage Manager) */
+  body.stagemode.stage-peek { --peek-x: 0px; }
   body.stagemode #canvas { cursor:default; }
   body.stagemode #taskbar { display:none !important; }
-  body.stagemode .floatwin { transition: transform .3s cubic-bezier(.2,.75,.25,1),
-                             left .3s cubic-bezier(.2,.75,.25,1), top .3s cubic-bezier(.2,.75,.25,1); }
-  body.stagemode .floatwin:not(.focused) { transform-origin:top left; cursor:pointer; opacity:.82; }
-  body.stagemode .floatwin:not(.focused):hover { opacity:1; }
-  body.stagemode .floatwin:not(.focused) .paneterm { pointer-events:none; } /* click focuses; don't type the mini view */
-  body.stagemode .floatwin:not(.focused) .wcgroup { display:none; }
+  body.stagemode .floatwin { transition: transform .28s cubic-bezier(.2,.75,.25,1), top .2s ease; }
+  /* rail cards = windows NOT on the stage (a group tiles several ON the stage, so key off on-stage) */
+  body.stagemode .floatwin:not(.on-stage) { transform-origin:top left; cursor:pointer; opacity:.8;
+                                             box-shadow:0 6px 24px rgba(0,0,0,.45); }
+  body.stagemode .floatwin:not(.on-stage):hover { opacity:1; }
+  body.stagemode .floatwin:not(.on-stage) .paneterm { pointer-events:none; } /* click focuses; don't type the mini view */
+  body.stagemode .floatwin.selected { outline:2px solid #a6e3a1; outline-offset:-2px; }        /* selected for grouping */
+  body.stagemode .floatwin.on-stage.focused { box-shadow:inset 0 0 0 2px var(--focus); }        /* active tile in a group */
   body.stagemode .floatwin .grip { display:none; }         /* auto-laid-out → no manual resize */
   body.stagemode .floatwin .panebar { cursor:default; }
+  /* rail card titles (a readable label under each card, so panes are easy to tell apart) */
+  #stagelabels { position:absolute; inset:0; pointer-events:none; z-index:70; display:none; }
+  body.stagemode #stagelabels { display:block; }
+  .stagelabel { position:absolute; height:20px; line-height:16px; font-size:11px; color:var(--fg);
+                background:var(--panel); border:1px solid var(--edge); border-radius:6px; padding:1px 8px;
+                overflow:hidden; text-overflow:ellipsis; white-space:nowrap; box-sizing:border-box;
+                pointer-events:auto; cursor:pointer; transition:transform .28s cubic-bezier(.2,.75,.25,1), top .2s ease; }
+  .stagelabel.selected { border-color:#a6e3a1; color:#a6e3a1; }
+  .stagelabel.group { display:flex; align-items:center; gap:6px; }
+  .stagelabel.group .txt { flex:1 1 auto; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .stagelabel.group .lyt, .stagelabel.group .ung { flex:0 0 auto; opacity:.6; padding:0 2px; border-radius:4px; }
+  .stagelabel.group .lyt:hover, .stagelabel.group .ung:hover { opacity:1; background:var(--edge); }
+  /* subtle lift on card hover */
+  body.stagemode .floatwin:not(.on-stage) { transition: transform .28s cubic-bezier(.2,.75,.25,1), top .2s ease, opacity .15s; }
+  /* contextual "group" action pill — appears when 2+ cards are selected */
+  #stageact { position:fixed; left:50%; bottom:24px; transform:translateX(-50%); display:none; z-index:90;
+              background:var(--focus); color:#1e1e2e; border:none; border-radius:999px; padding:8px 16px;
+              font:inherit; font-size:13px; font-weight:600; cursor:pointer; box-shadow:0 6px 24px rgba(0,0,0,.5); }
+  #stageact:hover { filter:brightness(1.08); }
 </style>
 
 <div id="settings" class="hide"><div class="card settings-card">
@@ -708,7 +734,7 @@ function setFocus(p) {
   }
   document.title = (p.title || ("pane " + p.id)) + " · kedi";
   if (SETTINGS.layout === "tab") { renderTabs(); requestAnimationFrame(() => { try { p.fit.fit(); } catch (_) {} }); }
-  if (SETTINGS.layout === "stage") stageLayout(); // re-stage: focused → stage, others → rail
+  if (SETTINGS.layout === "stage") { const g = groupOf(p); stagedGroup = g ? g.id : null; stageLayout(); } // stage p's item (its group, or p alone)
   try { p.term.focus(); } catch (_) {}
 }
 
@@ -725,7 +751,14 @@ function setLayout(mode) {
   if (now === "stage" && prev !== "stage") {
     for (const p of allPanes()) p._savedStyle = p.floatwin.style.cssText;
   } else if (prev === "stage" && now !== "stage") {
-    for (const p of allPanes()) { p.floatwin.style.cssText = p._savedStyle || ""; p._savedStyle = null; }
+    for (const p of allPanes()) {
+      p.floatwin.classList.remove("on-stage", "selected");
+      p.floatwin.onmousedown = null; p.floatwin.onclick = null;
+      p.floatwin.style.cssText = p._savedStyle || ""; p._savedStyle = null;
+    }
+    document.body.classList.remove("stage-peek"); $("stagelabels").innerHTML = "";
+    $("stageact").style.display = "none";
+    railScroll = 0; stagedGroup = null; sel.clear();
   }
   document.body.classList.toggle("tabmode", now === "tab");
   document.body.classList.toggle("stagemode", now === "stage");
@@ -740,35 +773,206 @@ function setLayout(mode) {
 // Stage Manager layout: focused window on the stage, the rest as live scaled cards in a left rail.
 // Every window is sized to the stage (so a card is a true scaled preview and swapping needs no
 // reflow — only transform/left/top animate). Called on layout change, focus change, new/close, resize.
-const STAGE = { rail: 220, gap: 14, margin: 16 };
+const STAGE = { rail: 210, cardW: 178, gap: 16, margin: 16, labelH: 22, edge: 14 };
+let railScroll = 0;
+let groups = [];        // persistent sets: { id, members:[paneId,...], layout:"grid"|"rows"|"main" }
+let groupSeq = 1;
+let stagedGroup = null; // group id tiled on the stage (null = a single pane is staged)
+const sel = new Set();  // paneIds selected in the rail (Cmd/Ctrl-click) for grouping
+const LAYOUT_ICON = { grid: "▦", rows: "▤", main: "◨" };
+
+function paneById(id) { return allPanes().find((p) => p.id === id) || null; }
+function groupOf(pane) { return pane ? groups.find((g) => g.members.includes(pane.id)) || null : null; }
+function groupPanes(g) { return g.members.map(paneById).filter(Boolean); }
+// one entry per stage item: a group (once) or an ungrouped pane, in pane order
+function stageItems() {
+  const items = [], seen = new Set();
+  for (const p of allPanes()) {
+    const g = groupOf(p);
+    if (g) { if (!seen.has(g.id)) { seen.add(g.id); items.push({ group: g }); } }
+    else items.push({ pane: p });
+  }
+  return items;
+}
+// lightweight focus change for a tile inside a staged group (no relayout/refit)
+function stageFocusMember(p) {
+  focused = p;
+  for (const q of allPanes()) q.floatwin.classList.toggle("focused", q === p);
+  document.title = (p.title || ("pane " + p.id)) + " · kedi";
+  try { p.term.focus(); } catch (_) {}
+}
+// tile a group's live members into (x,y,w,h) per its layout; members reflow to their tiles
+function tileGroup(g, x, y, w, h) {
+  const ps = groupPanes(g), n = ps.length, gap = 10, rects = [];
+  if (g.layout === "rows") {
+    const th = (h - (n - 1) * gap) / n;
+    ps.forEach((_, i) => rects.push([x, y + i * (th + gap), w, th]));
+  } else if (g.layout === "main" && n > 1) {
+    const mw = Math.round(w * 0.64), sx = x + mw + gap, sw2 = w - mw - gap, th = (h - (n - 2) * gap) / (n - 1);
+    rects.push([x, y, mw, h]);
+    for (let i = 1; i < n; i++) rects.push([sx, y + (i - 1) * (th + gap), sw2, th]);
+  } else {
+    const cols = Math.ceil(Math.sqrt(n)), rows = Math.ceil(n / cols);
+    const cw = (w - (cols - 1) * gap) / cols, ch = (h - (rows - 1) * gap) / rows;
+    ps.forEach((_, i) => { const c = i % cols, r = Math.floor(i / cols); rects.push([x + c * (cw + gap), y + r * (ch + gap), cw, ch]); });
+  }
+  ps.forEach((p, i) => {
+    const [rx, ry, rw, rh] = rects[i];
+    Object.assign(p.floatwin.style, { left: rx + "px", top: ry + "px", width: rw + "px", height: rh + "px", transform: "none", zIndex: "20", display: "flex" });
+    p.floatwin.classList.add("on-stage");
+    p.floatwin.classList.toggle("focused", p === focused);
+    p.floatwin.onmousedown = () => stageFocusMember(p); // click a tile → type into it (no relayout)
+  });
+  if (!ps.includes(focused)) focused = ps[0];
+}
+
+// Position the staged item (single pane full-canvas, or a group tiled) + the rail cards for the OTHER
+// items (representative live pane, scaled, auto-hiding) + labels + selection.
+function positionCards() {
+  const labels = $("stagelabels"); if (labels) labels.innerHTML = "";
+  if (SETTINGS.layout !== "stage") return null;
+  const panes = allPanes();
+  if (!panes.length) return null;
+  if (!focused || !panes.includes(focused)) focused = panes[0];
+  for (const p of panes) { p.floatwin.classList.remove("on-stage"); p.floatwin.onmousedown = null; }
+  const cv = $("canvas"), W = cv.clientWidth, H = cv.clientHeight;
+  const sw = Math.max(200, W - 2 * STAGE.margin), sh = Math.max(120, H - 2 * STAGE.margin);
+
+  const stagedG = stagedGroup ? groups.find((g) => g.id === stagedGroup) : null;
+  let staged;
+  if (stagedG && groupPanes(stagedG).length) { tileGroup(stagedG, STAGE.margin, STAGE.margin, sw, sh); staged = groupPanes(stagedG); }
+  else {
+    stagedGroup = null;
+    Object.assign(focused.floatwin.style, { left: STAGE.margin + "px", top: STAGE.margin + "px", width: sw + "px", height: sh + "px", transform: "none", zIndex: "20", display: "flex" });
+    focused.floatwin.classList.add("on-stage", "focused");
+    staged = [focused];
+  }
+
+  const items = stageItems().filter((it) => it.group ? it.group.id !== stagedGroup : !staged.includes(it.pane));
+  const scale = STAGE.cardW / sw, cardH = sh * scale, slot = cardH + STAGE.labelH + STAGE.gap;
+  const viewH = H - 2 * STAGE.margin, contentH = Math.max(0, items.length * slot - STAGE.gap);
+  railScroll = Math.min(Math.max(0, railScroll), Math.max(0, contentH - viewH));
+  const cardLeft = W - STAGE.margin - STAGE.cardW, startTop = STAGE.margin + Math.max(0, (viewH - contentH) / 2);
+  // hide non-representative members of rail groups
+  for (const it of items) if (it.group) groupPanes(it.group).slice(1).forEach((p) => { p.floatwin.style.display = "none"; });
+  items.forEach((it, i) => {
+    const rep = it.group ? groupPanes(it.group)[0] : it.pane;
+    if (!rep) return;
+    const top = startTop + i * slot - railScroll;
+    const vis = top + cardH + STAGE.labelH > 0 && top < H;
+    const win = rep.floatwin;
+    Object.assign(win.style, { left: cardLeft + "px", top: top + "px", width: sw + "px", height: sh + "px", transform: "translateX(var(--peek-x, 260px)) scale(" + scale + ")", zIndex: "60", display: vis ? "flex" : "none" });
+    const isSel = it.group ? it.group.members.every((id) => sel.has(id)) : sel.has(it.pane.id);
+    win.classList.toggle("selected", !!isSel);
+    win.onclick = (e) => cardClick(it, e);
+    if (labels && vis) {
+      const chip = document.createElement("div");
+      Object.assign(chip.style, { left: cardLeft + "px", top: (top + cardH + 2) + "px", width: STAGE.cardW + "px", transform: "translateX(var(--peek-x, 260px))" });
+      if (it.group) {
+        chip.className = "stagelabel group" + (isSel ? " selected" : "");
+        const names = groupPanes(it.group).map((p) => p.title || ("#" + p.id)).join(", ");
+        const lyt = document.createElement("span"); lyt.className = "lyt"; lyt.textContent = LAYOUT_ICON[it.group.layout] || "▦";
+        lyt.title = "layout: " + it.group.layout + " — click to change";
+        lyt.addEventListener("click", (e) => { e.stopPropagation(); cycleGroupLayoutFor(it.group); });
+        const txt = document.createElement("span"); txt.className = "txt"; txt.textContent = it.group.members.length + " · " + names; txt.title = names;
+        const ung = document.createElement("span"); ung.className = "ung"; ung.textContent = "⊟"; ung.title = "ungroup";
+        ung.addEventListener("click", (e) => { e.stopPropagation(); ungroupGroup(it.group); });
+        chip.append(lyt, txt, ung);
+      } else {
+        chip.className = "stagelabel" + (isSel ? " selected" : "");
+        chip.textContent = rep.title || ("pane " + rep.id);
+        chip.title = chip.textContent;
+      }
+      chip.addEventListener("click", (e) => cardClick(it, e));
+      labels.appendChild(chip);
+    }
+  });
+  updateStageAct();
+  return staged;
+}
+// rail click: Cmd/Ctrl toggles selection (of the item's panes); plain click stages the item.
+function cardClick(it, e) {
+  if (e && (e.metaKey || e.ctrlKey)) {
+    const ids = it.group ? it.group.members : [it.pane.id];
+    const all = ids.every((id) => sel.has(id));
+    ids.forEach((id) => all ? sel.delete(id) : sel.add(id));
+    positionCards();
+    return;
+  }
+  setFocus(it.group ? groupPanes(it.group)[0] : it.pane); // setFocus stages the right item
+}
 function stageLayout() {
   if (SETTINGS.layout !== "stage") return;
-  const panes = allPanes();
-  if (!panes.length) return;
-  if (!focused || !panes.includes(focused)) focused = panes[0];
-  const cv = $("canvas"), W = cv.clientWidth, H = cv.clientHeight;
-  const others = panes.filter((p) => p !== focused);
-  const stageLeft = others.length ? STAGE.rail : STAGE.margin;
-  const sw = Math.max(200, W - stageLeft - STAGE.margin);
-  const sh = Math.max(120, H - 2 * STAGE.margin);
-  Object.assign(focused.floatwin.style, {
-    left: stageLeft + "px", top: STAGE.margin + "px", width: sw + "px", height: sh + "px",
-    transform: "none", zIndex: "50", display: "flex",
-  });
-  const cardW = STAGE.rail - 2 * STAGE.margin;
-  const scale = cardW / sw;
-  const slot = sh * scale + STAGE.gap;
-  others.forEach((p, i) => {
-    Object.assign(p.floatwin.style, {
-      left: STAGE.margin + "px", top: (STAGE.margin + i * slot) + "px",
-      width: sw + "px", height: sh + "px", transform: "scale(" + scale + ")", zIndex: "10", display: "flex",
-    });
-  });
-  // fit to the shared stage size (clientWidth ignores the scale, so cards fit correctly too)
-  requestAnimationFrame(() => {
-    for (const p of panes) { try { p.fit.fit(); } catch (_) {} p.send({ resize: [p.term.cols, p.term.rows] }); }
-  });
+  const staged = positionCards();
+  if (!staged) return;
+  requestAnimationFrame(() => { for (const p of staged) { try { p.fit.fit(); } catch (_) {} p.send({ resize: [p.term.cols, p.term.rows] }); } });
 }
+function stageScroll(dy) { if (SETTINGS.layout === "stage") { railScroll += dy; positionCards(); } }
+function cycleStage(dir) {
+  const items = stageItems(); if (items.length < 2) return;
+  const cur = stagedGroup ? "g" + stagedGroup : "p" + (focused && focused.id);
+  let i = items.findIndex((it) => (it.group ? "g" + it.group.id : "p" + it.pane.id) === cur);
+  if (i < 0) i = 0;
+  const it = items[(i + dir + items.length) % items.length];
+  setFocus(it.group ? groupPanes(it.group)[0] : it.pane);
+}
+// Ctrl+Shift+G: bind the selection (>=2) into a group; with no selection, ungroup the staged group.
+function toggleGroup() {
+  if (SETTINGS.layout !== "stage") return;
+  if (sel.size >= 2) {
+    const members = allPanes().map((p) => p.id).filter((id) => sel.has(id)); // preserve pane order
+    for (const g of groups) g.members = g.members.filter((id) => !sel.has(id));
+    groups = groups.filter((g) => g.members.length > 1);
+    groups.push({ id: groupSeq++, members, layout: "grid" });
+    sel.clear();
+    stagedGroup = groups[groups.length - 1].id;
+    setFocus(paneById(members[0]));
+  } else if (stagedGroup) {
+    groups = groups.filter((g) => g.id !== stagedGroup);
+    stagedGroup = null;
+    stageLayout();
+  }
+}
+// Ctrl+Shift+L: cycle the staged group's tile layout.
+function cycleGroupLayout() {
+  const g = groups.find((x) => x.id === stagedGroup); if (!g) return;
+  cycleGroupLayoutFor(g);
+}
+// cycle a specific group's layout (from its card's layout icon); re-tile if it's staged
+function cycleGroupLayoutFor(g) {
+  const order = ["grid", "rows", "main"];
+  g.layout = order[(order.indexOf(g.layout) + 1) % order.length];
+  if (stagedGroup === g.id) stageLayout(); else positionCards();
+}
+// ungroup a specific group (from its card's ⊟ button)
+function ungroupGroup(g) {
+  const wasStaged = stagedGroup === g.id, first = paneById(g.members[0]);
+  groups = groups.filter((x) => x.id !== g.id);
+  if (wasStaged) stagedGroup = null;
+  sel.clear();
+  if (wasStaged && first) setFocus(first); else stageLayout();
+}
+// the contextual "⊞ Group N" pill — visible when 2+ cards are selected
+function updateStageAct() {
+  const el = $("stageact"); if (!el) return;
+  if (SETTINGS.layout === "stage" && sel.size >= 2) { el.style.display = "block"; el.textContent = "⊞ Group " + sel.size + " panes"; el.onclick = toggleGroup; }
+  else el.style.display = "none";
+}
+// Auto-hide rail (right side): reveal near the right edge; hide when the pointer moves left past it.
+document.addEventListener("mousemove", (e) => {
+  if (SETTINGS.layout !== "stage") return;
+  const W = window.innerWidth;
+  const peeking = document.body.classList.contains("stage-peek");
+  const on = e.clientX >= W - (peeking ? STAGE.rail + 60 : STAGE.edge);
+  if (on !== peeking) document.body.classList.toggle("stage-peek", on);
+});
+// Wheel over the (peeking) rail scrolls the cards.
+document.addEventListener("wheel", (e) => {
+  if (SETTINGS.layout !== "stage" || !document.body.classList.contains("stage-peek")) return;
+  if (e.clientX < window.innerWidth - STAGE.rail - 40) return;
+  e.preventDefault();
+  stageScroll(e.deltaY);
+}, { passive: false });
 function renderTabs() {
   const strip = $("tabstrip");
   if (SETTINGS.layout !== "tab") { strip.classList.remove("show"); strip.innerHTML = ""; return; }
@@ -1070,7 +1274,7 @@ function spawnFloat(x, y, w, h, app, attachId) {
     $("canvas").appendChild(win);
     dragWin(win, bar, pane);
     resizeWin(win, grip, pane);
-    win.addEventListener("mousedown", () => { win.style.zIndex = ++zTop; setFocus(pane); });
+    win.addEventListener("mousedown", () => { if (SETTINGS.layout === "stage") return; win.style.zIndex = ++zTop; setFocus(pane); });
     $("hint").style.display = "none";
     pane.open();
     if (SETTINGS.layout === "tab") setFocus(pane); // new tab becomes the visible one
@@ -1746,7 +1950,10 @@ function keyHandler(e, pane) {
     case "arrowright": fw ? snapWin(fw, focused, "right") : (ok = false); break;
     case "arrowup": fw ? askSnapUp(fw, focused) : (ok = false); break; // propose: maximize · split
     case "arrowdown": fw ? restoreWin(fw, focused) : (ok = false); break;
-    case "g": tileGrid(); break;
+    case "g": SETTINGS.layout === "stage" ? toggleGroup() : tileGrid(); break; // stage: group selection / ungroup
+    case "l": SETTINGS.layout === "stage" && stagedGroup ? cycleGroupLayout() : (ok = false); break; // cycle group tile layout
+    case "]": SETTINGS.layout === "stage" ? cycleStage(1) : (ok = false); break;  // stage: next item
+    case "[": SETTINGS.layout === "stage" ? cycleStage(-1) : (ok = false); break; // stage: prev item
     case "m": focused ? minimizePane(focused) : (ok = false); break;
     case ",": case "<": toggleSettings(); break; // Ctrl+Shift+, → settings
     case "p": openPalette(); break; // Ctrl+Shift+P → session palette (search / focus / move here)
