@@ -13,7 +13,6 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use tauri::ipc::Channel;
-use tauri::window::{Effect, EffectsBuilder};
 use tauri::{Emitter, Manager, State, WebviewUrl, WebviewWindowBuilder};
 use tokio::sync::mpsc::{UnboundedSender, unbounded_channel};
 
@@ -217,8 +216,6 @@ fn new_window(app: tauri::AppHandle, state: State<AppState>) -> Result<(), Strin
     )
     .title("kedi — governed terminal")
     .inner_size(960.0, 640.0)
-    .transparent(true)
-    .effects(EffectsBuilder::new().effect(Effect::HudWindow).build())
     .build()
     .map_err(|e| e.to_string())?;
     Ok(())
@@ -430,8 +427,6 @@ fn main() {
             )
             .title("kedi — governed terminal")
             .inner_size(960.0, 640.0)
-            .transparent(true)
-            .effects(EffectsBuilder::new().effect(Effect::HudWindow).build())
             .build()?;
 
             // hot-swap watchers: ui/ → reload the window; plugins/ → notify the frontend (live list).
