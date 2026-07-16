@@ -31,7 +31,7 @@
   }
   * { box-sizing:border-box; }
   html,body { height:100%; margin:0; }
-  body { background:transparent; color:var(--fg); display:flex; flex-direction:column;
+  body { background:var(--bg); color:var(--fg); display:flex; flex-direction:column;
          font:13px/1.5 "FiraCode Nerd Font", ui-monospace, monospace; overflow:hidden; }
   header { display:flex; align-items:center; gap:9px; padding:8px 14px; border-bottom:1px solid var(--edge); flex:0 0 auto; }
   body.no-header header { display:none; }  /* optional top banner (settings ▸ show header) → canvas reclaims the space */
@@ -49,7 +49,7 @@
 
   /* depth via the real Catppuccin surfaces (base → mantle → crust vignette), no off-palette tones */
   #canvas { flex:1 1 auto; min-height:0; position:relative; overflow:hidden; cursor:crosshair;
-            background: transparent; /* transparent so the window's native blur (vibrancy) shows through */
+            background: radial-gradient(1300px 900px at 30% 8%, color-mix(in srgb, var(--term-bg) 88%, #000) 0%, color-mix(in srgb, var(--term-bg) 70%, #000) 64%, #0c0c12 100%);
             transition: background .18s ease; }
   /* the kedi mark — always there, quietly, behind every window */
   #watermark { position:absolute; inset:0; display:flex; flex-direction:column; align-items:center; justify-content:center;
@@ -58,7 +58,7 @@
   #hint { position:absolute; left:0; right:0; top:68%; color:var(--dim); pointer-events:none; text-align:center; }
 
   .floatwin { position:absolute; display:flex; min-width:200px; min-height:130px; border:1px solid var(--edge);
-              border-radius:9px; overflow:hidden; background:transparent; will-change:transform; opacity:.97;
+              border-radius:9px; overflow:hidden; background:var(--term-bg); will-change:transform; opacity:.97;
               box-shadow:0 6px 20px rgba(0,0,0,.45);
               transition: box-shadow .14s ease, opacity .14s ease, border-color .14s ease;
               animation: winIn .12s ease-out; }
@@ -78,10 +78,7 @@
 
   .pane { flex:1 1 0; min-width:0; min-height:0; display:flex; flex-direction:column; background:transparent; overflow:hidden; }
   .panebar { display:flex; align-items:center; gap:8px; padding:3px 9px; font-size:11px; color:var(--dim);
-             background:linear-gradient(
-               color-mix(in srgb, var(--panel) calc(var(--pane-opacity, 1) * 100%), transparent),
-               color-mix(in srgb, #15151f calc(var(--pane-opacity, 1) * 100%), transparent));
-             border-bottom:1px solid var(--edge); flex:0 0 auto; user-select:none; cursor:move; }
+             background:linear-gradient(var(--panel), #15151f); border-bottom:1px solid var(--edge); flex:0 0 auto; user-select:none; cursor:move; }
   .ptitle { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color:var(--fg); }
   .ptitle::before { content:"\f120"; color:var(--dim); margin-right:7px; font-size:11px; } /* nf-fa-terminal */
   .psize { color:var(--dim); font-size:10px; white-space:nowrap; }
@@ -93,7 +90,8 @@
   /* Window controls adapt to the OS (auto-detected, overridable in settings). Three flavors keyed
      off a body class — plat-mac | plat-win | plat-linux. The buttons carry a glyph (::before) that
      only the win/linux flavors reveal; macOS shows bare traffic-light dots. */
-  .wcgroup { display:flex; align-items:center; }
+  /* per-pane window buttons (close/min/max) removed — panes close via `exit`/Ctrl-D or Ctrl+Shift+W */
+  .wcgroup { display:none; }
   .wc { border:none; padding:0; cursor:pointer; background:none; color:var(--dim);
         font-family:ui-monospace,monospace; line-height:1; transition:background .12s, color .12s, opacity .12s, transform .12s; }
   .wc::before { display:none; }
@@ -430,6 +428,21 @@
   body.tabmode .floatwin .wcgroup, body.tabmode .floatwin .grip { display:none; } /* window controls off in tabs */
   body.tabmode #canvas { cursor:default; }
   body.tabmode #taskbar { display:none !important; } /* minimize is a floating-mode concept */
+
+  /* Stage Manager: the focused window fills the stage; the others are LIVE, transform-scaled cards in
+     a left rail (positioned by stageLayout()). They stay real terminals — click one to stage it.
+     Replaces the taskbar. All windows share the stage size, so a swap only animates transform/position
+     (no reflow). */
+  body.stagemode #canvas { cursor:default; }
+  body.stagemode #taskbar { display:none !important; }
+  body.stagemode .floatwin { transition: transform .3s cubic-bezier(.2,.75,.25,1),
+                             left .3s cubic-bezier(.2,.75,.25,1), top .3s cubic-bezier(.2,.75,.25,1); }
+  body.stagemode .floatwin:not(.focused) { transform-origin:top left; cursor:pointer; opacity:.82; }
+  body.stagemode .floatwin:not(.focused):hover { opacity:1; }
+  body.stagemode .floatwin:not(.focused) .paneterm { pointer-events:none; } /* click focuses; don't type the mini view */
+  body.stagemode .floatwin:not(.focused) .wcgroup { display:none; }
+  body.stagemode .floatwin .grip { display:none; }         /* auto-laid-out → no manual resize */
+  body.stagemode .floatwin .panebar { cursor:default; }
 </style>
 
 <div id="settings" class="hide"><div class="card settings-card">
@@ -443,6 +456,7 @@
     <div class="seg" id="set-layout">
       <button data-v="floating">floating</button>
       <button data-v="tab">tabs</button>
+      <button data-v="stage">stage</button>
     </div>
 
     <label for="set-wc">window buttons</label>
@@ -485,9 +499,6 @@
 
     <label for="set-scroll">scrollback <span id="set-scroll-val" class="valtag"></span></label>
     <input type="range" id="set-scroll" min="1000" max="50000" step="1000">
-
-    <label for="set-opacity">background opacity <span id="set-opacity-val" class="valtag"></span></label>
-    <input type="range" id="set-opacity" min="0.5" max="1" step="0.02">
   </div>
   <div class="setfoot">
     <button class="badge btn" id="set-reset">reset to defaults</button>
@@ -570,7 +581,6 @@ const DEFAULT_SETTINGS = {
   fontFamily: FONT,
   cursorStyle: "block",   // block | underline | bar
   cursorBlink: true,
-  opacity: 0.9,           // terminal background opacity (rest shows the window's native blur)
   lineHeight: 1.0,
   letterSpacing: 0,
   scrollback: 10000,
@@ -606,24 +616,13 @@ let SETTINGS = loadSettings();
 function saveSettings() { try { localStorage.setItem("kedi.settings", JSON.stringify(SETTINGS)); } catch (_) {} }
 const activeTheme = () => THEMES[SETTINGS.theme].term;
 
-// #rrggbb → rgba() at the given alpha (for translucent terminal backgrounds over the window blur).
-function hexToRgba(hex, a) {
-  const m = /^#?([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})$/i.exec(hex || "");
-  if (!m) return hex; // already rgba / named → leave as-is
-  const [r, g, b] = [1, 2, 3].map((i) => parseInt(m[i], 16));
-  return `rgba(${r}, ${g}, ${b}, ${a})`;
-}
-
 // Per-pane xterm options derived from SETTINGS (both new panes and live updates read this).
 function xtermOpts() {
-  const th = activeTheme();
   return {
     fontFamily: SETTINGS.fontFamily, fontSize: SETTINGS.fontSize,
     lineHeight: SETTINGS.lineHeight, letterSpacing: SETTINGS.letterSpacing,
     cursorStyle: SETTINGS.cursorStyle, cursorBlink: SETTINGS.cursorBlink,
-    scrollback: SETTINGS.scrollback,
-    allowTransparency: true, // let the translucent background reveal the window blur
-    theme: { ...th, background: hexToRgba(th.background, SETTINGS.opacity) },
+    scrollback: SETTINGS.scrollback, theme: activeTheme(),
   };
 }
 // Push the current settings to every live pane + the audit terminal, tint the canvas to the theme
@@ -633,7 +632,6 @@ function applySettings() {
   applyPlatform();
   const t = THEMES[SETTINGS.theme];
   document.documentElement.style.setProperty("--term-bg", t.term.background);
-  document.documentElement.style.setProperty("--pane-opacity", SETTINGS.opacity); // pane title-bar translucency
   document.body.classList.toggle("no-header", !SETTINGS.header); // hide the top banner when off
   const o = xtermOpts();
   for (const p of allPanes()) Object.assign(p.term.options, o);
@@ -710,6 +708,7 @@ function setFocus(p) {
   }
   document.title = (p.title || ("pane " + p.id)) + " · kedi";
   if (SETTINGS.layout === "tab") { renderTabs(); requestAnimationFrame(() => { try { p.fit.fit(); } catch (_) {} }); }
+  if (SETTINGS.layout === "stage") stageLayout(); // re-stage: focused → stage, others → rail
   try { p.term.focus(); } catch (_) {}
 }
 
@@ -718,13 +717,57 @@ function setFocus(p) {
 // .tab-active one, so the whole window/stream/close machinery is reused untouched — only which
 // window is visible changes. A tab strip mirrors the open windows.
 function setLayout(mode) {
-  SETTINGS.layout = mode === "tab" ? "tab" : "floating";
-  document.body.classList.toggle("tabmode", SETTINGS.layout === "tab");
-  if (SETTINGS.layout === "tab" && focused) setFocus(focused);
+  const prev = SETTINGS.layout;
+  SETTINGS.layout = (mode === "tab" || mode === "stage") ? mode : "floating";
+  const now = SETTINGS.layout;
+  // Stage mode positions windows via inline styles; save the floating styles on enter and restore
+  // them on exit (tab mode gets away with CSS-only, but the rail needs per-window JS positioning).
+  if (now === "stage" && prev !== "stage") {
+    for (const p of allPanes()) p._savedStyle = p.floatwin.style.cssText;
+  } else if (prev === "stage" && now !== "stage") {
+    for (const p of allPanes()) { p.floatwin.style.cssText = p._savedStyle || ""; p._savedStyle = null; }
+  }
+  document.body.classList.toggle("tabmode", now === "tab");
+  document.body.classList.toggle("stagemode", now === "stage");
+  if (now === "tab" && focused) setFocus(focused);
+  if (now === "stage") stageLayout();
   renderTabs();
   requestAnimationFrame(fitAll);
   saveSettings();
   if (!$("settings").classList.contains("hide")) syncSettingsForm();
+}
+
+// Stage Manager layout: focused window on the stage, the rest as live scaled cards in a left rail.
+// Every window is sized to the stage (so a card is a true scaled preview and swapping needs no
+// reflow — only transform/left/top animate). Called on layout change, focus change, new/close, resize.
+const STAGE = { rail: 220, gap: 14, margin: 16 };
+function stageLayout() {
+  if (SETTINGS.layout !== "stage") return;
+  const panes = allPanes();
+  if (!panes.length) return;
+  if (!focused || !panes.includes(focused)) focused = panes[0];
+  const cv = $("canvas"), W = cv.clientWidth, H = cv.clientHeight;
+  const others = panes.filter((p) => p !== focused);
+  const stageLeft = others.length ? STAGE.rail : STAGE.margin;
+  const sw = Math.max(200, W - stageLeft - STAGE.margin);
+  const sh = Math.max(120, H - 2 * STAGE.margin);
+  Object.assign(focused.floatwin.style, {
+    left: stageLeft + "px", top: STAGE.margin + "px", width: sw + "px", height: sh + "px",
+    transform: "none", zIndex: "50", display: "flex",
+  });
+  const cardW = STAGE.rail - 2 * STAGE.margin;
+  const scale = cardW / sw;
+  const slot = sh * scale + STAGE.gap;
+  others.forEach((p, i) => {
+    Object.assign(p.floatwin.style, {
+      left: STAGE.margin + "px", top: (STAGE.margin + i * slot) + "px",
+      width: sw + "px", height: sh + "px", transform: "scale(" + scale + ")", zIndex: "10", display: "flex",
+    });
+  });
+  // fit to the shared stage size (clientWidth ignores the scale, so cards fit correctly too)
+  requestAnimationFrame(() => {
+    for (const p of panes) { try { p.fit.fit(); } catch (_) {} p.send({ resize: [p.term.cols, p.term.rows] }); }
+  });
 }
 function renderTabs() {
   const strip = $("tabstrip");
@@ -762,6 +805,7 @@ function reflowWindows() {
   const prev = _lastCanvas;
   _lastCanvas = { w: nw, h: nh };
   if (SETTINGS.layout === "tab") { fitAll(); return; }
+  if (SETTINGS.layout === "stage") { stageLayout(); return; }
   const rx = prev ? nw / prev.w : 1, ry = prev ? nh / prev.h : 1;
   for (const p of allPanes()) {
     const win = p.floatwin;
@@ -848,10 +892,15 @@ async function makePane(app, attachId) {
   pane.open = () => {
     if (pane.opened) return; pane.opened = true;
     term.open(termEl);
-    // Canvas (2D) renderer: faster than the DOM renderer, and — unlike WebGL — it draws a translucent
-    // background cleanly (no flicker/brightness pulse or glyph corruption in WKWebView). WebGL stays
-    // vendored (window.WebglAddon) for a future opt-in "special feature" pane; normal panes use Canvas.
-    try { term.loadAddon(new CanvasAddon.CanvasAddon()); } catch (e) { console.error("[kedi] canvas addon:", e); }
+    // GPU (WebGL) renderer. Backgrounds are opaque (transparency made WebGL flicker) and there's NO
+    // desynchronized context (that caused glyph-atlas corruption in WKWebView) — so it's fast and
+    // clean. Rebuild the atlas once the vendored Nerd Font is ready so no tofu is cached. (Canvas
+    // addon stays vendored as a fallback.)
+    try {
+      const webgl = new WebglAddon.WebglAddon();
+      term.loadAddon(webgl);
+      document.fonts.ready.then(() => { try { webgl.clearTextureAtlas(); } catch (_) {} });
+    } catch (e) { console.error("[kedi] webgl addon:", e); }
     requestAnimationFrame(() => {
       try { fit.fit(); } catch (e) { console.error("[kedi] fit:", e); }
       size.textContent = `${term.cols}×${term.rows}`;
@@ -943,7 +992,8 @@ function closePane(p) {
     // allPanes() already excludes p (p.closing is set). In tab mode, reveal a survivor; either way
     // rebuild the strip so the closed tab's chip is gone.
     const next = allPanes()[0];
-    if (SETTINGS.layout === "tab" && next) setFocus(next); // setFocus() calls renderTabs()
+    if ((SETTINGS.layout === "tab" || SETTINGS.layout === "stage") && next) setFocus(next); // setFocus() re-lays out
+    else if (SETTINGS.layout === "stage") stageLayout(); // last one closed / restack the rail
     else renderTabs();
     // closed the last window in this tab → maybe offer to stop the whole server (if we're the last tab)
     if (!document.querySelector(".floatwin")) maybeOfferShutdown();
@@ -1024,6 +1074,7 @@ function spawnFloat(x, y, w, h, app, attachId) {
     $("hint").style.display = "none";
     pane.open();
     if (SETTINGS.layout === "tab") setFocus(pane); // new tab becomes the visible one
+    if (SETTINGS.layout === "stage") { pane._savedStyle = pane.floatwin.style.cssText; setFocus(pane); } // stage it
     renderTabs();
   });
 }
@@ -1472,7 +1523,11 @@ function openAudit() {
   if (!au.term) {
     au.term = new Terminal({ fontFamily: SETTINGS.fontFamily, fontSize: 13, lineHeight: 1.0, cursorBlink: false, scrollback: 8000, disableStdin: true, theme: activeTheme() });
     au.fit = new FitAddon.FitAddon(); au.term.loadAddon(au.fit); au.term.open($("au-term"));
-    try { au.term.loadAddon(new CanvasAddon.CanvasAddon()); } catch (_) {}
+    try {
+      const awgl = new WebglAddon.WebglAddon();
+      au.term.loadAddon(awgl);
+      document.fonts.ready.then(() => { try { awgl.clearTextureAtlas(); } catch (_) {} });
+    } catch (_) {}
   }
   requestAnimationFrame(() => { try { au.fit.fit(); } catch (_) {} });
   renderRecState();
@@ -1615,7 +1670,6 @@ function syncSettingsForm() {
   $("set-lh").value = SETTINGS.lineHeight; $("set-lh-val").textContent = SETTINGS.lineHeight.toFixed(2);
   $("set-ls").value = SETTINGS.letterSpacing; $("set-ls-val").textContent = SETTINGS.letterSpacing;
   $("set-scroll").value = SETTINGS.scrollback; $("set-scroll-val").textContent = SETTINGS.scrollback.toLocaleString();
-  $("set-opacity").value = SETTINGS.opacity; $("set-opacity-val").textContent = Math.round(SETTINGS.opacity * 100) + "%";
   for (const b of $("set-cursor").children) b.classList.toggle("on", b.dataset.v === SETTINGS.cursorStyle);
   for (const b of $("set-layout").children) b.classList.toggle("on", b.dataset.v === SETTINGS.layout);
   for (const b of $("set-wc").children) b.classList.toggle("on", b.dataset.v === SETTINGS.winControls);
@@ -1635,7 +1689,6 @@ $("set-header").addEventListener("change", (e) => { SETTINGS.header = e.target.c
 $("set-lh").addEventListener("input", (e) => setOpt("lineHeight", Number(e.target.value)));
 $("set-ls").addEventListener("input", (e) => setOpt("letterSpacing", Number(e.target.value)));
 $("set-scroll").addEventListener("input", (e) => setOpt("scrollback", Number(e.target.value)));
-$("set-opacity").addEventListener("input", (e) => setOpt("opacity", Number(e.target.value)));
 $("set-cursor").addEventListener("click", (e) => { const b = e.target.closest("button"); if (b) setOpt("cursorStyle", b.dataset.v); });
 $("set-layout").addEventListener("click", (e) => { const b = e.target.closest("button"); if (b) setLayout(b.dataset.v); });
 $("set-wc").addEventListener("click", (e) => { const b = e.target.closest("button"); if (b) { SETTINGS.winControls = b.dataset.v; applyPlatform(); saveSettings(); syncSettingsForm(); } });
