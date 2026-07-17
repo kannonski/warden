@@ -33,7 +33,7 @@ struct AppState {
     panes: Mutex<HashMap<u64, UnboundedSender<Vec<u8>>>>,
 }
 
-/// The hot-swappable UI directory: ~/Library/Application Support/com.unblu.kedi/ui (macOS).
+/// The hot-swappable UI directory: ~/Library/Application Support/dev.kedi.terminal/ui (macOS).
 fn ui_dir(app: &tauri::AppHandle) -> PathBuf {
     app.path().app_data_dir().expect("app_data_dir").join("ui")
 }
