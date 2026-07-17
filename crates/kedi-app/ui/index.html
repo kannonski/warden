@@ -245,8 +245,7 @@
   </div>
   <div id="hint">double-click for a terminal · drag to draw one · <kbd>Ctrl+Shift+↵</kbd> new pane · <kbd>Ctrl+Shift+N</kbd> new window · <kbd>Ctrl+Shift+P</kbd> sessions</div>
   <div id="ctxmenu"></div>
-  <div id="stagelabels"></div>
-  <button id="stageact"></button>
+  <div id="stagehit"></div>
   <div id="palette"><div id="pal-box">
     <input id="pal-in" type="text" placeholder="type to filter every pane across your tabs — ↵ focus / move here · esc close" autocomplete="off" spellcheck="false">
     <div id="pal-grid"></div>
@@ -441,34 +440,35 @@
   body.stagemode #canvas { cursor:default; }
   body.stagemode #taskbar { display:none !important; }
   body.stagemode .floatwin { transition: transform .28s cubic-bezier(.2,.75,.25,1), top .2s ease; }
-  /* rail cards = windows NOT on the stage (a group tiles several ON the stage, so key off on-stage) */
-  body.stagemode .floatwin:not(.on-stage) { transform-origin:top left; cursor:pointer; opacity:.8;
+  /* rail previews (NOT on stage) are inert — an overlay hit-card owns all input; keeps terminals out of it */
+  body.stagemode .floatwin:not(.on-stage) { transform-origin:top left; pointer-events:none; opacity:.82;
                                              box-shadow:0 6px 24px rgba(0,0,0,.45); }
-  body.stagemode .floatwin:not(.on-stage):hover { opacity:1; }
-  body.stagemode .floatwin:not(.on-stage) .paneterm { pointer-events:none; } /* click focuses; don't type the mini view */
-  body.stagemode .floatwin.selected { outline:2px solid #a6e3a1; outline-offset:-2px; }        /* selected for grouping */
   body.stagemode .floatwin.on-stage.focused { box-shadow:inset 0 0 0 2px var(--focus); }        /* active tile in a group */
   body.stagemode .floatwin .grip { display:none; }         /* auto-laid-out → no manual resize */
   body.stagemode .floatwin .panebar { cursor:default; }
-  /* rail card titles (a readable label under each card, so panes are easy to tell apart) */
-  #stagelabels { position:absolute; inset:0; pointer-events:none; z-index:70; display:none; }
-  body.stagemode #stagelabels { display:block; }
-  .stagelabel { position:absolute; height:20px; line-height:16px; font-size:11px; color:var(--fg);
-                background:var(--panel); border:1px solid var(--edge); border-radius:6px; padding:1px 8px;
-                overflow:hidden; text-overflow:ellipsis; white-space:nowrap; box-sizing:border-box;
-                pointer-events:auto; cursor:pointer; transition:transform .28s cubic-bezier(.2,.75,.25,1), top .2s ease; }
-  .stagelabel.selected { border-color:#a6e3a1; color:#a6e3a1; }
-  .stagelabel.group { display:flex; align-items:center; gap:6px; }
-  .stagelabel.group .txt { flex:1 1 auto; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-  .stagelabel.group .lyt, .stagelabel.group .ung { flex:0 0 auto; opacity:.6; padding:0 2px; border-radius:4px; }
-  .stagelabel.group .lyt:hover, .stagelabel.group .ung:hover { opacity:1; background:var(--edge); }
+  /* overlay layer: one interactive hit-card per pane + labels + group frames. Slides with the rail. */
+  #stagehit { position:absolute; inset:0; pointer-events:none; z-index:80; display:none;
+              transform:translateX(var(--peek-x, 260px)); transition:transform .28s cubic-bezier(.2,.75,.25,1); }
+  body.stagemode #stagehit { display:block; }
+  .hitcard { position:absolute; pointer-events:auto; cursor:grab; border-radius:8px; box-sizing:border-box; }
+  .hitcard:hover { outline:2px solid var(--edge); outline-offset:-2px; }
+  .hitcard.drop-target { outline:2px dashed var(--focus); outline-offset:-2px; background:rgba(137,180,250,.12); }
+  .groupframe { position:absolute; pointer-events:none; border:1px solid var(--edge); border-radius:12px;
+                background:rgba(255,255,255,.03); box-sizing:border-box; }
+  .cardlabel { position:absolute; height:20px; line-height:16px; font-size:11px; color:var(--fg);
+               background:var(--panel); border:1px solid var(--edge); border-radius:6px; padding:1px 8px;
+               overflow:hidden; text-overflow:ellipsis; white-space:nowrap; box-sizing:border-box;
+               pointer-events:auto; cursor:pointer; transition:top .2s ease; }
+  .cardlabel.group { display:flex; align-items:center; gap:6px; }
+  .cardlabel.group .txt { flex:1 1 auto; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .cardlabel.group .lyt, .cardlabel.group .ung { flex:0 0 auto; opacity:.6; padding:0 2px; border-radius:4px; cursor:pointer; }
+  .cardlabel.group .lyt:hover, .cardlabel.group .ung:hover { opacity:1; background:var(--edge); }
   /* subtle lift on card hover */
   body.stagemode .floatwin:not(.on-stage) { transition: transform .28s cubic-bezier(.2,.75,.25,1), top .2s ease, opacity .15s; }
-  /* contextual "group" action pill — appears when 2+ cards are selected */
-  #stageact { position:fixed; left:50%; bottom:24px; transform:translateX(-50%); display:none; z-index:90;
-              background:var(--focus); color:#1e1e2e; border:none; border-radius:999px; padding:8px 16px;
-              font:inherit; font-size:13px; font-weight:600; cursor:pointer; box-shadow:0 6px 24px rgba(0,0,0,.5); }
-  #stageact:hover { filter:brightness(1.08); }
+  /* drag-to-group: a cursor-following ghost + a dashed outline on the card you'd drop onto */
+  .dragghost { position:fixed; z-index:1000; pointer-events:none; background:var(--focus); color:#1e1e2e;
+               font-size:11px; font-weight:600; padding:3px 9px; border-radius:6px; box-shadow:0 4px 16px rgba(0,0,0,.5); }
+  body.dragging, body.dragging * { cursor:grabbing !important; }
 </style>
 
 <div id="settings" class="hide"><div class="card settings-card">
@@ -756,9 +756,8 @@ function setLayout(mode) {
       p.floatwin.onmousedown = null; p.floatwin.onclick = null;
       p.floatwin.style.cssText = p._savedStyle || ""; p._savedStyle = null;
     }
-    document.body.classList.remove("stage-peek"); $("stagelabels").innerHTML = "";
-    $("stageact").style.display = "none";
-    railScroll = 0; stagedGroup = null; sel.clear();
+    document.body.classList.remove("stage-peek"); $("stagehit").innerHTML = "";
+    railScroll = 0; stagedGroup = null; dragging = false;
   }
   document.body.classList.toggle("tabmode", now === "tab");
   document.body.classList.toggle("stagemode", now === "stage");
@@ -775,10 +774,10 @@ function setLayout(mode) {
 // reflow — only transform/left/top animate). Called on layout change, focus change, new/close, resize.
 const STAGE = { rail: 210, cardW: 178, gap: 16, margin: 16, labelH: 22, edge: 14 };
 let railScroll = 0;
+let dragging = false;   // a rail card is being dragged (pauses the peek auto-hide)
 let groups = [];        // persistent sets: { id, members:[paneId,...], layout:"grid"|"rows"|"main" }
 let groupSeq = 1;
 let stagedGroup = null; // group id tiled on the stage (null = a single pane is staged)
-const sel = new Set();  // paneIds selected in the rail (Cmd/Ctrl-click) for grouping
 const LAYOUT_ICON = { grid: "▦", rows: "▤", main: "◨" };
 
 function paneById(id) { return allPanes().find((p) => p.id === id) || null; }
@@ -829,7 +828,7 @@ function tileGroup(g, x, y, w, h) {
 // Position the staged item (single pane full-canvas, or a group tiled) + the rail cards for the OTHER
 // items (representative live pane, scaled, auto-hiding) + labels + selection.
 function positionCards() {
-  const labels = $("stagelabels"); if (labels) labels.innerHTML = "";
+  const hit = $("stagehit"); if (hit) hit.innerHTML = "";
   if (SETTINGS.layout !== "stage") return null;
   const panes = allPanes();
   if (!panes.length) return null;
@@ -849,57 +848,133 @@ function positionCards() {
   }
 
   const items = stageItems().filter((it) => it.group ? it.group.id !== stagedGroup : !staged.includes(it.pane));
-  const scale = STAGE.cardW / sw, cardH = sh * scale, slot = cardH + STAGE.labelH + STAGE.gap;
-  const viewH = H - 2 * STAGE.margin, contentH = Math.max(0, items.length * slot - STAGE.gap);
-  railScroll = Math.min(Math.max(0, railScroll), Math.max(0, contentH - viewH));
-  const cardLeft = W - STAGE.margin - STAGE.cardW, startTop = STAGE.margin + Math.max(0, (viewH - contentH) / 2);
-  // hide non-representative members of rail groups
-  for (const it of items) if (it.group) groupPanes(it.group).slice(1).forEach((p) => { p.floatwin.style.display = "none"; });
-  items.forEach((it, i) => {
-    const rep = it.group ? groupPanes(it.group)[0] : it.pane;
-    if (!rep) return;
-    const top = startTop + i * slot - railScroll;
-    const vis = top + cardH + STAGE.labelH > 0 && top < H;
-    const win = rep.floatwin;
-    Object.assign(win.style, { left: cardLeft + "px", top: top + "px", width: sw + "px", height: sh + "px", transform: "translateX(var(--peek-x, 260px)) scale(" + scale + ")", zIndex: "60", display: vis ? "flex" : "none" });
-    const isSel = it.group ? it.group.members.every((id) => sel.has(id)) : sel.has(it.pane.id);
-    win.classList.toggle("selected", !!isSel);
-    win.onclick = (e) => cardClick(it, e);
-    if (labels && vis) {
-      const chip = document.createElement("div");
-      Object.assign(chip.style, { left: cardLeft + "px", top: (top + cardH + 2) + "px", width: STAGE.cardW + "px", transform: "translateX(var(--peek-x, 260px))" });
-      if (it.group) {
-        chip.className = "stagelabel group" + (isSel ? " selected" : "");
-        const names = groupPanes(it.group).map((p) => p.title || ("#" + p.id)).join(", ");
-        const lyt = document.createElement("span"); lyt.className = "lyt"; lyt.textContent = LAYOUT_ICON[it.group.layout] || "▦";
-        lyt.title = "layout: " + it.group.layout + " — click to change";
-        lyt.addEventListener("click", (e) => { e.stopPropagation(); cycleGroupLayoutFor(it.group); });
-        const txt = document.createElement("span"); txt.className = "txt"; txt.textContent = it.group.members.length + " · " + names; txt.title = names;
-        const ung = document.createElement("span"); ung.className = "ung"; ung.textContent = "⊟"; ung.title = "ungroup";
-        ung.addEventListener("click", (e) => { e.stopPropagation(); ungroupGroup(it.group); });
-        chip.append(lyt, txt, ung);
-      } else {
-        chip.className = "stagelabel" + (isSel ? " selected" : "");
-        chip.textContent = rep.title || ("pane " + rep.id);
-        chip.title = chip.textContent;
-      }
-      chip.addEventListener("click", (e) => cardClick(it, e));
-      labels.appendChild(chip);
-    }
+  const cardLeft = W - STAGE.margin - STAGE.cardW, soloScale = STAGE.cardW / sw, ig = 6;
+  // rows: a solo pane is one card; a group shows its members in PARALLEL (side by side, smaller)
+  const rows = items.map((it) => {
+    if (it.pane) return { it, h: sh * soloScale };
+    const n = groupPanes(it.group).length || 1, mw = (STAGE.cardW - (n - 1) * ig) / n;
+    return { it, h: sh * (mw / sw), mw, s: mw / sw };
   });
-  updateStageAct();
+  const viewH = H - 2 * STAGE.margin;
+  const contentH = Math.max(0, rows.reduce((a, r) => a + r.h + STAGE.labelH + STAGE.gap, 0) - STAGE.gap);
+  railScroll = Math.min(Math.max(0, railScroll), Math.max(0, contentH - viewH));
+  let y = STAGE.margin + Math.max(0, (viewH - contentH) / 2) - railScroll;
+  for (const row of rows) {
+    const it = row.it, ytop = y, vis = ytop + row.h + STAGE.labelH > 0 && ytop < H;
+    if (it.pane) {
+      placeCardVisual(it.pane, cardLeft, ytop, soloScale, sw, sh, vis);
+      if (vis) { hitCard(it.pane, cardLeft, ytop, STAGE.cardW, row.h); soloLabel(it.pane, cardLeft, ytop + row.h); }
+    } else {
+      const ps = groupPanes(it.group);
+      if (vis) groupFrame(cardLeft, ytop, STAGE.cardW, row.h);
+      ps.forEach((p, j) => {
+        const x = cardLeft + j * (row.mw + ig);
+        placeCardVisual(p, x, ytop, row.s, sw, sh, vis);
+        if (vis) hitCard(p, x, ytop, row.mw, row.h);
+      });
+      if (vis) groupLabel(it.group, cardLeft, ytop + row.h, STAGE.cardW);
+    }
+    y += row.h + STAGE.labelH + STAGE.gap;
+  }
   return staged;
 }
-// rail click: Cmd/Ctrl toggles selection (of the item's panes); plain click stages the item.
-function cardClick(it, e) {
-  if (e && (e.metaKey || e.ctrlKey)) {
-    const ids = it.group ? it.group.members : [it.pane.id];
-    const all = ids.every((id) => sel.has(id));
-    ids.forEach((id) => all ? sel.delete(id) : sel.add(id));
-    positionCards();
-    return;
+// live preview only — inert (pointer-events:none in CSS); the overlay hit-card handles input
+function placeCardVisual(p, x, ytop, s, sw, sh, vis) {
+  Object.assign(p.floatwin.style, { left: x + "px", top: ytop + "px", width: sw + "px", height: sh + "px",
+    transform: "translateX(var(--peek-x, 260px)) scale(" + s + ")", zIndex: "60", display: vis ? "flex" : "none" });
+}
+// one interactive overlay per pane, in #stagehit (which slides with the rail). Owns click + drag.
+function hitCard(pane, x, ytop, w, h) {
+  const hit = $("stagehit"); if (!hit) return;
+  const card = document.createElement("div"); card.className = "hitcard"; card._pane = pane;
+  Object.assign(card.style, { left: x + "px", top: ytop + "px", width: w + "px", height: h + "px" });
+  attachDrag(card, pane);
+  hit.appendChild(card);
+}
+function soloLabel(pane, x, ytop) {
+  const hit = $("stagehit"); if (!hit) return;
+  const lab = document.createElement("div"); lab.className = "cardlabel";
+  Object.assign(lab.style, { left: x + "px", top: (ytop + 2) + "px", width: STAGE.cardW + "px" });
+  lab.textContent = pane.title || ("pane " + pane.id); lab.title = lab.textContent;
+  lab.onclick = () => setFocus(pane);
+  hit.appendChild(lab);
+}
+function groupFrame(x, ytop, w, h) {
+  const hit = $("stagehit"); if (!hit) return;
+  const f = document.createElement("div"); f.className = "groupframe";
+  Object.assign(f.style, { left: (x - 4) + "px", top: (ytop - 4) + "px", width: (w + 8) + "px", height: (h + 8) + "px" });
+  hit.appendChild(f);
+}
+function groupLabel(g, x, ytop, w) {
+  const hit = $("stagehit"); if (!hit) return;
+  const lab = document.createElement("div"); lab.className = "cardlabel group";
+  Object.assign(lab.style, { left: x + "px", top: (ytop + 2) + "px", width: w + "px" });
+  const lyt = document.createElement("span"); lyt.className = "lyt"; lyt.textContent = LAYOUT_ICON[g.layout] || "▦";
+  lyt.title = "layout: " + g.layout; lyt.onclick = (e) => { e.stopPropagation(); cycleGroupLayoutFor(g); };
+  const txt = document.createElement("span"); txt.className = "txt";
+  txt.textContent = groupPanes(g).map((p) => p.title || ("#" + p.id)).join(", "); txt.title = txt.textContent;
+  txt.onclick = () => setFocus(groupPanes(g)[0]);
+  const ung = document.createElement("span"); ung.className = "ung"; ung.textContent = "⊟"; ung.title = "ungroup";
+  ung.onclick = (e) => { e.stopPropagation(); ungroupGroup(g); };
+  lab.append(lyt, txt, ung);
+  hit.appendChild(lab);
+}
+// Pointer-capture drag on an overlay card: move>threshold = drag (group/ungroup), no move = click (stage).
+function attachDrag(card, pane) {
+  card.addEventListener("pointerdown", (e) => {
+    if (e.button !== 0) return;
+    e.preventDefault();
+    try { card.setPointerCapture(e.pointerId); } catch (_) {}
+    const x0 = e.clientX, y0 = e.clientY; let active = false, ghost = null;
+    dragging = true;
+    const move = (ev) => {
+      if (!active) {
+        if (Math.abs(ev.clientX - x0) + Math.abs(ev.clientY - y0) < 6) return;
+        active = true;
+        ghost = document.createElement("div"); ghost.className = "dragghost";
+        ghost.textContent = pane.title || ("pane " + pane.id);
+        document.body.appendChild(ghost); document.body.classList.add("dragging");
+      }
+      ghost.style.left = (ev.clientX + 14) + "px"; ghost.style.top = (ev.clientY + 14) + "px";
+      const t = hitCardUnder(ev.clientX, ev.clientY, card);
+      for (const c of $("stagehit").children) if (c.classList.contains("hitcard")) c.classList.toggle("drop-target", c === t);
+    };
+    const up = (ev) => {
+      card.removeEventListener("pointermove", move); card.removeEventListener("pointerup", up);
+      dragging = false;
+      if (ghost) ghost.remove();
+      document.body.classList.remove("dragging");
+      for (const c of $("stagehit").children) c.classList.remove("drop-target");
+      if (!active) { setFocus(pane); return; }
+      const t = hitCardUnder(ev.clientX, ev.clientY, card);
+      if (t && t._pane) dropGroup(pane, t._pane); else dropOut(pane);
+    };
+    card.addEventListener("pointermove", move); card.addEventListener("pointerup", up);
+  });
+}
+function hitCardUnder(x, y, exclude) {
+  for (const c of $("stagehit").children) {
+    if (c === exclude || !c.classList.contains("hitcard")) continue;
+    const r = c.getBoundingClientRect();
+    if (x >= r.left && x <= r.right && y >= r.top && y <= r.bottom) return c;
   }
-  setFocus(it.group ? groupPanes(it.group)[0] : it.pane); // setFocus stages the right item
+  return null;
+}
+// drag src onto dst → put src in dst's group (creating one around dst if needed; merging if both grouped)
+function dropGroup(src, dst) {
+  if (src === dst) return;
+  let target = groupOf(dst);
+  if (!target) { target = { id: groupSeq++, members: [dst.id], layout: "grid" }; groups.push(target); }
+  const gs = groupOf(src); if (gs && gs !== target) gs.members = gs.members.filter((id) => id !== src.id);
+  if (!target.members.includes(src.id)) target.members.push(src.id);
+  groups = groups.filter((g) => g.members.length >= 2 || g === target);
+  positionCards();
+}
+// drag a card out onto empty rail → remove it from its group (dissolves the group if <2 remain)
+function dropOut(src) {
+  const g = groupOf(src);
+  if (g) { g.members = g.members.filter((id) => id !== src.id); groups = groups.filter((x) => x.members.length >= 2); }
+  positionCards();
 }
 function stageLayout() {
   if (SETTINGS.layout !== "stage") return;
@@ -916,23 +991,7 @@ function cycleStage(dir) {
   const it = items[(i + dir + items.length) % items.length];
   setFocus(it.group ? groupPanes(it.group)[0] : it.pane);
 }
-// Ctrl+Shift+G: bind the selection (>=2) into a group; with no selection, ungroup the staged group.
-function toggleGroup() {
-  if (SETTINGS.layout !== "stage") return;
-  if (sel.size >= 2) {
-    const members = allPanes().map((p) => p.id).filter((id) => sel.has(id)); // preserve pane order
-    for (const g of groups) g.members = g.members.filter((id) => !sel.has(id));
-    groups = groups.filter((g) => g.members.length > 1);
-    groups.push({ id: groupSeq++, members, layout: "grid" });
-    sel.clear();
-    stagedGroup = groups[groups.length - 1].id;
-    setFocus(paneById(members[0]));
-  } else if (stagedGroup) {
-    groups = groups.filter((g) => g.id !== stagedGroup);
-    stagedGroup = null;
-    stageLayout();
-  }
-}
+// (grouping is drag & drop now — see railMouseDown / dropGroup / dropOut; ungroup via the card's ⊟ or drag-out)
 // Ctrl+Shift+L: cycle the staged group's tile layout.
 function cycleGroupLayout() {
   const g = groups.find((x) => x.id === stagedGroup); if (!g) return;
@@ -949,18 +1008,11 @@ function ungroupGroup(g) {
   const wasStaged = stagedGroup === g.id, first = paneById(g.members[0]);
   groups = groups.filter((x) => x.id !== g.id);
   if (wasStaged) stagedGroup = null;
-  sel.clear();
   if (wasStaged && first) setFocus(first); else stageLayout();
-}
-// the contextual "⊞ Group N" pill — visible when 2+ cards are selected
-function updateStageAct() {
-  const el = $("stageact"); if (!el) return;
-  if (SETTINGS.layout === "stage" && sel.size >= 2) { el.style.display = "block"; el.textContent = "⊞ Group " + sel.size + " panes"; el.onclick = toggleGroup; }
-  else el.style.display = "none";
 }
 // Auto-hide rail (right side): reveal near the right edge; hide when the pointer moves left past it.
 document.addEventListener("mousemove", (e) => {
-  if (SETTINGS.layout !== "stage") return;
+  if (SETTINGS.layout !== "stage" || dragging) return; // keep the rail open while dragging a card
   const W = window.innerWidth;
   const peeking = document.body.classList.contains("stage-peek");
   const on = e.clientX >= W - (peeking ? STAGE.rail + 60 : STAGE.edge);
@@ -1161,7 +1213,7 @@ async function makePane(app, attachId) {
   term.attachCustomKeyEventHandler((e) => keyHandler(e, pane));
   term.onData((d) => pane.send({ input: d }));
   term.onResize(({ cols, rows }) => { pane.send({ resize: [cols, rows] }); size.textContent = `${cols}×${rows}`; });
-  wrapper.addEventListener("mousedown", () => setFocus(pane));
+  wrapper.addEventListener("mousedown", () => { if (SETTINGS.layout !== "stage") setFocus(pane); }); // stage: handled by railMouseDown / tile focus
 
   // Output: Rust streams this pane's bytes over a per-pane Channel (base64). Session end (shell exit /
   // kill) arrives as a `pane-exit` event (see the global listener) → closePane.
@@ -1520,6 +1572,7 @@ function edgeZone(x, y, W, H) {
 
 function dragWin(win, handle, pane) {
   handle.addEventListener("mousedown", (e) => {
+    if (SETTINGS.layout === "stage") return; // stage mode auto-lays-out; card drags are for grouping
     if (e.target.classList.contains("pkill")) return;
     e.preventDefault();
     win.style.zIndex = ++zTop;
@@ -1950,7 +2003,7 @@ function keyHandler(e, pane) {
     case "arrowright": fw ? snapWin(fw, focused, "right") : (ok = false); break;
     case "arrowup": fw ? askSnapUp(fw, focused) : (ok = false); break; // propose: maximize · split
     case "arrowdown": fw ? restoreWin(fw, focused) : (ok = false); break;
-    case "g": SETTINGS.layout === "stage" ? toggleGroup() : tileGrid(); break; // stage: group selection / ungroup
+    case "g": SETTINGS.layout === "stage" ? (ok = false) : tileGrid(); break; // floating: grid-arrange (stage groups by drag)
     case "l": SETTINGS.layout === "stage" && stagedGroup ? cycleGroupLayout() : (ok = false); break; // cycle group tile layout
     case "]": SETTINGS.layout === "stage" ? cycleStage(1) : (ok = false); break;  // stage: next item
     case "[": SETTINGS.layout === "stage" ? cycleStage(-1) : (ok = false); break; // stage: prev item
