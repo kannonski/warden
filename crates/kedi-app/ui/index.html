@@ -208,6 +208,7 @@
 
 <div id="search">
   <input id="search-input" placeholder="find in window…" autocomplete="off" spellcheck="false">
+  <span id="search-count" class="hint2"></span>
   <span class="hint2">↵ next · ⇧↵ prev · esc close</span>
 </div>
 <style>
@@ -1442,6 +1443,14 @@ async function makePane(app, attachId) {
   // on prompt/autocomplete redraws — the #1 cause of "cursor won't return to origin")
   try { term.loadAddon(new Unicode11Addon.Unicode11Addon()); term.unicode.activeVersion = "11"; } catch (_) {}
   pane.term = term; pane.fit = fit; pane.search = search;
+  try { // live "3/12" match count in the find bar (focused pane only)
+    search.onDidChangeResults((e) => {
+      if (pane !== focused) return;
+      const el = $("search-count");
+      if (!e || e.resultCount === undefined) { el.textContent = ""; }
+      else el.textContent = e.resultCount ? ((e.resultIndex >= 0 ? e.resultIndex + 1 : "–") + " / " + e.resultCount) : "no match";
+    });
+  } catch (_) {}
   pane.send = (o) => { if (pane.connected) invoke("pane_send", { sid: pane.sid, line: JSON.stringify(o) }); };
 
   // ── shell integration: OSC 7 (cwd) + OSC 133 (command marks) emitted by the injected zsh hooks ──
@@ -1507,7 +1516,7 @@ async function makePane(app, attachId) {
   // inside the terminal — the canvas right-click menu outside panes stays). Middle-click pastes
   // too: with copy-on-select, Linux select→middle-click muscle memory just works.
   term.onSelectionChange(() => {
-    const s = term.getSelection();
+    const s = cleanSel(term.getSelection());
     if (s) clipWrite(s);
   });
   termEl.addEventListener("contextmenu", (e) => { e.preventDefault(); e.stopPropagation(); pasteInto(pane); });
@@ -1906,17 +1915,34 @@ document.addEventListener("mousedown", (e) => { if (!e.target.closest("#ctxmenu"
 document.addEventListener("keydown", (e) => { if (e.key === "Escape") hideCtx(); });
 
 // ── search / clipboard ──
+// highlight EVERY match (not just the active one) + a scrollbar tick per match; the active match is
+// brighter. Colors pulled from the theme accents so it reads in light and dark.
+const SEARCH_DEC = {
+  matchBackground: "#5b3ba0", matchOverviewRuler: "#cba6f7",
+  activeMatchBackground: "#f9e2af", activeMatchColorOverviewRuler: "#f9e2af",
+};
+function runSearch(dir) {
+  if (!focused) return;
+  const q = $("search-input").value;
+  if (!q) { focused.search.clearDecorations(); $("search-count").textContent = ""; return; }
+  const opts = { decorations: SEARCH_DEC };
+  if (dir === 0) opts.incremental = true;
+  focused.search[dir < 0 ? "findPrevious" : "findNext"](q, opts);
+}
 function toggleSearch(show) {
   const box = $("search"); const on = show ?? box.style.display !== "flex";
   box.style.display = on ? "flex" : "none";
-  if (on) { $("search-input").value = ""; $("search-input").focus(); } else if (focused) focused.term.focus();
+  if (on) { $("search-input").value = ""; $("search-count").textContent = ""; $("search-input").focus(); }
+  else { if (focused) { try { focused.search.clearDecorations(); } catch (_) {} focused.term.focus(); } }
 }
-$("search-input").addEventListener("input", (e) => focused && focused.search.findNext(e.target.value, { incremental: true }));
+$("search-input").addEventListener("input", () => runSearch(0));
 $("search-input").addEventListener("keydown", (e) => {
-  if (e.key === "Enter") { e.preventDefault(); focused && focused.search[e.shiftKey ? "findPrevious" : "findNext"]($("search-input").value); }
+  if (e.key === "Enter") { e.preventDefault(); runSearch(e.shiftKey ? -1 : 1); }
   else if (e.key === "Escape") { e.preventDefault(); toggleSearch(false); }
 });
-function copySel(p) { const s = p.term.getSelection(); if (s) clipWrite(s); }
+// trim trailing padding whitespace each line so copied text is clean (terminals pad cells with spaces)
+function cleanSel(s) { return (s || "").replace(/[ \t]+$/gm, ""); }
+function copySel(p) { const s = cleanSel(p.term.getSelection()); if (s) clipWrite(s); }
 async function pasteInto(p) {
   // try an image on the clipboard first (→ save-and-type-path via the pty op); else paste text. The
   // image path uses navigator.clipboard.read when the webview allows it (best-effort); text always
@@ -2236,6 +2262,7 @@ function keyHandler(e, pane) {
     const mk = e.key.toLowerCase();
     if (mk === "c") { copySel(pane); e._kediHandled = true; e.preventDefault(); return false; }
     if (mk === "v") { pasteInto(pane); e._kediHandled = true; e.preventDefault(); return false; }
+    if (mk === "a") { try { pane.term.selectAll(); } catch (_) {} e._kediHandled = true; e.preventDefault(); return false; } // ⌘A select all
     if (e.key === "Enter") { toggleZoom(); e._kediHandled = true; e.preventDefault(); return false; } // ⌘↵ zoom
     if (mk >= "1" && mk <= "9") { jumpToTab(Number(mk)); e._kediHandled = true; e.preventDefault(); return false; } // ⌘1–9 → tab N
     if (e.key === "ArrowUp") { cmdNav(pane, -1); e._kediHandled = true; e.preventDefault(); return false; } // ⌘↑ prev command
