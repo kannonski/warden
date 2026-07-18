@@ -12,7 +12,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use tauri::ipc::Channel;
+use tauri::ipc::{Channel, InvokeResponseBody};
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem, Submenu};
 use tauri::{Emitter, Manager, State, WebviewUrl, WebviewWindowBuilder};
 use tokio::sync::mpsc::{UnboundedSender, unbounded_channel};
@@ -169,18 +169,25 @@ fn open_pane(
     app: tauri::AppHandle,
     window: tauri::WebviewWindow,
     state: State<AppState>,
-    on_output: Channel<String>,
+    on_output: Channel<InvokeResponseBody>,
 ) -> Result<u64, String> {
     let (msg_tx, msg_rx) = unbounded_channel::<Vec<u8>>();
     let (out_tx, mut out_rx) = unbounded_channel::<Vec<u8>>();
     let handle = state.rt.handle().clone();
 
-    // output pump: warden pane bytes → the webview channel, base64-framed (pty output is binary and
-    // not always valid UTF-8; base64 is ~1.33x vs a ~3-6x JSON number array). Ends when out_tx drops.
+    // output pump: coalesce whatever pty bytes are already queued into ONE raw (un-base64'd) frame,
+    // capped so a flood still streams. Fewer, bigger, BINARY messages → far less IPC overhead than one
+    // base64 string per pty chunk. Ends when out_tx drops. (Raw reaches JS as an ArrayBuffer.)
     handle.spawn(async move {
-        use base64::{Engine, engine::general_purpose::STANDARD};
-        while let Some(bytes) = out_rx.recv().await {
-            if on_output.send(STANDARD.encode(&bytes)).is_err() {
+        while let Some(first) = out_rx.recv().await {
+            let mut buf = first;
+            while buf.len() < 64 * 1024 {
+                match out_rx.try_recv() {
+                    Ok(more) => buf.extend_from_slice(&more),
+                    Err(_) => break,
+                }
+            }
+            if on_output.send(InvokeResponseBody::Raw(buf)).is_err() {
                 break;
             }
         }
@@ -219,6 +226,17 @@ fn pane_send(state: State<AppState>, sid: u64, line: String) {
     };
     if ends {
         state.panes.lock().unwrap().remove(&sid);
+    }
+}
+
+/// Keystroke fast-path: a dedicated input command so the hot path (every keypress) skips building a
+/// JS object + `JSON.stringify` on the frontend. We frame the `{"input":…}` control line here in Rust
+/// (cheap) and hand it straight to the pane's run_pane. Same effect as `pane_send({input})`.
+#[tauri::command]
+fn pane_input(state: State<AppState>, sid: u64, data: String) {
+    if let Some(tx) = state.panes.lock().unwrap().get(&sid) {
+        let payload = serde_json::to_string(&data).unwrap_or_else(|_| "\"\"".into());
+        let _ = tx.send(format!("{{\"input\":{payload}}}\n").into_bytes());
     }
 }
 
@@ -567,6 +585,7 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             open_pane,
             pane_send,
+            pane_input,
             new_window,
             pop_out,
             clients_json,
