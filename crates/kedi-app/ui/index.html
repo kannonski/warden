@@ -1484,21 +1484,23 @@ async function makePane(app, attachId) {
     }
   }, true);
   term.attachCustomKeyEventHandler((e) => keyHandler(e, pane));
-  term.onData((d) => pane.send({ input: d }));
+  term.onData((d) => { if (pane.connected) invoke("pane_input", { sid: pane.sid, data: d }); }); // keystroke fast-path (no JSON round-trip)
   term.onResize(({ cols, rows }) => { ptyResize(pane, cols, rows); size.textContent = `${cols}×${rows}`; });
   wrapper.addEventListener("mousedown", () => { if (SETTINGS.layout !== "stage") setFocus(pane); }); // stage: handled by railMouseDown / tile focus
 
-  // Output: Rust streams this pane's bytes over a per-pane Channel (base64). Session end (shell exit /
-  // kill) arrives as a `pane-exit` event (see the global listener) → closePane.
+  // Output: Rust streams this pane's bytes over a per-pane Channel as RAW binary (coalesced, no base64)
+  // → arrives as an ArrayBuffer. Session end (shell exit / kill) arrives as a `pane-exit` event.
   const onOutput = new Channel();
-  onOutput.onmessage = (b64) => {
+  onOutput.onmessage = (msg) => {
     if (pane.closing) return; // popped/closed → don't write to a disposed terminal
     // output in a background tab → light its activity dot (once, until you visit it)
     if (pane.ws != null && pane.ws !== activeWs) {
       const ws = wsById(pane.ws);
       if (ws && !ws._activity) { ws._activity = true; refreshTabLabels(); }
     }
-    const bytes = b64ToBytes(b64);
+    const bytes = msg instanceof ArrayBuffer ? new Uint8Array(msg)
+      : ArrayBuffer.isView(msg) ? new Uint8Array(msg.buffer, msg.byteOffset, msg.byteLength)
+      : b64ToBytes(msg); // fallback for any stringy frame
     // a small chunk carrying a [warden] notice (e.g. policy refusal) → keep it readable
     if (!pane.notice && bytes.length < 256) {
       try { if (new TextDecoder().decode(bytes).includes("[warden]")) pane.notice = true; } catch (_) {}
