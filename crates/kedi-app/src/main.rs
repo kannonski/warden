@@ -12,7 +12,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use tauri::ipc::{Channel, InvokeResponseBody};
+use tauri::ipc::Channel;
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem, Submenu};
 use tauri::{Emitter, Manager, State, WebviewUrl, WebviewWindowBuilder};
 use tokio::sync::mpsc::{UnboundedSender, unbounded_channel};
@@ -169,25 +169,27 @@ fn open_pane(
     app: tauri::AppHandle,
     window: tauri::WebviewWindow,
     state: State<AppState>,
-    on_output: Channel<InvokeResponseBody>,
+    on_output: Channel<String>,
 ) -> Result<u64, String> {
     let (msg_tx, msg_rx) = unbounded_channel::<Vec<u8>>();
     let (out_tx, mut out_rx) = unbounded_channel::<Vec<u8>>();
     let handle = state.rt.handle().clone();
 
-    // output pump: coalesce whatever pty bytes are already queued into ONE raw (un-base64'd) frame,
-    // capped so a flood still streams. Fewer, bigger, BINARY messages → far less IPC overhead than one
-    // base64 string per pty chunk. Ends when out_tx drops. (Raw reaches JS as an ArrayBuffer.)
+    // output pump: coalesce queued pty bytes into ONE base64 frame, but capped so the base64 string
+    // stays under Tauri's 8KB Channel fast-path threshold. Under that, a frame is delivered by a direct
+    // JS `eval` (fast); over it (and all raw>1KB), Tauri falls back to a per-message fetch round-trip,
+    // which crawls (~0.27 MB/s). So: coalesce ~6KB raw (→ ~8KB base64) per frame = big AND fast-path.
     handle.spawn(async move {
+        use base64::{Engine, engine::general_purpose::STANDARD};
         while let Some(first) = out_rx.recv().await {
             let mut buf = first;
-            while buf.len() < 64 * 1024 {
+            while buf.len() < 6000 {
                 match out_rx.try_recv() {
                     Ok(more) => buf.extend_from_slice(&more),
                     Err(_) => break,
                 }
             }
-            if on_output.send(InvokeResponseBody::Raw(buf)).is_err() {
+            if on_output.send(STANDARD.encode(&buf)).is_err() {
                 break;
             }
         }
