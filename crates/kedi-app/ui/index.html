@@ -132,54 +132,34 @@
            padding:8px 14px; font-size:12px; max-width:80vw; opacity:0; pointer-events:none; transition:opacity .18s, transform .18s; }
   #toast.show { opacity:1; transform:translateX(-50%) translateY(0); }
   #overlay button { background:var(--panel); border:1px solid var(--cyan); color:var(--cyan); border-radius:7px; padding:6px 16px; font:inherit; cursor:pointer; margin-top:10px; }
-  /* command palette: search sessions across all browser tabs (focus here / move here) */
-  /* ── session exposé: Ctrl+Shift+P → a zoomed-out grid of every pane across every tab ── */
-  #palette { position:fixed; inset:0; display:none; z-index:10000; background:rgba(9,11,16,.62); backdrop-filter:blur(3px); -webkit-backdrop-filter:blur(3px); }
+  /* ── command palette (⌘K): a centered command card — search + grouped, fuzzy-matched results ── */
+  #palette { position:fixed; inset:0; display:none; z-index:10000; background:rgba(9,11,16,.5);
+             backdrop-filter:blur(3px); -webkit-backdrop-filter:blur(3px); }
   #palette.show { display:flex; flex-direction:column; align-items:center; }
-  #pal-box { width:min(1040px,94vw); margin-top:8vh; display:flex; flex-direction:column; min-height:0; max-height:82vh; }
-  #pal-in {
-    width:100%; box-sizing:border-box; background:rgba(24,24,37,.96); color:var(--fg);
-    font:14px/1.4 var(--mono,monospace); padding:13px 18px; outline:none;
-    border:1px solid var(--edge); border-radius:12px; box-shadow:0 16px 50px rgba(0,0,0,.5);
-  }
-  #pal-in:focus { border-color:var(--focus); }
-  /* command list (top of the palette): compact action rows, filtered by the same query as sessions */
-  #pal-cmds { margin-top:12px; display:flex; flex-direction:column; gap:3px; flex:0 0 auto; }
-  #pal-cmds:empty { display:none; }
-  .pcmd { display:flex; align-items:center; gap:11px; padding:9px 13px; border-radius:9px; cursor:pointer;
-          background:rgba(24,24,37,.96); border:1px solid var(--edge); color:var(--fg); font-size:13px; transition:border-color .12s, background .12s; }
-  .pcmd:hover, .pcmd.sel { border-color:var(--focus); background:#252539; }
-  .pcmd .pico { width:18px; text-align:center; color:var(--focus); font-size:14px; flex:0 0 auto; }
-  .pcmd .plabel { flex:1 1 auto; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
-  .pcmd .phint { color:var(--dim); font-size:11px; letter-spacing:.03em; flex:0 0 auto; }
-  #pal-grid {
-    margin-top:14px; overflow-y:auto; padding:4px 2px 8px; display:grid;
-    grid-template-columns:repeat(auto-fill,minmax(230px,1fr)); gap:14px; align-content:start;
-  }
-  .tile {
-    display:flex; flex-direction:column; gap:0; cursor:pointer; overflow:hidden;
-    background:rgba(24,24,37,.96); border:1px solid var(--edge); border-radius:12px;
-    box-shadow:0 10px 28px rgba(0,0,0,.35); transition:transform .12s ease, border-color .12s, box-shadow .12s;
-  }
-  .tile:hover, .tile.sel { transform:translateY(-3px); border-color:var(--focus); box-shadow:0 16px 40px rgba(0,0,0,.5); }
-  .tile.sel { outline:2px solid var(--focus); outline-offset:-1px; }
-  /* the preview "screen" — a mini terminal-ish surface */
-  .tile-screen {
-    background:var(--bg,#0b0e14); color:var(--dim); font:11.5px/1.5 var(--mono,monospace);
-    padding:12px 13px; height:96px; overflow:hidden; white-space:pre-wrap; word-break:break-word;
-    border-bottom:1px solid var(--edge); position:relative;
-  }
-  .tile-screen.empty { display:grid; place-items:center; color:var(--dim); font-size:11px; opacity:.5; }
-  .tile-screen .glyph { position:absolute; top:10px; right:12px; font-size:15px; opacity:.5; }
-  .tile-foot { display:flex; flex-direction:column; gap:3px; padding:9px 12px 11px; }
-  .tile-title { font-size:13px; font-weight:600; color:var(--fg); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
-  .tile-meta { display:flex; align-items:center; gap:7px; font-size:11px; color:var(--dim); }
-  .tile-where { color:var(--cyan); }
-  .tile-where.remote { color:var(--amber,#e0a54a); }
-  .tile-act { margin-left:auto; font-size:10.5px; letter-spacing:.03em; color:var(--focus); opacity:0; transition:opacity .12s; }
-  .tile:hover .tile-act, .tile.sel .tile-act { opacity:1; }
-  #pal-empty { color:var(--dim); padding:40px; text-align:center; font-size:13px; grid-column:1/-1; }
-  #pal-hint { color:var(--dim); font-size:11px; margin-top:10px; text-align:center; opacity:.7; }
+  #pal-box { width:min(600px,92vw); margin-top:12vh; display:flex; flex-direction:column; min-height:0; max-height:66vh;
+             background:rgba(24,24,37,.98); backdrop-filter:blur(20px); -webkit-backdrop-filter:blur(20px);
+             border:1px solid var(--edge); border-radius:14px; box-shadow:0 24px 70px rgba(0,0,0,.6); overflow:hidden; }
+  #pal-search { display:flex; align-items:center; gap:10px; padding:13px 16px; border-bottom:1px solid var(--edge); flex:0 0 auto; }
+  #pal-search .pal-ico { color:var(--dim); font-size:16px; flex:0 0 auto; }
+  #pal-in { flex:1 1 auto; background:none; border:none; outline:none; color:var(--fg); font:15px/1.3 var(--mono,monospace); }
+  #pal-in::placeholder { color:var(--dim); }
+  #pal-list { overflow-y:auto; padding:6px; scrollbar-width:thin; }
+  #pal-list::-webkit-scrollbar { width:8px; } #pal-list::-webkit-scrollbar-thumb { background:var(--edge); border-radius:4px; }
+  .pgroup { color:var(--dim); font-size:10px; font-weight:600; letter-spacing:.1em; text-transform:uppercase; padding:9px 10px 4px; }
+  .prow { display:flex; align-items:center; gap:11px; padding:8px 10px; border-radius:8px; cursor:pointer; color:var(--fg); font-size:13px; }
+  .prow.sel { background:var(--focus); color:#11111b; }
+  .prow .pico { width:18px; text-align:center; flex:0 0 auto; color:var(--focus); font-size:14px; }
+  .prow.sel .pico { color:#11111b; }
+  .prow .plabel { flex:1 1 auto; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .prow .plabel .hl { color:var(--focus); font-weight:600; }
+  .prow.sel .plabel .hl { color:#11111b; text-decoration:underline; }
+  .prow .pmeta { flex:0 0 auto; color:var(--dim); font-size:11px; }
+  .prow.sel .pmeta { color:#11111b; opacity:.7; }
+  .prow .phint { flex:0 0 auto; color:var(--dim); font-size:11px; letter-spacing:.04em; }
+  .prow.sel .phint { color:#11111b; opacity:.8; }
+  #pal-empty { color:var(--dim); padding:26px; text-align:center; font-size:13px; }
+  #pal-foot { display:flex; gap:16px; padding:8px 14px; border-top:1px solid var(--edge); flex:0 0 auto;
+              color:var(--dim); font-size:11px; letter-spacing:.03em; }
 </style>
 </head>
 <body>
@@ -209,10 +189,9 @@
   <div id="ctxmenu"></div>
   <div id="stagehit"></div>
   <div id="palette"><div id="pal-box">
-    <input id="pal-in" type="text" placeholder="run a command or search sessions — ↑↓ navigate · ↵ run/focus · esc close" autocomplete="off" spellcheck="false">
-    <div id="pal-cmds"></div>
-    <div id="pal-grid"></div>
-    <div id="pal-hint">commands · every pane across every window · ↵ to run or focus</div>
+    <div id="pal-search"><span class="pal-ico">⌕</span><input id="pal-in" type="text" placeholder="Search commands, tabs, sessions…" autocomplete="off" spellcheck="false"></div>
+    <div id="pal-list"></div>
+    <div id="pal-foot"><span>↑↓ navigate</span><span>↵ run</span><span>esc close</span></div>
   </div></div>
   <div id="snap"></div>
   <div id="overlay"></div>
@@ -369,49 +348,62 @@
               border-bottom:1px solid var(--edge); overflow-x:auto; flex:0 0 auto; scrollbar-width:none; }
   #tabstrip::-webkit-scrollbar { display:none; }
   #tabstrip.show { display:flex; }
-  .tab { display:inline-flex; align-items:center; gap:8px; background:var(--bg); border:1px solid var(--edge);
+  .tab { display:inline-flex; align-items:center; gap:7px; background:var(--bg); border:1px solid var(--edge);
          border-bottom:none; border-radius:9px 9px 0 0; color:var(--dim); font:inherit; font-size:12.5px;
-         padding:6px 8px 7px 7px; max-width:240px; cursor:pointer; position:relative; top:1px; user-select:none;
+         padding:6px 7px 7px 9px; max-width:220px; cursor:pointer; position:relative; top:1px; user-select:none;
          transition:color .12s, background .12s, border-color .12s; }
   .tab:hover { color:var(--fg); background:#1c1c28; }
-  .tab.active { background:var(--term-bg); color:var(--fg); border-color:var(--focus); }
-  .tab.active::after { content:""; position:absolute; left:-1px; right:-1px; bottom:-1px; height:2px; background:var(--focus); } /* seam into the canvas */
-  /* mode / cycle-layout button — a real, tappable control (grid/columns/rows/main, or floating ▢) */
-  .tmode { flex:0 0 auto; display:inline-flex; align-items:center; justify-content:center; width:24px; height:24px;
-           font-size:14px; line-height:1; border:1px solid var(--edge); border-radius:7px; background:var(--panel);
-           color:var(--dim); cursor:pointer; transition:color .12s, background .12s, border-color .12s; }
-  .tmode:hover { color:#1e1e2e; background:var(--focus); border-color:var(--focus); }
-  .tmode.on { color:var(--focus); border-color:var(--focus); }
-  .tmode.on:hover { color:#1e1e2e; }
+  .tab.active { background:var(--term-bg); color:var(--fg); border-color:var(--edge); }
+  .tab.active::after { content:""; position:absolute; left:-1px; right:-1px; bottom:-1px; height:2px;
+                       background:var(--tab-accent, var(--focus)); } /* accent seam into the canvas */
+  .tab.drop-target { border-color:var(--tab-accent, var(--focus)); background:#252539; }
+  .tab.dragging { opacity:.4; }
+  /* mode glyph — calm by default (name is the hero), becomes a real button on hover/active */
+  .tmode { flex:0 0 auto; display:inline-flex; align-items:center; justify-content:center; width:22px; height:22px;
+           font-size:13px; line-height:1; border:1px solid transparent; border-radius:6px; background:none;
+           color:var(--dim); opacity:.7; cursor:pointer; transition:color .12s, background .12s, border-color .12s, opacity .12s; }
+  .tab:hover .tmode, .tab.active .tmode { opacity:1; border-color:var(--edge); background:var(--panel); }
+  .tmode:hover { color:#1e1e2e; background:var(--tab-accent, var(--focus)) !important; border-color:transparent; }
+  .tab.active .tmode.on { color:var(--tab-accent, var(--focus)); }
   .tlabel { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; padding:0 1px; }
-  .tcount { flex:0 0 auto; min-width:18px; height:17px; padding:0 5px; display:inline-flex; align-items:center; justify-content:center;
-            font-size:10.5px; font-weight:600; color:var(--dim); background:var(--edge); border-radius:9px; }
-  .tab.active .tcount { color:var(--bg); background:var(--focus); }
+  .tcount { flex:0 0 auto; min-width:17px; height:16px; padding:0 5px; display:inline-flex; align-items:center; justify-content:center;
+            font-size:10px; font-weight:600; color:var(--dim); background:var(--edge); border-radius:9px; }
+  .tab.active .tcount { color:var(--bg); background:var(--tab-accent, var(--focus)); }
   .trename { font:inherit; font-size:12.5px; width:104px; background:var(--bg); color:var(--fg);
              border:1px solid var(--focus); border-radius:5px; padding:1px 5px; outline:none; }
-  .tclose { flex:0 0 auto; display:inline-flex; align-items:center; justify-content:center; width:18px; height:18px;
-            color:var(--dim); font-size:15px; line-height:1; border:none; background:none; border-radius:5px; cursor:pointer; }
-  .tclose:hover { color:#1e1e2e; background:var(--red); }
+  /* close fades in on hover (keeps the resting chip calm) */
+  .tclose { flex:0 0 auto; display:inline-flex; align-items:center; justify-content:center; width:17px; height:17px;
+            color:var(--dim); font-size:14px; line-height:1; border:none; background:none; border-radius:5px; cursor:pointer;
+            opacity:0; transition:opacity .12s, color .12s, background .12s; }
+  .tab:hover .tclose, .tab.active .tclose { opacity:.75; }
+  .tclose:hover { opacity:1 !important; color:#1e1e2e; background:var(--red); }
   .tadd { flex:0 0 auto; display:inline-flex; align-items:center; justify-content:center; width:28px; height:28px; align-self:center;
           color:var(--dim); font-size:18px; line-height:1; border:1px solid transparent; background:none; border-radius:8px; cursor:pointer;
           transition:color .12s, background .12s; }
   .tadd:hover { color:var(--focus); background:var(--bg); }
   /* activity dot — a background tab produced output since you last looked */
   .tdot { flex:0 0 auto; width:7px; height:7px; border-radius:50%; background:var(--cyan,#89dceb); box-shadow:0 0 6px var(--cyan,#89dceb); }
-  /* hover card — a calm popover with the tab's cwd, layout, and its panes (peek before switching) */
-  #tabcard { position:absolute; z-index:10001; display:none; min-width:210px; max-width:340px;
+  /* hover card — an interactive popover: cwd, layout, and the tab's panes (click to focus, × to close) */
+  #tabcard { position:absolute; z-index:10001; display:none; min-width:220px; max-width:340px;
              background:rgba(24,24,37,.98); backdrop-filter:blur(14px); -webkit-backdrop-filter:blur(14px);
              border:1px solid var(--edge); border-radius:11px; box-shadow:0 16px 44px rgba(0,0,0,.5);
-             padding:10px 12px; font-size:12px; color:var(--fg); pointer-events:none; }
+             padding:9px 8px; font-size:12px; color:var(--fg); }
   #tabcard.show { display:block; }
-  #tabcard .tc-head { display:flex; align-items:baseline; gap:8px; margin-bottom:8px; }
+  #tabcard .tc-head { display:flex; align-items:baseline; gap:8px; margin:2px 5px 7px; }
   #tabcard .tc-path { flex:1 1 auto; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color:var(--fg); font-weight:600; }
   #tabcard .tc-mode { flex:0 0 auto; font-size:10.5px; color:var(--dim); border:1px solid var(--edge); border-radius:5px; padding:1px 6px; }
-  #tabcard .tc-pane { display:flex; align-items:center; gap:8px; padding:3px 0; color:var(--dim); }
+  #tabcard .tc-pane { display:flex; align-items:center; gap:8px; padding:5px 7px; border-radius:7px; color:var(--dim); cursor:pointer; transition:background .1s, color .1s; }
+  #tabcard .tc-pane:hover { background:#252539; color:var(--fg); }
   #tabcard .tc-pane .tc-glyph { flex:0 0 auto; color:var(--focus); }
-  #tabcard .tc-pane .tc-title { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  #tabcard .tc-pane .tc-title { flex:1 1 auto; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
   #tabcard .tc-pane.on { color:var(--fg); }
-  #tabcard .tc-empty { color:var(--dim); }
+  #tabcard .tc-pane.on .tc-glyph { color:var(--tab-accent, var(--focus)); }
+  #tabcard .tc-x { flex:0 0 auto; width:16px; height:16px; display:inline-flex; align-items:center; justify-content:center;
+                   font-size:13px; color:var(--dim); border-radius:4px; opacity:0; }
+  #tabcard .tc-pane:hover .tc-x { opacity:.8; }
+  #tabcard .tc-x:hover { opacity:1; color:#1e1e2e; background:var(--red); }
+  #tabcard .tc-empty { color:var(--dim); padding:4px 7px; }
+  #tabcard .tc-hint { color:var(--dim); opacity:.6; font-size:10.5px; margin:6px 5px 1px; }
   /* tiled tab: panes are snapped (geometry set inline in JS) — no manual drag/resize, no hover label */
   body.tiled .floatwin .grip { display:none; }
   body.tiled .floatwin { animation:none; }
@@ -701,10 +693,39 @@ let activeWs = null;
 let wsSeq = 0;
 const TILE_LAYOUTS = ["grid", "columns", "rows", "main"];
 const TILE_ICON = { grid: "▦", columns: "▥", rows: "▤", main: "◧" };
+const TAB_ACCENTS = ["#89b4fa", "#a6e3a1", "#f9e2af", "#f38ba8", "#cba6f7", "#89dceb", "#fab387", "#94e2d5"];
 function wsById(id) { return workspaces.find((w) => w.id === id) || null; }
 function activeWorkspace() { return wsById(activeWs); }
 function wsPanes(id) { return allPanes().filter((p) => p.ws === id); }
-function newWorkspace(mode) { const ws = { id: ++wsSeq, name: "", mode: mode || "floating", layout: "grid", zoom: null }; workspaces.push(ws); return ws; }
+function newWorkspace(mode) {
+  const ws = { id: ++wsSeq, name: "", mode: mode || "floating", layout: "grid", zoom: null,
+               accent: TAB_ACCENTS[(wsSeq - 1) % TAB_ACCENTS.length] };
+  workspaces.push(ws); return ws;
+}
+// reorder (drag): move workspace `fromId` to just before `toId` in the strip
+function reorderWs(fromId, toId) {
+  if (fromId === toId) return;
+  const from = workspaces.findIndex((w) => w.id === fromId), to = workspaces.findIndex((w) => w.id === toId);
+  if (from < 0 || to < 0) return;
+  const [w] = workspaces.splice(from, 1);
+  workspaces.splice(workspaces.findIndex((x) => x.id === toId), 0, w);
+  renderTabs();
+}
+// move a pane into another tab (drag a card row onto a chip); re-lay out both the source and target
+function movePaneToWs(pane, wsId) {
+  if (!pane || pane.ws === wsId || !wsById(wsId)) return;
+  const src = activeWorkspace();
+  if (src && src.zoom === pane.id) src.zoom = null;
+  pane.ws = wsId;
+  layoutActive();
+}
+// keyboard tab nav
+function jumpToTab(n) { const ws = workspaces[n - 1]; if (ws) switchWs(ws.id); }
+function cycleTab(dir) {
+  if (workspaces.length < 2) return;
+  let i = workspaces.findIndex((w) => w.id === activeWs); if (i < 0) i = 0;
+  switchWs(workspaces[(i + dir + workspaces.length) % workspaces.length].id);
+}
 
 // The single layout entry point (replaces setLayout): show the active tab's panes arranged by its
 // mode, hide the rest. Called on tab switch, mode/layout/zoom change, and new/close pane.
@@ -1192,39 +1213,97 @@ function renderTabs() {
     const x = document.createElement("button"); x.className = "tclose"; x.textContent = "×"; x.title = "close tab";
     x.addEventListener("click", (e) => { e.stopPropagation(); closeWs(ws.id); });
 
+    tab._ws = ws;
+    tab.style.setProperty("--tab-accent", ws.accent || "var(--focus)");
     tab.append(mode, label, dot, count, x);
-    tab.addEventListener("click", () => switchWs(ws.id));
+    tab.addEventListener("click", () => { if (suppressTabClick) return; switchWs(ws.id); });
     tab.addEventListener("mouseenter", () => showTabCard(ws, tab));
-    tab.addEventListener("mouseleave", hideTabCard);
+    tab.addEventListener("mouseleave", scheduleHideCard);
+    tab.addEventListener("pointerdown", (e) => {
+      if (e.button !== 0 || e.target.closest(".tmode, .tclose, .trename")) return; // let buttons / rename work
+      dragOntoTabs(e, { tab: ws.id }, tabName(ws)); // drag a chip → reorder
+    });
     strip.appendChild(tab);
   }
   const add = document.createElement("button"); add.className = "tadd"; add.textContent = "+"; add.title = "new tab (⇧⌃T)";
   add.addEventListener("click", () => addWs("tiled"));
   strip.appendChild(add);
 }
-// hover card: cwd + layout + the tab's panes (peek before switching). Info-only (pointer-events off).
+
+// ── hover card: peek + act on a tab's panes (click a pane to focus, × to close, drag out to a tab) ──
+let cardTimer = null, cardWs = null;
 function showTabCard(ws, tabEl) {
-  const card = $("tabcard");
-  const ps = wsPanes(ws.id);
-  const head = tabPane(ws) && (tabPane(ws).title || "").trim();
-  let html = '<div class="tc-head"><span class="tc-path"></span>' +
+  clearTimeout(cardTimer); cardWs = ws;
+  const card = $("tabcard"), ps = wsPanes(ws.id);
+  card.style.setProperty("--tab-accent", ws.accent || "var(--focus)");
+  card.innerHTML = '<div class="tc-head"><span class="tc-path"></span>' +
     '<span class="tc-mode">' + (ws.mode === "tiled" ? ws.layout : "floating") + "</span></div>";
-  card.innerHTML = html;
-  card.querySelector(".tc-path").textContent = head || tabName(ws);
+  card.querySelector(".tc-path").textContent = (tabPane(ws) && (tabPane(ws).title || "").trim()) || tabName(ws);
   if (!ps.length) {
     const e = document.createElement("div"); e.className = "tc-empty"; e.textContent = "no terminals"; card.appendChild(e);
-  } else for (const p of ps) {
-    const row = document.createElement("div"); row.className = "tc-pane" + (p === focused ? " on" : "");
-    const g = document.createElement("span"); g.className = "tc-glyph"; g.textContent = p.app ? "▤" : "❯";
-    const t = document.createElement("span"); t.className = "tc-title"; t.textContent = shortName(p.title) || ("pane " + p.id);
-    row.append(g, t); card.appendChild(row);
+  } else {
+    for (const p of ps) {
+      const row = document.createElement("div"); row.className = "tc-pane" + (p === focused ? " on" : "");
+      const g = document.createElement("span"); g.className = "tc-glyph"; g.textContent = p.app ? "▤" : "❯";
+      const t = document.createElement("span"); t.className = "tc-title"; t.textContent = shortName(p.title) || ("pane " + p.id);
+      const cx = document.createElement("span"); cx.className = "tc-x"; cx.textContent = "×"; cx.title = "close this terminal";
+      row.append(g, t, cx);
+      row.addEventListener("click", () => { if (suppressTabClick) return; switchWs(ws.id); setFocus(p); hideTabCard(); }); // focus the pane
+      cx.addEventListener("click", (e) => { e.stopPropagation(); closePane(p); showTabCard(ws, tabEl); }); // close + refresh card
+      row.addEventListener("pointerdown", (e) => { if (e.button !== 0 || e.target === cx) return; dragOntoTabs(e, { pane: p.id }, shortName(p.title) || ("pane " + p.id)); });
+      card.appendChild(row);
+    }
+    const hint = document.createElement("div"); hint.className = "tc-hint"; hint.textContent = "click to focus · drag onto a tab to move";
+    card.appendChild(hint);
   }
   card.classList.add("show");
   const r = tabEl.getBoundingClientRect();
   card.style.left = Math.min(r.left, window.innerWidth - card.offsetWidth - 10) + "px";
   card.style.top = (r.bottom + 4) + "px";
 }
-function hideTabCard() { $("tabcard").classList.remove("show"); }
+function scheduleHideCard() { clearTimeout(cardTimer); cardTimer = setTimeout(hideTabCard, 160); } // bridge to the card
+function hideTabCard() { if (document.body.classList.contains("dragging")) return; clearTimeout(cardTimer); $("tabcard").classList.remove("show"); cardWs = null; }
+$("tabcard").addEventListener("mouseenter", () => clearTimeout(cardTimer));
+$("tabcard").addEventListener("mouseleave", scheduleHideCard);
+
+// ── pointer-drag onto tab chips: reorder a chip, or move a pane into another tab (WKWebView-safe) ──
+let suppressTabClick = false;
+function tabUnder(x, y) {
+  for (const c of $("tabstrip").children) {
+    if (!c.classList.contains("tab")) continue;
+    const r = c.getBoundingClientRect();
+    if (x >= r.left && x <= r.right && y >= r.top && y <= r.bottom) return c;
+  }
+  return null;
+}
+function dragOntoTabs(e, payload, ghostText) {
+  const x0 = e.clientX, y0 = e.clientY; let active = false, ghost = null;
+  const move = (ev) => {
+    if (!active) {
+      if (Math.abs(ev.clientX - x0) + Math.abs(ev.clientY - y0) < 6) return;
+      active = true; document.body.classList.add("dragging");
+      ghost = document.createElement("div"); ghost.className = "dragghost"; ghost.textContent = ghostText; document.body.appendChild(ghost);
+    }
+    ghost.style.left = (ev.clientX + 12) + "px"; ghost.style.top = (ev.clientY + 12) + "px";
+    const t = tabUnder(ev.clientX, ev.clientY);
+    for (const c of $("tabstrip").children) c.classList.toggle("drop-target", c === t && !!payload && !(payload.tab != null && c._ws && c._ws.id === payload.tab));
+  };
+  const up = (ev) => {
+    document.removeEventListener("pointermove", move); document.removeEventListener("pointerup", up);
+    if (ghost) ghost.remove();
+    document.body.classList.remove("dragging");
+    for (const c of $("tabstrip").children) c.classList.remove("drop-target");
+    if (!active) return; // a click, not a drag
+    suppressTabClick = true; setTimeout(() => { suppressTabClick = false; }, 0);
+    const t = tabUnder(ev.clientX, ev.clientY);
+    hideTabCard();
+    if (t && t._ws) {
+      if (payload.tab != null) reorderWs(payload.tab, t._ws.id);
+      else if (payload.pane != null) movePaneToWs(paneById(payload.pane), t._ws.id);
+    }
+  };
+  document.addEventListener("pointermove", move); document.addEventListener("pointerup", up);
+}
 // inline rename: swap the label for a text input; Enter/blur saves, Esc cancels
 function startRenameTab(ws, label) {
   const inp = document.createElement("input");
@@ -2062,6 +2141,11 @@ document.addEventListener("keydown", (e) => {
   if (e.metaKey && !e.ctrlKey && !e.altKey && !e.shiftKey && (e.key === "Enter" || k === "enter")) {
     e.preventDefault(); toggleZoom(); return;
   }
+  // TAB NAV — ⌘1–9 jump, ⌘⇧[ ] / ⌃Tab cycle (works from the empty canvas too)
+  if (e.metaKey && !e.ctrlKey && !e.altKey && !e.shiftKey && k >= "1" && k <= "9") { e.preventDefault(); jumpToTab(Number(k)); return; }
+  if (e.metaKey && e.shiftKey && !e.ctrlKey && !e.altKey && (e.key === "{" || e.key === "[")) { e.preventDefault(); cycleTab(-1); return; }
+  if (e.metaKey && e.shiftKey && !e.ctrlKey && !e.altKey && (e.key === "}" || e.key === "]")) { e.preventDefault(); cycleTab(1); return; }
+  if (e.ctrlKey && e.key === "Tab") { e.preventDefault(); cycleTab(e.shiftKey ? -1 : 1); return; }
   // NEW PANE — Ctrl+Shift+Enter. NOT Ctrl+T: a browser reserves Ctrl+T for a new browser tab and the
   // page never sees it (nothing kedi can do about that). This combo is free, so it reaches us and
   // opens a pane inside the current kedi.
@@ -2094,8 +2178,16 @@ function keyHandler(e, pane) {
     if (mk === "c") { copySel(pane); e._kediHandled = true; e.preventDefault(); return false; }
     if (mk === "v") { pasteInto(pane); e._kediHandled = true; e.preventDefault(); return false; }
     if (e.key === "Enter") { toggleZoom(); e._kediHandled = true; e.preventDefault(); return false; } // ⌘↵ zoom
+    if (mk >= "1" && mk <= "9") { jumpToTab(Number(mk)); e._kediHandled = true; e.preventDefault(); return false; } // ⌘1–9 → tab N
     return true;
   }
+  // ⌘⇧[ / ⌘⇧] → previous / next tab
+  if (e.metaKey && e.shiftKey && !e.ctrlKey && !e.altKey) {
+    if (e.key === "{" || e.key === "[") { cycleTab(-1); e._kediHandled = true; e.preventDefault(); return false; }
+    if (e.key === "}" || e.key === "]") { cycleTab(1); e._kediHandled = true; e.preventDefault(); return false; }
+  }
+  // ⌃Tab / ⌃⇧Tab → cycle tabs (handled before the Ctrl+Shift-only gate below)
+  if (e.ctrlKey && (e.key === "Tab")) { cycleTab(e.shiftKey ? -1 : 1); e._kediHandled = true; e.preventDefault(); return false; }
   if (!e.ctrlKey || !e.shiftKey) return true;
   const k = e.key.toLowerCase();
   const fw = focused && focused.floatwin;
@@ -2129,7 +2221,7 @@ function keyHandler(e, pane) {
 // here (if it lives in another tab). The server's /sessions is the shared source of truth across all
 // tabs/connections; each session carries the per-pane `tab` key ("<tab-id>:<pane-id>") its owner
 // pushed, so we can tell our own panes apart from other tabs' and map a row back to a local pane.
-const pal = { cmds: [], rows: [], sel: 0 };
+const pal = { items: [], rowEls: [], sel: 0, all: [] };
 
 // Command palette actions (⌘K). Filtered by the same query as sessions and shown above them. `label`
 // may be a function for dynamic text (e.g. start/stop recording). Add pop-out / groups here later.
@@ -2159,8 +2251,11 @@ function localPaneFor(row) {
 }
 
 async function fetchSessions() {
-  try { return JSON.parse(await invoke("sessions_json")).sessions || []; }
-  catch (_) { return []; }
+  try {
+    const all = JSON.parse(await invoke("sessions_json")).sessions || [];
+    const seen = new Set(); // dedup by id (defensive)
+    return all.filter((s) => s && s.id != null && !seen.has(s.id) && seen.add(s.id));
+  } catch (_) { return []; }
 }
 
 async function openPalette() {
@@ -2200,109 +2295,84 @@ function localPreview(pane) {
   return "";
 }
 
-function renderPalette() {
-  const q = $("pal-in").value.trim().toLowerCase();
-  // commands filter on label + keywords; sessions on title/who/preview/caps
-  const cmds = paletteCommands().filter((c) => !q || (cmdLabel(c).toLowerCase() + " " + (c.kw || "")).includes(q));
-  const rows = (pal.all || []).filter((s) => {
-    if (!q) return true;
-    return (`${s.title || ""} ${s.who || ""} ${s.preview || ""} ${(s.caps || []).join(" ")}`).toLowerCase().includes(q);
-  });
-  pal.cmds = cmds; pal.rows = rows;
-  const total = cmds.length + rows.length;
-  if (pal.sel >= total) pal.sel = Math.max(0, total - 1);
+// fuzzy subsequence match → { score, hits:[indices] } or null. Earlier + contiguous matches score higher.
+function fuzzy(text, q) {
+  if (!q) return { score: 0, hits: [] };
+  const t = text.toLowerCase(), ql = q.toLowerCase(); let ti = 0; const hits = [];
+  for (const ch of ql) { const i = t.indexOf(ch, ti); if (i < 0) return null; hits.push(i); ti = i + 1; }
+  let score = 100 - hits[0]; for (let k = 1; k < hits.length; k++) if (hits[k] === hits[k - 1] + 1) score += 3;
+  return { score, hits };
+}
+// a label fragment with the matched characters wrapped in <span class="hl">
+function hlFrag(text, hits) {
+  const frag = document.createDocumentFragment(), set = new Set(hits); let buf = "", on = false;
+  const flush = () => { if (!buf) return; if (on) { const s = document.createElement("span"); s.className = "hl"; s.textContent = buf; frag.appendChild(s); } else frag.appendChild(document.createTextNode(buf)); buf = ""; };
+  for (let i = 0; i < text.length; i++) { const h = set.has(i); if (h !== on) { flush(); on = h; } buf += text[i]; }
+  flush(); return frag;
+}
 
-  // command rows (top)
-  const clist = $("pal-cmds"); clist.innerHTML = "";
-  cmds.forEach((c, i) => {
-    const row = document.createElement("div");
-    row.className = "pcmd" + (i === pal.sel ? " sel" : "");
-    const ico = document.createElement("span"); ico.className = "pico"; ico.textContent = c.ico || "›";
-    const label = document.createElement("span"); label.className = "plabel"; label.textContent = cmdLabel(c);
-    const hint = document.createElement("span"); hint.className = "phint"; hint.textContent = c.hint || "";
-    row.append(ico, label, hint);
-    row.addEventListener("mouseenter", () => paintSel(i));
-    row.addEventListener("click", () => runFlat(i));
-    clist.appendChild(row);
-  });
-
-  // session tiles (below), continuing the flat selection index after the commands
-  const grid = $("pal-grid"); grid.innerHTML = "";
-  rows.forEach((s, j) => {
-    const flatIdx = cmds.length + j;
-    const local = localPaneFor(s);
-    const here = !!local;
-    const isApp = (s.caps || []).includes("app");
-    const glyph = isApp ? "▤" : "❯";
-    const title = (s.title && s.title.trim()) ? s.title : (here ? "pane " + local.id : "session " + s.id);
-    const preview = (here ? localPreview(local) : "") || s.preview || "";
-
-    const tile = document.createElement("div");
-    tile.className = "tile" + (flatIdx === pal.sel ? " sel" : "");
-    const screen = document.createElement("div");
-    screen.className = "tile-screen" + (preview ? "" : " empty");
-    if (preview) {
-      screen.textContent = preview;
-      const g = document.createElement("span"); g.className = "glyph"; g.textContent = glyph; screen.appendChild(g);
-    } else {
-      screen.textContent = glyph + "  no output yet";
-    }
-    const foot = document.createElement("div"); foot.className = "tile-foot";
-    const tt = document.createElement("div"); tt.className = "tile-title"; tt.textContent = title;
-    const meta = document.createElement("div"); meta.className = "tile-meta";
-    const who = document.createElement("span"); who.textContent = s.who || "?";
-    const where = document.createElement("span"); where.className = "tile-where" + (here ? "" : " remote");
-    where.textContent = here ? "this window" : "another window";
-    const act = document.createElement("span"); act.className = "tile-act"; act.textContent = here ? "focus →" : "move here →";
-    meta.append(who, where, act);
-    foot.append(tt, meta);
-    tile.append(screen, foot);
-
-    tile.addEventListener("mouseenter", () => paintSel(flatIdx));
-    tile.addEventListener("click", () => runFlat(flatIdx));
-    grid.appendChild(tile);
-  });
-
-  if (!total) {
-    const e = document.createElement("div"); e.id = "pal-empty";
-    e.textContent = q ? "no command or session matches" : "no live sessions yet — open a terminal";
-    grid.appendChild(e);
+// Grouped, fuzzy-filtered items. Actions = commands · Tabs = this window's workspaces (switch) ·
+// Sessions = panes living in OTHER windows (move here — this window's panes are reachable via Tabs).
+function paletteItems(q) {
+  const items = [];
+  for (const c of paletteCommands()) {
+    const label = cmdLabel(c);
+    if (!fuzzy(label + " " + (c.kw || ""), q)) continue;
+    items.push({ group: "Actions", ico: c.ico || "›", label, hits: (fuzzy(label, q) || {}).hits || [], hint: c.hint || "", run: c.run });
   }
+  for (const ws of workspaces) {
+    const name = tabName(ws), m = fuzzy(name, q); if (!m) continue;
+    const n = wsPanes(ws.id).length;
+    items.push({ group: "Tabs", ico: ws.mode === "tiled" ? (TILE_ICON[ws.layout] || "▦") : "▢", label: name, hits: m.hits,
+                 meta: n + (n === 1 ? " pane" : " panes") + (ws.id === activeWs ? " · current" : ""), run: () => switchWs(ws.id) });
+  }
+  for (const s of (pal.all || [])) {
+    if (localPaneFor(s)) continue; // this window's panes are covered by Tabs
+    const name = shortName(s.title) || ("session " + s.id), m = fuzzy(name + " " + (s.who || ""), q); if (!m) continue;
+    items.push({ group: "Sessions", ico: (s.caps || []).includes("app") ? "▤" : "❯", label: name, hits: (fuzzy(name, q) || {}).hits || [],
+                 meta: s.who || "another window", hint: "move here →", run: () => moveSessionHere(s.id) });
+  }
+  return items;
 }
 
-// Flat selection spans [commands…, sessions…]; paint the highlight across both lists and scroll it in.
+function renderPalette() {
+  const items = paletteItems($("pal-in").value.trim());
+  pal.items = items; pal.rowEls = [];
+  if (pal.sel >= items.length) pal.sel = Math.max(0, items.length - 1);
+  const list = $("pal-list"); list.innerHTML = "";
+  if (!items.length) { const e = document.createElement("div"); e.id = "pal-empty"; e.textContent = "No matches"; list.appendChild(e); return; }
+  let group = null;
+  items.forEach((it, i) => {
+    if (it.group !== group) { const h = document.createElement("div"); h.className = "pgroup"; h.textContent = it.group; list.appendChild(h); group = it.group; }
+    const row = document.createElement("div"); row.className = "prow" + (i === pal.sel ? " sel" : "");
+    const ico = document.createElement("span"); ico.className = "pico"; ico.textContent = it.ico;
+    const label = document.createElement("span"); label.className = "plabel"; label.appendChild(hlFrag(it.label, it.hits));
+    row.append(ico, label);
+    if (it.meta) { const m = document.createElement("span"); m.className = "pmeta"; m.textContent = it.meta; row.appendChild(m); }
+    if (it.hint) { const hn = document.createElement("span"); hn.className = "phint"; hn.textContent = it.hint; row.appendChild(hn); }
+    row.addEventListener("mouseenter", () => paintSel(i));
+    row.addEventListener("click", () => runItem(i));
+    list.appendChild(row); pal.rowEls.push(row);
+  });
+}
 function paintSel(i) {
-  pal.sel = i;
-  const cmdEls = [...$("pal-cmds").children];
-  const tileEls = [...$("pal-grid").children].filter((c) => c.classList.contains("tile"));
-  cmdEls.forEach((el, k) => el.classList.toggle("sel", k === i));
-  tileEls.forEach((el, k) => el.classList.toggle("sel", (cmdEls.length + k) === i));
-  const active = i < cmdEls.length ? cmdEls[i] : tileEls[i - cmdEls.length];
-  if (active && active.scrollIntoView) active.scrollIntoView({ block: "nearest" });
+  if (!pal.rowEls.length) return;
+  pal.sel = Math.max(0, Math.min(i, pal.rowEls.length - 1));
+  pal.rowEls.forEach((el, k) => el.classList.toggle("sel", k === pal.sel));
+  const el = pal.rowEls[pal.sel]; if (el && el.scrollIntoView) el.scrollIntoView({ block: "nearest" });
 }
-
-// run the flat-index item: a command's action, or focus/move the session behind a tile
-function runFlat(i) {
-  const c = pal.cmds[i];
-  if (c) { closePalette(); if (typeof c.run === "function") c.run(); return; }
-  const s = pal.rows[i - pal.cmds.length];
-  if (s) choosePalette(s);
-}
-
-// act on a session tile: focus it if it's a pane in THIS window, else move the live session here.
-function choosePalette(s) {
+function runItem(i) {
+  const it = pal.items[i]; if (!it) return;
   closePalette();
-  const local = localPaneFor(s);
-  if (local) setFocus(local);
-  else moveSessionHere(s.id);
+  if (typeof it.run === "function") it.run();
 }
 
 $("pal-in").addEventListener("input", () => { pal.sel = 0; renderPalette(); });
 $("pal-in").addEventListener("keydown", (e) => {
-  const total = pal.cmds.length + pal.rows.length; if (!total) return;
-  if (e.key === "ArrowDown" || e.key === "ArrowRight") { e.preventDefault(); paintSel(Math.min(total - 1, pal.sel + 1)); }
-  else if (e.key === "ArrowUp" || e.key === "ArrowLeft") { e.preventDefault(); paintSel(Math.max(0, pal.sel - 1)); }
-  else if (e.key === "Enter") { e.preventDefault(); runFlat(pal.sel); }
+  if (!pal.items.length) return;
+  if (e.key === "ArrowDown") { e.preventDefault(); paintSel(pal.sel + 1); }
+  else if (e.key === "ArrowUp") { e.preventDefault(); paintSel(pal.sel - 1); }
+  else if (e.key === "Enter") { e.preventDefault(); runItem(pal.sel); }
 });
 // click the backdrop (outside a tile / the input) closes the exposé
 $("palette").addEventListener("mousedown", (e) => { if (e.target.id === "palette" || e.target.id === "pal-box") closePalette(); });
