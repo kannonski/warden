@@ -160,10 +160,11 @@ fn reconcile_ui(
 /// Only touches zsh (bash/others ignore ZDOTDIR) and always falls back to the user's config, so a broken
 /// hook can't lose their environment. `KEDI_UZDOTDIR` carries their original ZDOTDIR (or $HOME).
 fn setup_shell_integration(app: &tauri::AppHandle) {
-    if std::env::var_os("KEDI_NO_SHELL_INTEGRATION").is_some() {
+    let dir = app.path().app_data_dir().expect("app_data_dir").join("shell");
+    // opt out via env, or the persisted Settings toggle (a `.disabled` flag file in the shell dir)
+    if std::env::var_os("KEDI_NO_SHELL_INTEGRATION").is_some() || dir.join(".disabled").exists() {
         return;
     }
-    let dir = app.path().app_data_dir().expect("app_data_dir").join("shell");
     if std::fs::create_dir_all(&dir).is_err() {
         return;
     }
@@ -542,6 +543,31 @@ fn install_plugin(
     kedi::plugin_cli::run(&args).map_err(|e| e.to_string())
 }
 
+/// Whether shell integration is currently enabled (env not set + no `.disabled` flag). Read at boot to
+/// sync the Settings toggle.
+#[tauri::command]
+fn shell_integration_state(app: tauri::AppHandle) -> bool {
+    if std::env::var_os("KEDI_NO_SHELL_INTEGRATION").is_some() {
+        return false;
+    }
+    let dir = app.path().app_data_dir().map(|p| p.join("shell")).unwrap_or_default();
+    !dir.join(".disabled").exists()
+}
+
+/// Persist the shell-integration preference (takes effect on next launch — injection happens at startup).
+#[tauri::command]
+fn set_shell_integration(app: tauri::AppHandle, enabled: bool) -> Result<(), String> {
+    let dir = app.path().app_data_dir().map_err(|e| e.to_string())?.join("shell");
+    std::fs::create_dir_all(&dir).ok();
+    let flag = dir.join(".disabled");
+    if enabled {
+        let _ = std::fs::remove_file(&flag);
+    } else {
+        std::fs::write(&flag, b"disabled by Settings\n").map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
 /// Remove a plugin from the registry (and delete its .wasm with `purge`). Reuses `kedi plugin remove`.
 #[tauri::command]
 fn remove_plugin(name: String, purge: bool) -> Result<(), String> {
@@ -698,7 +724,9 @@ fn main() {
             kill_session,
             plugins_json,
             install_plugin,
-            remove_plugin
+            remove_plugin,
+            shell_integration_state,
+            set_shell_integration
         ])
         .run(tauri::generate_context!())
         .expect("kedi-app: fatal error while running the Tauri application");

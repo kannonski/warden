@@ -474,6 +474,9 @@
     <label for="set-header">show top bar</label>
     <label class="switch"><input type="checkbox" id="set-header"><span></span></label>
 
+    <label for="set-shell">shell integration <span class="valtag">restart to apply</span></label>
+    <label class="switch"><input type="checkbox" id="set-shell"><span></span></label>
+
     <div class="sec">terminal</div>
     <label for="set-font">font size <span id="set-font-val" class="valtag"></span></label>
     <input type="range" id="set-font" min="8" max="28" step="1">
@@ -528,6 +531,7 @@ async function openExternal(u) {
 }
 function b64ToBytes(b64) { const s = atob(b64); const a = new Uint8Array(s.length); for (let i = 0; i < s.length; i++) a[i] = s.charCodeAt(i); return a; }
 let recOn = false;              // synced from get_recording at boot
+let shellIntegrationOn = true;  // synced from shell_integration_state at boot (Settings toggle)
 const WARDEN = "kedi";          // shown in the header
 const FONT = '"FiraCode Nerd Font Mono", "MesloLGS NF", "FiraCode Nerd Font", ui-monospace, monospace';
 
@@ -1192,6 +1196,22 @@ function cmdNav(pane, dir) {
   const target = dir > 0 ? lines.find((l) => l > top + 1) : [...lines].reverse().find((l) => l < top - 1);
   if (target != null) pane.term.scrollToLine(target);
 }
+// copy the output of the last finished command (from OSC 133 C→D marks): the lines between the command
+// line and the next prompt. Needs shell integration; the command must still be in scrollback.
+function copyLastOutput(p) {
+  p = p || focused;
+  if (!p || !p.lastCmd) { overlayFlash("no command output yet (needs shell integration)"); return; }
+  const { start, end } = p.lastCmd;
+  if (!start || start.isDisposed) { overlayFlash("that command scrolled out of history"); return; }
+  const buf = p.term.buffer.active;
+  const from = start.line + 1; // line after the command itself
+  const to = (end && !end.isDisposed ? end.line : buf.length) - 1; // line before the next prompt
+  const lines = [];
+  for (let y = from; y <= to; y++) { const l = buf.getLine(y); if (l) lines.push(l.translateToString(true)); }
+  const text = cleanSel(lines.join("\n")).replace(/\n+$/, "");
+  if (text) { clipWrite(text); overlayFlash("copied last command output"); }
+  else overlayFlash("last command had no output");
+}
 function baseName(p) { if (!p) return ""; const s = String(p).replace(/\/+$/, "").split("/"); return s[s.length - 1] || "/"; }
 function tabName(ws) {
   if (ws.name) return ws.name;
@@ -1472,6 +1492,9 @@ async function makePane(app, attachId) {
         // that draw at column 0, and duplicates their own exit indicator). Scan/nav via the ruler + ⌘↑↓.
         try { term.registerDecoration({ marker: pane._cmdMarker, overviewRulerOptions: { color, position: "right" } }); } catch (_) {}
         pane.marks.push(pane._cmdMarker);
+        // remember this finished command's output range (command line → the line before the next prompt)
+        let endM = null; try { endM = term.registerMarker(0); } catch (_) {}
+        pane.lastCmd = { start: pane._cmdMarker, end: endM, exit };
         pane._cmdMarker = null;
       }
       return true;
@@ -2193,6 +2216,7 @@ function syncSettingsForm() {
   $("set-blink").checked = SETTINGS.cursorBlink;
   $("set-taskbar").checked = SETTINGS.taskbar;
   $("set-header").checked = SETTINGS.header;
+  $("set-shell").checked = shellIntegrationOn;
   $("set-lh").value = SETTINGS.lineHeight; $("set-lh-val").textContent = SETTINGS.lineHeight.toFixed(2);
   $("set-ls").value = SETTINGS.letterSpacing; $("set-ls-val").textContent = SETTINGS.letterSpacing;
   $("set-scroll").value = SETTINGS.scrollback; $("set-scroll-val").textContent = SETTINGS.scrollback.toLocaleString();
@@ -2210,6 +2234,11 @@ $("set-family").addEventListener("change", (e) => setOpt("fontFamily", e.target.
 $("set-blink").addEventListener("change", (e) => setOpt("cursorBlink", e.target.checked));
 $("set-taskbar").addEventListener("change", (e) => { SETTINGS.taskbar = e.target.checked; saveSettings(); syncSettingsForm(); });
 $("set-header").addEventListener("change", (e) => { SETTINGS.header = e.target.checked; applySettings(); });
+$("set-shell").addEventListener("change", (e) => {
+  shellIntegrationOn = e.target.checked;
+  invoke("set_shell_integration", { enabled: shellIntegrationOn }).catch(() => {});
+  overlayFlash("shell integration " + (shellIntegrationOn ? "on" : "off") + " — restart kedi to apply");
+});
 $("set-lh").addEventListener("input", (e) => setOpt("lineHeight", Number(e.target.value)));
 $("set-ls").addEventListener("input", (e) => setOpt("letterSpacing", Number(e.target.value)));
 $("set-scroll").addEventListener("input", (e) => setOpt("scrollback", Number(e.target.value)));
@@ -2349,6 +2378,7 @@ function paletteCommands() {
     { id: "tile", ico: "▦", label: () => (activeWorkspace() && activeWorkspace().mode === "tiled" ? "Cycle Tile Layout" : "Tile This Tab"), hint: "⇧⌘L", kw: "grid columns rows main snap layout split", run: () => cycleTileLayout() },
     { id: "float", ico: "▢", label: "Make Tab Floating", kw: "free windows untile", run: () => setWsMode("floating") },
     { id: "pop-out", ico: "⧉", label: "Pop Out to New Window", hint: "⇧⌘O", kw: "detach native window", run: () => { if (focused) popOut(focused); } },
+    { id: "copy-output", ico: "⧉", label: "Copy Last Command Output", kw: "clipboard yank stdout osc133 shell", run: () => copyLastOutput(focused) },
     { id: "find", ico: "⌕", label: "Find in Terminal", hint: "⌘F", run: () => toggleSearch(true) },
     { id: "audit", ico: "◉", label: "Open Audit Log", kw: "governance record log", run: () => openAudit() },
     { id: "toggle-rec", ico: "●", label: () => (recOn ? "Stop Recording" : "Start Recording"), kw: "record audit", run: () => setRec(!recOn) },
@@ -2526,6 +2556,7 @@ async function boot() {
   // no connection handshake: the warden is in-process and each pane opens its own IPC transport.
   setState("connected", true);
   try { recOn = !!(await invoke("get_recording")); } catch (_) {}
+  try { shellIntegrationOn = await invoke("shell_integration_state"); } catch (_) {}
   applySettings(); // restore saved theme / font / cursor
   // pop-out window: opened as kedi://…?attach=<sid>&solo=1 → re-attach to that running session
   // (teleporting it here) as a solo tiled tab (one pane fills the window).
