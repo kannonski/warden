@@ -68,61 +68,26 @@
   .floatwin.closing { opacity:0; transform:scale(.985); transition: opacity .1s ease, transform .1s ease; }
   .floatwin.stowed { display:none; }  /* minimized → lives in the taskbar (when that setting is on) */
   .floatwin.stowing { opacity:0; transform:scale(.92) translateY(28px); transition:opacity .13s ease, transform .13s ease; }
-  /* minified in place ("window shade"): collapse to the title bar, hide the terminal body. The bar's
-     click handler expands it again. min-height override lets it shrink below the normal floor. */
-  .floatwin.shaded { min-height:0 !important; }
-  .floatwin.shaded .paneterm, .floatwin.shaded .grip { display:none; }
-  .floatwin.shaded .panebar { cursor:pointer; }
-  .floatwin.shaded .ptitle::after { content:" ▸"; color:var(--dim); } /* affordance: click to expand */
   @keyframes winIn { from { opacity:0; transform:scale(.985); } to { opacity:1; transform:scale(1); } }
 
-  .pane { flex:1 1 0; min-width:0; min-height:0; display:flex; flex-direction:column; background:transparent; overflow:hidden; }
-  .panebar { display:flex; align-items:center; gap:8px; padding:3px 9px; font-size:11px; color:var(--dim);
-             background:linear-gradient(var(--panel), #15151f); border-bottom:1px solid var(--edge); flex:0 0 auto; user-select:none; cursor:move; }
-  .ptitle { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color:var(--fg); }
+  .pane { flex:1 1 0; min-width:0; min-height:0; display:flex; flex-direction:column; position:relative; background:transparent; overflow:hidden; }
+  /* Chromeless windows: no title bar. A faint label fades in on hover (info only, never blocks the
+     terminal). Move a window with ⌘-drag (Alt-drag on win/linux) anywhere on it; resize via the grip;
+     close with Ctrl+Shift+W, minimize with Ctrl+Shift+M, maximize with Ctrl+Shift+↑. */
+  .panelabel { position:absolute; top:7px; left:8px; z-index:6; display:flex; align-items:center; gap:8px;
+               max-width:calc(100% - 16px); padding:2px 9px; font-size:11px; line-height:1.55; box-sizing:border-box;
+               color:var(--fg); background:rgba(24,24,37,.72); border:1px solid var(--edge); border-radius:7px;
+               backdrop-filter:blur(6px); -webkit-backdrop-filter:blur(6px); user-select:none; pointer-events:none;
+               opacity:0; transform:translateY(-3px); transition:opacity .14s ease, transform .14s ease; }
+  .floatwin:hover .panelabel { opacity:.94; transform:none; } /* fade in on hover; hidden otherwise */
+  body.tabmode .panelabel, body.stagemode .panelabel { display:none; } /* single/auto-arranged views don't need it */
+  .ptitle { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
   .ptitle::before { content:"\f120"; color:var(--dim); margin-right:7px; font-size:11px; } /* nf-fa-terminal */
   .psize { color:var(--dim); font-size:10px; white-space:nowrap; }
   .prec { display:none; color:var(--red); font-size:10px; white-space:nowrap; animation: recpulse 2.4s ease-in-out infinite; }
   body.rec .prec { display:inline; } /* the per-pane "● rec" badge only shows while recording is on */
   @keyframes recpulse { 0%,100% { opacity:.9; } 50% { opacity:.45; } }
-  .pkill { background:none; border:1px solid var(--edge); color:var(--dim); border-radius:5px; font:inherit; font-size:10px; padding:1px 8px; cursor:pointer; transition: color .12s, border-color .12s, background .12s; }
-  .pkill:hover { color:#1e1e2e; background:var(--red); border-color:var(--red); } /* kill = deliberate governance action, filled red */
-  /* Window controls adapt to the OS (auto-detected, overridable in settings). Three flavors keyed
-     off a body class — plat-mac | plat-win | plat-linux. The buttons carry a glyph (::before) that
-     only the win/linux flavors reveal; macOS shows bare traffic-light dots. */
-  /* per-pane window buttons (close/min/max) removed — panes close via `exit`/Ctrl-D or Ctrl+Shift+W */
-  .wcgroup { display:none; }
-  .wc { border:none; padding:0; cursor:pointer; background:none; color:var(--dim);
-        font-family:ui-monospace,monospace; line-height:1; transition:background .12s, color .12s, opacity .12s, transform .12s; }
-  .wc::before { display:none; }
-
-  /* macOS — traffic lights on the LEFT (order:-1 pulls the group before the title) */
-  body.plat-mac .wcgroup { order:-1; gap:7px; margin-right:4px; }
-  body.plat-mac .wc { width:12px; height:12px; border-radius:50%; opacity:.92; }
-  body.plat-mac .wc:hover { opacity:1; transform:scale(1.12); }
-  body.plat-mac .wc.min { background:#f9e2af; } body.plat-mac .wc.max { background:#a6e3a1; } body.plat-mac .wc.close { background:#f38ba8; }
-  /* macOS traffic-light order: close · minimize · maximize (the DOM order min,max,close suits win/linux) */
-  body.plat-mac .wc.close { order:1; } body.plat-mac .wc.min { order:2; } body.plat-mac .wc.max { order:3; }
-
-  /* Windows — square, flat, full-bleed on the RIGHT; close goes red on hover */
-  body.plat-win .wcgroup { gap:0; margin:-3px -9px -3px 4px; align-self:stretch; } /* cancel panebar padding → flush corner */
-  body.plat-win .wc { width:34px; align-self:stretch; font-size:11px; border-radius:0; }
-  body.plat-win .wc::before { display:inline; }
-  body.plat-win .wc.min::before { content:"\2013"; }   /* – */
-  body.plat-win .wc.max::before { content:"\25a1"; }   /* ▢ */
-  body.plat-win .wc.close::before { content:"\2715"; } /* ✕ */
-  body.plat-win .wc:hover { background:rgba(255,255,255,.09); color:var(--fg); }
-  body.plat-win .wc.close:hover { background:#e81123; color:#fff; }
-
-  /* Linux (GNOME/Adwaita) — soft round buttons with glyphs on the RIGHT */
-  body.plat-linux .wcgroup { gap:6px; margin-left:4px; }
-  body.plat-linux .wc { width:20px; height:20px; border-radius:50%; background:rgba(255,255,255,.06); font-size:10px; }
-  body.plat-linux .wc::before { display:inline; }
-  body.plat-linux .wc.min::before { content:"\2013"; }
-  body.plat-linux .wc.max::before { content:"\25a1"; }
-  body.plat-linux .wc.close::before { content:"\2715"; }
-  body.plat-linux .wc:hover { background:rgba(255,255,255,.14); color:var(--fg); }
-  body.plat-linux .wc.close:hover { background:var(--red); color:#1e1e2e; }
+  body.moving, body.moving * { cursor:grabbing !important; } /* while ⌘/Alt-dragging a window */
   /* taskbar: a floating dock of minimized windows. Hidden entirely when empty; when it has chips it
      AUTO-HIDES — tucked just below the bottom edge so it peeks, and slides fully into view on hover
      (or when a chip has focus, for keyboard users). Never permanently occupies the bottom strip. */
@@ -178,6 +143,15 @@
     border:1px solid var(--edge); border-radius:12px; box-shadow:0 16px 50px rgba(0,0,0,.5);
   }
   #pal-in:focus { border-color:var(--focus); }
+  /* command list (top of the palette): compact action rows, filtered by the same query as sessions */
+  #pal-cmds { margin-top:12px; display:flex; flex-direction:column; gap:3px; flex:0 0 auto; }
+  #pal-cmds:empty { display:none; }
+  .pcmd { display:flex; align-items:center; gap:11px; padding:9px 13px; border-radius:9px; cursor:pointer;
+          background:rgba(24,24,37,.96); border:1px solid var(--edge); color:var(--fg); font-size:13px; transition:border-color .12s, background .12s; }
+  .pcmd:hover, .pcmd.sel { border-color:var(--focus); background:#252539; }
+  .pcmd .pico { width:18px; text-align:center; color:var(--focus); font-size:14px; flex:0 0 auto; }
+  .pcmd .plabel { flex:1 1 auto; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .pcmd .phint { color:var(--dim); font-size:11px; letter-spacing:.03em; flex:0 0 auto; }
   #pal-grid {
     margin-top:14px; overflow-y:auto; padding:4px 2px 8px; display:grid;
     grid-template-columns:repeat(auto-fill,minmax(230px,1fr)); gap:14px; align-content:start;
@@ -230,13 +204,14 @@
     </svg>
     <div class="wordmark">KEDI</div>
   </div>
-  <div id="hint">double-click for a terminal · drag to draw one · <kbd>Ctrl+Shift+↵</kbd> new pane · <kbd>Ctrl+Shift+N</kbd> new window · <kbd>Ctrl+Shift+P</kbd> sessions</div>
+  <div id="hint">double-click for a terminal · drag to draw one · <kbd>⌘T</kbd> new terminal · <kbd>⌘N</kbd> new window · <kbd>⌘K</kbd> command palette</div>
   <div id="ctxmenu"></div>
   <div id="stagehit"></div>
   <div id="palette"><div id="pal-box">
-    <input id="pal-in" type="text" placeholder="type to filter every pane across your tabs — ↵ focus / move here · esc close" autocomplete="off" spellcheck="false">
+    <input id="pal-in" type="text" placeholder="run a command or search sessions — ↑↓ navigate · ↵ run/focus · esc close" autocomplete="off" spellcheck="false">
+    <div id="pal-cmds"></div>
     <div id="pal-grid"></div>
-    <div id="pal-hint">every pane, every browser tab · click or ↵ to focus (this tab) or move here (another tab)</div>
+    <div id="pal-hint">commands · every pane across every window · ↵ to run or focus</div>
   </div></div>
   <div id="snap"></div>
   <div id="overlay"></div>
@@ -264,7 +239,7 @@
     <span id="au-verify" class="badge">…</span>
     <span class="spacer"></span>
     <button id="au-rec" class="au-btn" title="turn recording on/off — writes to the tamper-evident log"><span class="dot"></span><span id="au-rec-label">record</span></button>
-    <button id="au-close" class="wc close" title="close (esc)"></button>
+    <button id="au-close" class="au-btn" title="close (esc)">✕</button>
   </div>
   <div class="au-main">
     <div class="au-side">
@@ -408,8 +383,7 @@
                            width:100% !important; height:100% !important; border-radius:0; border:none;
                            box-shadow:none; z-index:1 !important; animation:none; display:none; }
   body.tabmode .floatwin.tab-active { display:flex; }
-  body.tabmode .floatwin .panebar { cursor:default; }
-  body.tabmode .floatwin .wcgroup, body.tabmode .floatwin .grip { display:none; } /* window controls off in tabs */
+  body.tabmode .floatwin .grip { display:none; } /* no resize grip in the single tab view */
   body.tabmode #canvas { cursor:default; }
   body.tabmode #taskbar { display:none !important; } /* minimize is a floating-mode concept */
 
@@ -429,7 +403,6 @@
   body.stagemode .floatwin.on-stage.focused { box-shadow:inset 0 0 0 2px var(--focus); }        /* active tile in a group */
   body.stagemode .floatwin.on-stage.marked { box-shadow:inset 0 0 0 2px #a6e3a1; }              /* marked (⇧⌃Space) staged pane */
   body.stagemode .floatwin .grip { display:none; }         /* auto-laid-out → no manual resize */
-  body.stagemode .floatwin .panebar { cursor:default; }
   /* overlay layer: one interactive hit-card per pane + labels + group frames. Slides with the rail. */
   #stagehit { position:absolute; inset:0; pointer-events:none; z-index:80; display:none;
               transform:translateX(var(--peek-x, 260px)); transition:transform .28s cubic-bezier(.2,.75,.25,1); }
@@ -468,14 +441,6 @@
       <button data-v="floating">floating</button>
       <button data-v="tab">tabs</button>
       <button data-v="stage">stage</button>
-    </div>
-
-    <label for="set-wc">window buttons</label>
-    <div class="seg" id="set-wc">
-      <button data-v="auto">auto</button>
-      <button data-v="mac">macOS</button>
-      <button data-v="win">Windows</button>
-      <button data-v="linux">Linux</button>
     </div>
 
     <label for="set-taskbar">minimize to taskbar</label>
@@ -595,27 +560,11 @@ const DEFAULT_SETTINGS = {
   lineHeight: 1.0,
   letterSpacing: 0,
   scrollback: 10000,
-  layout: "floating",     // floating | tab
-  winControls: "auto",    // auto | mac | win | linux — window-button flavor
-  taskbar: false,         // minimize → taskbar dock (on) vs. collapse-to-title in place (off, default)
+  layout: "floating",     // floating | tab | stage
+  taskbar: false,         // (kept for compatibility; minimize always stows to the taskbar dock now)
   header: true,           // show the top banner (🐱 kedi · identity · audit · settings); off = more room
 };
 
-// Best-effort OS guess for the "auto" window-control flavor. userAgentData is the modern signal;
-// fall back to the UA string. Returns "mac" | "win" | "linux".
-function detectPlatform() {
-  const p = ((navigator.userAgentData && navigator.userAgentData.platform) || navigator.platform || navigator.userAgent || "").toLowerCase();
-  if (p.includes("mac") || p.includes("iphone") || p.includes("ipad")) return "mac";
-  if (p.includes("win")) return "win";
-  return "linux";
-}
-const controlFlavor = () => SETTINGS.winControls === "auto" ? detectPlatform() : SETTINGS.winControls;
-// Stamp the flavor on <body> so the CSS picks the right window-control style.
-function applyPlatform() {
-  const f = controlFlavor();
-  document.body.classList.remove("plat-mac", "plat-win", "plat-linux");
-  document.body.classList.add("plat-" + f);
-}
 function loadSettings() {
   let s = {};
   try { s = JSON.parse(localStorage.getItem("kedi.settings") || "{}"); } catch (_) {}
@@ -640,7 +589,6 @@ function xtermOpts() {
 // background (so a light theme doesn't float on a dark void), then refit. The app chrome stays the
 // dark Catppuccin shell — the theme recolors the terminals, which is what the palette is about.
 function applySettings() {
-  applyPlatform();
   const t = THEMES[SETTINGS.theme];
   document.documentElement.style.setProperty("--term-bg", t.term.background);
   document.body.classList.toggle("no-header", !SETTINGS.header); // hide the top banner when off
@@ -752,6 +700,22 @@ function setLayout(mode) {
   requestAnimationFrame(fitAll);
   saveSettings();
   if (!$("settings").classList.contains("hide")) syncSettingsForm();
+}
+
+// Unified "zoom" gesture (⌘↵): no mode picking — zoom the focused pane to fill the canvas (the tab
+// view: full pane + a strip to switch), or drop back to the floating arrangement. From stage it zooms
+// the staged pane. This is what makes floating/tab feel like one canvas instead of two modes.
+function toggleZoom() {
+  setLayout(SETTINGS.layout === "tab" ? "floating" : "tab");
+}
+
+// Overview (⌘E): summon Stage as a transient "mission control" over your panes, then dismiss it back
+// to whatever view you came from (floating or tab). Unlike "View: Stage" (which lives in stage), this
+// remembers and restores — so overview is a peek, not a mode you get stuck in.
+let overviewFrom = null;
+function toggleOverview() {
+  if (SETTINGS.layout === "stage") { setLayout(overviewFrom || "floating"); overviewFrom = null; }
+  else { overviewFrom = SETTINGS.layout; setLayout("stage"); }
 }
 
 // Stage Manager layout: focused window on the stage, the rest as live scaled cards in a left rail.
@@ -1109,12 +1073,8 @@ function reflowWindows() {
     win.style.left = Math.round(x) + "px";
     win.style.top = Math.round(y) + "px";
     win.style.width = Math.round(w) + "px";
-    if (!p.shaded) {
-      const h = Math.max(130, (parseFloat(win.style.height) || win.offsetHeight) * ry);
-      win.style.height = Math.round(h) + "px";
-    } else if (p._fullHeight) {
-      p._fullHeight = Math.max(130, Math.round((parseFloat(p._fullHeight) || 480) * ry)) + "px";
-    }
+    const h = Math.max(130, (parseFloat(win.style.height) || win.offsetHeight) * ry);
+    win.style.height = Math.round(h) + "px";
   }
   fitAll();
 }
@@ -1139,16 +1099,15 @@ function zoom(dir) {
 // existing durable session with that id into this tab (re-attach — its prior tab's view detaches).
 async function makePane(app, attachId) {
   const wrapper = document.createElement("div"); wrapper.className = "pane";
-  const bar = document.createElement("div"); bar.className = "panebar";
+  const label = document.createElement("div"); label.className = "panelabel"; // chromeless: faint hover overlay
   const title = document.createElement("span"); title.className = "ptitle";
-  const spacer = document.createElement("span"); spacer.className = "spacer";
   const size = document.createElement("span"); size.className = "psize"; size.textContent = "–"; // live grid size (cols×rows)
   const rec = document.createElement("span"); rec.className = "prec"; rec.textContent = "● rec";
-  bar.append(title, spacer, size, rec);
+  label.append(title, size, rec);
   const termEl = document.createElement("div"); termEl.className = "paneterm";
-  wrapper.append(bar, termEl);
+  wrapper.append(termEl, label);
 
-  const pane = { wrapper, bar, titleEl: title, id: ++paneCount, writer: null, closing: false, floatwin: null };
+  const pane = { wrapper, label, titleEl: title, id: ++paneCount, writer: null, closing: false, floatwin: null };
   wrapper._pane = pane;
   pane.title = "pane " + pane.id;
   title.textContent = pane.title;
@@ -1242,6 +1201,7 @@ async function makePane(app, attachId) {
   // kill) arrives as a `pane-exit` event (see the global listener) → closePane.
   const onOutput = new Channel();
   onOutput.onmessage = (b64) => {
+    if (pane.closing) return; // popped/closed → don't write to a disposed terminal
     const bytes = b64ToBytes(b64);
     // a small chunk carrying a [warden] notice (e.g. policy refusal) → keep it readable
     if (!pane.notice && bytes.length < 256) {
@@ -1250,6 +1210,7 @@ async function makePane(app, attachId) {
     term.write(bytes, () => syncRender(term));
   };
   pane.sid = await invoke("open_pane", { onOutput }); // backend assigns a globally-unique pane sid
+  pane.sessionId = attachId != null ? attachId : pane.sid; // durable session id (stable across pop-out/move)
   pane.connected = true;
   if (attachId) pane.send({ attach: attachId }); // MOVE an existing session here (before the hello)
   else if (app) { pane.app = app; pane.send({ app }); } // a plugin pane: request the WASM app first
@@ -1277,6 +1238,35 @@ function closePane(p) {
     // closed the last window in this tab → maybe offer to stop the whole server (if we're the last tab)
     if (!document.querySelector(".floatwin")) maybeOfferShutdown();
   }, wait);
+}
+
+// Pop a pane out into its own native OS window. The backend opens a window that re-attaches to the
+// session (teleport → the new window becomes the owner); we then drop only our VIEW — never sending
+// {close} and never dropping the backend sender — so the session can't be killed by popping. Once the
+// new window attaches, this window's old viewer is superseded and left running until this window closes.
+function popOut(pane) {
+  const p = pane || focused;
+  if (!p || p.closing) return;
+  if (allPanes().length <= 1 && SETTINGS.layout === "floating") {
+    // last pane in a plain window — popping would just move it to an identical empty window; no-op-ish
+  }
+  const s = p.sessionId != null ? p.sessionId : p.sid;
+  invoke("pop_out", { sid: s }).catch(() => {});
+  detachLocal(p);
+}
+// Remove a pane's local view WITHOUT ending its session (unlike closePane, which sends {close}).
+function detachLocal(p) {
+  if (!p || p.closing) return; p.closing = true;
+  p.connected = false; // guarantee nothing sends {close}: the session lives on in the new window
+  try { p.term.dispose(); } catch (_) {}
+  if (p.taskChip) { p.taskChip.remove(); p.taskChip = null; taskbarSync(); }
+  if (p.floatwin) { const w = p.floatwin; w.classList.add("closing"); setTimeout(() => w.remove(), 110); }
+  if (focused === p) focused = null;
+  const next = allPanes()[0];
+  if ((SETTINGS.layout === "tab" || SETTINGS.layout === "stage") && next) setFocus(next);
+  else if (SETTINGS.layout === "stage") stageLayout();
+  else renderTabs();
+  if (!document.querySelector(".floatwin")) resetToHint();
 }
 
 // The hint (empty) screen — shown when this tab has no open windows.
@@ -1331,23 +1321,11 @@ function spawnFloat(x, y, w, h, app, attachId) {
     win.style.cssText = `left:${x}px;top:${y}px;width:${w}px;height:${h}px;z-index:${++zTop}`;
     win.appendChild(pane.wrapper);
     pane.floatwin = win;
-    const bar = pane.bar;
-    const min = document.createElement("button"); min.className = "wc min"; min.title = "minimize";
-    const max = document.createElement("button"); max.className = "wc max"; max.title = "maximize / restore";
-    const cls = document.createElement("button"); cls.className = "wc close"; cls.title = "close";
-    const wcg = document.createElement("div"); wcg.className = "wcgroup"; wcg.append(min, max, cls);
-    bar.append(wcg); // no per-window kill — closing is close; kill (attributed) lives in the audit panel
-    min.addEventListener("click", (e) => { e.stopPropagation(); minimizePane(pane); });
-    max.addEventListener("click", (e) => { e.stopPropagation(); if (pane.shaded) unshadePane(pane); else snapWin(win, pane, "max"); });
-    cls.addEventListener("click", (e) => { e.stopPropagation(); closePane(pane); });
-    // title-bar click: a shaded (minified) window expands on a single click; otherwise double-click
-    // toggles maximize. (A shaded window's body is hidden, so the click can only hit the bar.)
-    bar.addEventListener("click", (e) => { if (pane.shaded && !e.target.closest(".wc")) { e.stopPropagation(); unshadePane(pane); } });
-    bar.addEventListener("dblclick", (e) => { if (!pane.shaded && !e.target.closest(".wc")) snapWin(win, pane, "max"); });
-
+    // Chromeless: no window buttons. Move = ⌘/Alt-drag anywhere (dragWin); resize = grip;
+    // close/minimize/maximize are keyboard actions (Ctrl+Shift+W / M / ↑).
     const grip = document.createElement("div"); grip.className = "grip"; win.appendChild(grip);
     $("canvas").appendChild(win);
-    dragWin(win, bar, pane);
+    dragWin(win, pane);
     resizeWin(win, grip, pane);
     win.addEventListener("mousedown", () => { if (SETTINGS.layout === "stage") return; win.style.zIndex = ++zTop; setFocus(pane); });
     $("hint").style.display = "none";
@@ -1423,33 +1401,12 @@ function restoreWin(win, pane) { if (win._restore) { applyGeom(win, pane, win._r
 // Default is "minify" — collapse the window to its title bar IN PLACE (macOS window-shade); click
 // the bar to expand. If the `taskbar` setting is on, minimize stows to the bottom dock instead.
 function taskbarSync() { $("taskbar").classList.toggle("show", !!$("taskbar").querySelector(".taskchip")); }
+// Minimize → stow to the taskbar dock (the old collapse-to-title-bar "shade" is gone with the bar).
+// The taskbar auto-reveals when it holds a chip, so this works whether or not the setting is on.
 function minimizePane(pane) {
   const win = pane.floatwin;
-  if (!win || pane.stowed || pane.shaded || pane.closing) return;
-  if (SETTINGS.taskbar) { stowToTaskbar(pane); return; }
-  shadePane(pane); // default: collapse to the title bar in place
-}
-// collapse-to-title in place: remember the full height, drop to the panebar's height.
-function shadePane(pane) {
-  const win = pane.floatwin;
-  pane.shaded = true;
-  pane._fullHeight = win.style.height || win.offsetHeight + "px";
-  win.classList.add("animate", "shaded");
-  win.style.height = pane.bar.offsetHeight + "px";
-  if (focused === pane) {
-    const rest = allPanes().filter((p) => p !== pane && !p.stowed && !p.shaded);
-    focused = null;
-    if (rest.length) setFocus(rest[rest.length - 1]);
-  }
-}
-function unshadePane(pane) {
-  const win = pane.floatwin;
-  pane.shaded = false;
-  win.classList.add("animate");
-  win.classList.remove("shaded");
-  win.style.height = pane._fullHeight || "480px";
-  win.style.zIndex = ++zTop;
-  requestAnimationFrame(() => { try { pane.fit.fit(); } catch (_) {} pane.send({ resize: [pane.term.cols, pane.term.rows] }); setFocus(pane); });
+  if (!win || pane.stowed || pane.closing) return;
+  stowToTaskbar(pane);
 }
 function stowToTaskbar(pane) {
   const win = pane.floatwin;
@@ -1493,12 +1450,15 @@ function edgeZone(x, y, W, H) {
   return null;
 }
 
-function dragWin(win, handle, pane) {
-  handle.addEventListener("mousedown", (e) => {
-    if (SETTINGS.layout === "stage") return; // stage mode auto-lays-out; card drags are for grouping
-    if (e.target.classList.contains("pkill")) return;
-    e.preventDefault();
-    win.style.zIndex = ++zTop;
+// Chromeless move: ⌘-drag (Alt-drag on win/linux) ANYWHERE on the window. Capture-phase so the
+// modifier grab preempts xterm's own text selection; a plain drag (no modifier) falls through to the
+// terminal untouched. Drag to an edge to snap (same edgeZone logic as before).
+function dragWin(win, pane) {
+  win.addEventListener("mousedown", (e) => {
+    if (e.button !== 0 || SETTINGS.layout !== "floating") return; // only floating windows move
+    if (!(e.metaKey || e.altKey)) return;                      // plain drag = terminal selection
+    e.preventDefault(); e.stopPropagation();
+    win.style.zIndex = ++zTop; setFocus(pane); document.body.classList.add("moving");
     if (win._snap) { win._restore = null; win._snap = null; } // dragging off a snap
     const sx = e.clientX, sy = e.clientY, ox = win.offsetLeft, oy = win.offsetTop;
     const c = $("canvas"), vr = c.getBoundingClientRect(), snap = $("snap");
@@ -1510,11 +1470,12 @@ function dragWin(win, handle, pane) {
       else snap.style.display = "none";
     };
     const up = () => {
-      document.removeEventListener("mousemove", move); document.removeEventListener("mouseup", up); snap.style.display = "none";
+      document.removeEventListener("mousemove", move); document.removeEventListener("mouseup", up);
+      snap.style.display = "none"; document.body.classList.remove("moving");
       if (pending) snapWin(win, pane, pending); // top edge → maximize; sides/corners → snap
     };
     document.addEventListener("mousemove", move); document.addEventListener("mouseup", up);
-  });
+  }, true);
 }
 function resizeWin(win, grip, pane) {
   grip.addEventListener("mousedown", (e) => {
@@ -1851,7 +1812,6 @@ function syncSettingsForm() {
   $("set-scroll").value = SETTINGS.scrollback; $("set-scroll-val").textContent = SETTINGS.scrollback.toLocaleString();
   for (const b of $("set-cursor").children) b.classList.toggle("on", b.dataset.v === SETTINGS.cursorStyle);
   for (const b of $("set-layout").children) b.classList.toggle("on", b.dataset.v === SETTINGS.layout);
-  for (const b of $("set-wc").children) b.classList.toggle("on", b.dataset.v === SETTINGS.winControls);
 }
 // One helper: mutate SETTINGS[key], apply live, and reflect back into the form.
 const setOpt = (key, val) => { SETTINGS[key] = val; applySettings(); syncSettingsForm(); };
@@ -1870,7 +1830,6 @@ $("set-ls").addEventListener("input", (e) => setOpt("letterSpacing", Number(e.ta
 $("set-scroll").addEventListener("input", (e) => setOpt("scrollback", Number(e.target.value)));
 $("set-cursor").addEventListener("click", (e) => { const b = e.target.closest("button"); if (b) setOpt("cursorStyle", b.dataset.v); });
 $("set-layout").addEventListener("click", (e) => { const b = e.target.closest("button"); if (b) setLayout(b.dataset.v); });
-$("set-wc").addEventListener("click", (e) => { const b = e.target.closest("button"); if (b) { SETTINGS.winControls = b.dataset.v; applyPlatform(); saveSettings(); syncSettingsForm(); } });
 $("set-reset").addEventListener("click", () => { SETTINGS = { ...DEFAULT_SETTINGS }; setLayout(SETTINGS.layout); applySettings(); syncSettingsForm(); });
 
 // New-pane / palette shortcuts, from ANYWHERE (empty canvas, any pane, an overlay). We deliberately
@@ -1879,6 +1838,14 @@ $("set-reset").addEventListener("click", () => { SETTINGS = { ...DEFAULT_SETTING
 document.addEventListener("keydown", (e) => {
   if (e._kediHandled) return; // a focused terminal's keyHandler already handled this event
   const k = e.key.toLowerCase();
+  // ZOOM — ⌘↵ toggles the focused pane between full-canvas (tab view) and the floating arrangement.
+  if (e.metaKey && !e.ctrlKey && !e.altKey && !e.shiftKey && (e.key === "Enter" || k === "enter")) {
+    e.preventDefault(); toggleZoom(); return;
+  }
+  // OVERVIEW — ⌘E summons/dismisses the Stage overview, restoring the previous view on dismiss.
+  if (e.metaKey && !e.ctrlKey && !e.altKey && !e.shiftKey && k === "e") {
+    e.preventDefault(); toggleOverview(); return;
+  }
   // NEW PANE — Ctrl+Shift+Enter. NOT Ctrl+T: a browser reserves Ctrl+T for a new browser tab and the
   // page never sees it (nothing kedi can do about that). This combo is free, so it reaches us and
   // opens a pane inside the current kedi.
@@ -1890,10 +1857,7 @@ document.addEventListener("keydown", (e) => {
   if (e.ctrlKey && e.shiftKey && k === "n") {
     e.preventDefault(); invoke("new_window").catch(() => {}); return;
   }
-  // SESSION PALETTE — Ctrl+Shift+P (Chrome may reserve it in a normal tab; works in the --app window)
-  if (e.ctrlKey && e.shiftKey && k === "p" && !$("palette").classList.contains("show")) {
-    e.preventDefault(); openPalette(); return;
-  }
+  // (command palette is now ⌘K via the native View menu — no in-app Ctrl+Shift+P)
   // SETTINGS — Ctrl+Shift+, from anywhere. The escape hatch when the top bar is hidden (its ⚙ button
   // is gone), so you can always get back to turn the bar on again.
   if (e.ctrlKey && e.shiftKey && (k === "," || e.key === "<")) {
@@ -1911,6 +1875,16 @@ document.addEventListener("keydown", (e) => {
 
 function keyHandler(e, pane) {
   if (e.type !== "keydown") return true;
+  // Native-style ⌘C / ⌘V in the terminal (not on the menu bar, so the webview sees them). ⌘C copies
+  // the selection (Ctrl+C stays SIGINT); ⌘V pastes. Other ⌘ combos are the menu's — let them pass.
+  if (e.metaKey && !e.ctrlKey && !e.altKey && !e.shiftKey) {
+    const mk = e.key.toLowerCase();
+    if (mk === "c") { copySel(pane); e._kediHandled = true; e.preventDefault(); return false; }
+    if (mk === "v") { pasteInto(pane); e._kediHandled = true; e.preventDefault(); return false; }
+    if (e.key === "Enter") { toggleZoom(); e._kediHandled = true; e.preventDefault(); return false; } // ⌘↵ zoom
+    if (mk === "e") { toggleOverview(); e._kediHandled = true; e.preventDefault(); return false; } // ⌘E overview
+    return true;
+  }
   if (!e.ctrlKey || !e.shiftKey) return true;
   const k = e.key.toLowerCase();
   const fw = focused && focused.floatwin;
@@ -1938,7 +1912,7 @@ function keyHandler(e, pane) {
     case "[": SETTINGS.layout === "stage" ? cycleStage(-1) : (ok = false); break; // stage: prev item
     case "m": focused ? minimizePane(focused) : (ok = false); break;
     case ",": case "<": toggleSettings(); break; // Ctrl+Shift+, → settings
-    case "p": openPalette(); break; // Ctrl+Shift+P → session palette (search / focus / move here)
+    case "p": ok = false; break; // (palette moved to ⌘K in the native View menu)
     default: ok = false;
   }
   if (ok) { e._kediHandled = true; e.preventDefault(); return false; } // flag: doc listener won't re-fire
@@ -1949,7 +1923,29 @@ function keyHandler(e, pane) {
 // here (if it lives in another tab). The server's /sessions is the shared source of truth across all
 // tabs/connections; each session carries the per-pane `tab` key ("<tab-id>:<pane-id>") its owner
 // pushed, so we can tell our own panes apart from other tabs' and map a row back to a local pane.
-const pal = { rows: [], sel: 0 };
+const pal = { cmds: [], rows: [], sel: 0 };
+
+// Command palette actions (⌘K). Filtered by the same query as sessions and shown above them. `label`
+// may be a function for dynamic text (e.g. start/stop recording). Add pop-out / groups here later.
+function paletteCommands() {
+  return [
+    { id: "new-terminal", ico: "❯", label: "New Terminal", hint: "⌘T", run: () => spawnFloatCascade() },
+    { id: "new-window", ico: "❐", label: "New Window", hint: "⌘N", run: () => invoke("new_window").catch(() => {}) },
+    { id: "zoom", ico: "⤢", label: () => (SETTINGS.layout === "tab" ? "Restore (Un-zoom)" : "Zoom Focused Pane"), hint: "⌘↵", kw: "maximize fullscreen focus tab", run: () => toggleZoom() },
+    { id: "overview", ico: "◫", label: () => (SETTINGS.layout === "stage" ? "Exit Overview" : "Overview (Stage)"), hint: "⌘E", kw: "stage mission control expose peek", run: () => toggleOverview() },
+    { id: "pop-out", ico: "⧉", label: "Pop Out to New Window", hint: "⇧⌘O", kw: "detach native window tab stage", run: () => { if (focused) popOut(focused); } },
+    { id: "view-floating", ico: "▢", label: "View: Floating", kw: "layout arrange window", run: () => setLayout("floating") },
+    { id: "view-tabs", ico: "▭", label: "View: Tabs", kw: "layout", run: () => setLayout("tab") },
+    { id: "view-stage", ico: "◨", label: "View: Stage Manager", kw: "layout group", run: () => setLayout("stage") },
+    { id: "arrange-grid", ico: "▦", label: "Arrange Windows in a Grid", kw: "tile layout floating", run: () => { setLayout("floating"); tileGrid(); } },
+    { id: "find", ico: "⌕", label: "Find in Terminal", hint: "⌘F", run: () => toggleSearch(true) },
+    { id: "audit", ico: "◉", label: "Open Audit Log", kw: "governance record log", run: () => openAudit() },
+    { id: "toggle-rec", ico: "●", label: () => (recOn ? "Stop Recording" : "Start Recording"), kw: "record audit", run: () => setRec(!recOn) },
+    { id: "settings", ico: "⚙", label: "Settings", hint: "⌘,", run: () => toggleSettings(true) },
+    { id: "close", ico: "✕", label: "Close Terminal", hint: "⌘W", run: () => { if (focused) closePane(focused); } },
+  ];
+}
+const cmdLabel = (c) => (typeof c.label === "function" ? c.label() : c.label);
 
 // find the LOCAL pane that owns a session row (its tab key is "<our TAB_ID>:<pane.id>"), or null.
 function localPaneFor(row) {
@@ -2002,31 +1998,43 @@ function localPreview(pane) {
 
 function renderPalette() {
   const q = $("pal-in").value.trim().toLowerCase();
+  // commands filter on label + keywords; sessions on title/who/preview/caps
+  const cmds = paletteCommands().filter((c) => !q || (cmdLabel(c).toLowerCase() + " " + (c.kw || "")).includes(q));
   const rows = (pal.all || []).filter((s) => {
     if (!q) return true;
     return (`${s.title || ""} ${s.who || ""} ${s.preview || ""} ${(s.caps || []).join(" ")}`).toLowerCase().includes(q);
   });
-  pal.rows = rows;
-  if (pal.sel >= rows.length) pal.sel = Math.max(0, rows.length - 1);
-  const grid = $("pal-grid");
-  grid.innerHTML = "";
-  if (!rows.length) {
-    const e = document.createElement("div"); e.id = "pal-empty";
-    e.textContent = (pal.all || []).length ? "no pane matches your filter" : "no live sessions yet — open a terminal";
-    grid.appendChild(e);
-    return;
-  }
-  rows.forEach((s, i) => {
+  pal.cmds = cmds; pal.rows = rows;
+  const total = cmds.length + rows.length;
+  if (pal.sel >= total) pal.sel = Math.max(0, total - 1);
+
+  // command rows (top)
+  const clist = $("pal-cmds"); clist.innerHTML = "";
+  cmds.forEach((c, i) => {
+    const row = document.createElement("div");
+    row.className = "pcmd" + (i === pal.sel ? " sel" : "");
+    const ico = document.createElement("span"); ico.className = "pico"; ico.textContent = c.ico || "›";
+    const label = document.createElement("span"); label.className = "plabel"; label.textContent = cmdLabel(c);
+    const hint = document.createElement("span"); hint.className = "phint"; hint.textContent = c.hint || "";
+    row.append(ico, label, hint);
+    row.addEventListener("mouseenter", () => paintSel(i));
+    row.addEventListener("click", () => runFlat(i));
+    clist.appendChild(row);
+  });
+
+  // session tiles (below), continuing the flat selection index after the commands
+  const grid = $("pal-grid"); grid.innerHTML = "";
+  rows.forEach((s, j) => {
+    const flatIdx = cmds.length + j;
     const local = localPaneFor(s);
     const here = !!local;
     const isApp = (s.caps || []).includes("app");
     const glyph = isApp ? "▤" : "❯";
     const title = (s.title && s.title.trim()) ? s.title : (here ? "pane " + local.id : "session " + s.id);
-    // live local preview if we can read the pane; else the server's ring preview
     const preview = (here ? localPreview(local) : "") || s.preview || "";
 
     const tile = document.createElement("div");
-    tile.className = "tile" + (i === pal.sel ? " sel" : "");
+    tile.className = "tile" + (flatIdx === pal.sel ? " sel" : "");
     const screen = document.createElement("div");
     screen.className = "tile-screen" + (preview ? "" : " empty");
     if (preview) {
@@ -2040,33 +2048,44 @@ function renderPalette() {
     const meta = document.createElement("div"); meta.className = "tile-meta";
     const who = document.createElement("span"); who.textContent = s.who || "?";
     const where = document.createElement("span"); where.className = "tile-where" + (here ? "" : " remote");
-    where.textContent = here ? "this tab" : "another tab";
+    where.textContent = here ? "this window" : "another window";
     const act = document.createElement("span"); act.className = "tile-act"; act.textContent = here ? "focus →" : "move here →";
     meta.append(who, where, act);
     foot.append(tt, meta);
     tile.append(screen, foot);
 
-    tile.addEventListener("mouseenter", () => selectTile(i));
-    tile.addEventListener("click", () => choosePalette(s));
+    tile.addEventListener("mouseenter", () => paintSel(flatIdx));
+    tile.addEventListener("click", () => runFlat(flatIdx));
     grid.appendChild(tile);
   });
+
+  if (!total) {
+    const e = document.createElement("div"); e.id = "pal-empty";
+    e.textContent = q ? "no command or session matches" : "no live sessions yet — open a terminal";
+    grid.appendChild(e);
+  }
 }
 
-function selectTile(i) {
+// Flat selection spans [commands…, sessions…]; paint the highlight across both lists and scroll it in.
+function paintSel(i) {
   pal.sel = i;
-  [...$("pal-grid").children].forEach((c, j) => c.classList.toggle("sel", j === i));
-  const sel = $("pal-grid").children[i];
-  if (sel && sel.scrollIntoView) sel.scrollIntoView({ block: "nearest" });
+  const cmdEls = [...$("pal-cmds").children];
+  const tileEls = [...$("pal-grid").children].filter((c) => c.classList.contains("tile"));
+  cmdEls.forEach((el, k) => el.classList.toggle("sel", k === i));
+  tileEls.forEach((el, k) => el.classList.toggle("sel", (cmdEls.length + k) === i));
+  const active = i < cmdEls.length ? cmdEls[i] : tileEls[i - cmdEls.length];
+  if (active && active.scrollIntoView) active.scrollIntoView({ block: "nearest" });
 }
 
-// columns in the current grid layout (for up/down arrow nav across rows)
-function palCols() {
-  const grid = $("pal-grid");
-  const style = getComputedStyle(grid).gridTemplateColumns;
-  return Math.max(1, style.split(" ").filter(Boolean).length);
+// run the flat-index item: a command's action, or focus/move the session behind a tile
+function runFlat(i) {
+  const c = pal.cmds[i];
+  if (c) { closePalette(); if (typeof c.run === "function") c.run(); return; }
+  const s = pal.rows[i - pal.cmds.length];
+  if (s) choosePalette(s);
 }
 
-// act on a tile: focus it if it's a pane in THIS tab, else move the live session here.
+// act on a session tile: focus it if it's a pane in THIS window, else move the live session here.
 function choosePalette(s) {
   closePalette();
   const local = localPaneFor(s);
@@ -2076,13 +2095,10 @@ function choosePalette(s) {
 
 $("pal-in").addEventListener("input", () => { pal.sel = 0; renderPalette(); });
 $("pal-in").addEventListener("keydown", (e) => {
-  const n = pal.rows.length; if (!n) return;
-  const cols = palCols();
-  if (e.key === "ArrowRight") { e.preventDefault(); selectTile(Math.min(n - 1, pal.sel + 1)); }
-  else if (e.key === "ArrowLeft") { e.preventDefault(); selectTile(Math.max(0, pal.sel - 1)); }
-  else if (e.key === "ArrowDown") { e.preventDefault(); selectTile(Math.min(n - 1, pal.sel + cols)); }
-  else if (e.key === "ArrowUp") { e.preventDefault(); selectTile(Math.max(0, pal.sel - cols)); }
-  else if (e.key === "Enter") { e.preventDefault(); const s = pal.rows[pal.sel]; if (s) choosePalette(s); }
+  const total = pal.cmds.length + pal.rows.length; if (!total) return;
+  if (e.key === "ArrowDown" || e.key === "ArrowRight") { e.preventDefault(); paintSel(Math.min(total - 1, pal.sel + 1)); }
+  else if (e.key === "ArrowUp" || e.key === "ArrowLeft") { e.preventDefault(); paintSel(Math.max(0, pal.sel - 1)); }
+  else if (e.key === "Enter") { e.preventDefault(); runFlat(pal.sel); }
 });
 // click the backdrop (outside a tile / the input) closes the exposé
 $("palette").addEventListener("mousedown", (e) => { if (e.target.id === "palette" || e.target.id === "pal-box") closePalette(); });
@@ -2093,6 +2109,20 @@ function overlay(html) { const o = $("overlay"); o.style.display = "grid"; o.inn
 listen("pane-exit", (e) => {
   const p = allPanes().find((x) => x.sid === e.payload);
   if (p) { p.connected = false; closePane(p); }
+});
+
+// Native menu bar actions (⌘T/⌘W/⌘K/⌘F/⌘,). The backend emits to every window; only the focused one
+// should act, so we gate on document.hasFocus(). New Window is handled entirely in the backend.
+listen("menu", (e) => {
+  if (!document.hasFocus()) return;
+  switch (e.payload) {
+    case "new_terminal": spawnFloatCascade(); break;
+    case "pop_out_pane": if (focused) popOut(focused); break;
+    case "close_pane": if (focused) closePane(focused); break;
+    case "settings": toggleSettings(true); break;
+    case "find": toggleSearch(true); break;
+    case "palette": openPalette(); break;
+  }
 });
 
 async function boot() {
@@ -2107,7 +2137,12 @@ async function boot() {
   setState("connected", true);
   try { recOn = !!(await invoke("get_recording")); } catch (_) {}
   setLayout(SETTINGS.layout); applySettings(); // restore saved theme / font / cursor / layout
-  spawnFloatCascade(); // open with one terminal; draw or Ctrl+Shift+N for more
+  // pop-out window: opened as kedi://…?attach=<sid>&solo=1 → re-attach to that running session
+  // (teleporting it here) instead of spawning a fresh terminal; solo → zoom it to fill the window.
+  const bp = new URLSearchParams(location.search);
+  const attach = bp.get("attach");
+  if (attach) { moveSessionHere(Number(attach)); if (bp.get("solo")) setLayout("tab"); }
+  else spawnFloatCascade(); // open with one terminal; ⌘T or ⌘N for more
   _lastCanvas = { w: $("canvas").clientWidth, h: $("canvas").clientHeight };
   // coalesce the rapid resize-event stream to one reflow per frame (avoids spamming pty resizes)
   let _reflowPending = false;

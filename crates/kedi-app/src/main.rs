@@ -13,6 +13,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use tauri::ipc::Channel;
+use tauri::menu::{Menu, MenuItem, PredefinedMenuItem, Submenu};
 use tauri::{Emitter, Manager, State, WebviewUrl, WebviewWindowBuilder};
 use tokio::sync::mpsc::{UnboundedSender, unbounded_channel};
 
@@ -205,20 +206,93 @@ fn pane_send(state: State<AppState>, sid: u64, line: String) {
 
 /// Open another kedi window — a full, independent canvas sharing the same in-process warden (so its
 /// sessions appear in every window's palette/audit). Panes are keyed by backend sid, so no collision.
-#[tauri::command]
-fn new_window(app: tauri::AppHandle, state: State<AppState>) -> Result<(), String> {
+/// `query` is appended to the URL (e.g. `?attach=5&solo=1` to pop a session out into its own window).
+fn open_window_url(app: &tauri::AppHandle, query: &str) -> Result<(), String> {
+    let state = app.state::<AppState>();
     let n = state.next_win.fetch_add(1, Ordering::Relaxed);
     let label = format!("kedi-{n}");
-    tauri::WebviewWindowBuilder::new(
-        &app,
-        &label,
-        WebviewUrl::External("kedi://localhost/index.html".parse().unwrap()),
-    )
-    .title("kedi — governed terminal")
-    .inner_size(960.0, 640.0)
-    .build()
-    .map_err(|e| e.to_string())?;
+    let url = format!("kedi://localhost/index.html{query}");
+    WebviewWindowBuilder::new(app, &label, WebviewUrl::External(url.parse().unwrap()))
+        .title("kedi — governed terminal")
+        .inner_size(960.0, 640.0)
+        .build()
+        .map_err(|e| e.to_string())?;
     Ok(())
+}
+
+/// Shared by the `new_window` command and the native File ▸ New Window menu item.
+fn open_new_window(app: &tauri::AppHandle) -> Result<(), String> {
+    open_window_url(app, "")
+}
+
+#[tauri::command]
+fn new_window(app: tauri::AppHandle) -> Result<(), String> {
+    open_new_window(&app)
+}
+
+/// Pop a running session out into its own native OS window: open a new window that re-attaches to
+/// session `sid` (a teleport — the warden hands ownership to the new viewer; the old window drops its
+/// view without closing). The new window then gets native tabbing / Stage Manager for free.
+#[tauri::command]
+fn pop_out(app: tauri::AppHandle, sid: u64) -> Result<(), String> {
+    open_window_url(&app, &format!("?attach={sid}&solo=1"))
+}
+
+/// The native application menu bar (macOS gets a real top menu; win/linux get a window menu). Custom
+/// items carry an id we dispatch in `on_menu_event`; the ⌘ accelerators are handled natively by the
+/// OS *before* the webview sees them, so they don't collide with the browser-reserved combos that
+/// forced the in-app Ctrl+Shift shortcuts. New Window is handled in-process; the rest are emitted to
+/// the focused window as a `menu` event the frontend acts on.
+fn build_menu(app: &tauri::AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
+    let app_menu = Submenu::with_items(
+        app,
+        "kedi",
+        true,
+        &[
+            &PredefinedMenuItem::about(app, None, None)?,
+            &PredefinedMenuItem::separator(app)?,
+            &MenuItem::with_id(app, "settings", "Settings…", true, Some("CmdOrCtrl+Comma"))?,
+            &PredefinedMenuItem::separator(app)?,
+            &PredefinedMenuItem::hide(app, None)?,
+            &PredefinedMenuItem::hide_others(app, None)?,
+            &PredefinedMenuItem::show_all(app, None)?,
+            &PredefinedMenuItem::separator(app)?,
+            &PredefinedMenuItem::quit(app, None)?,
+        ],
+    )?;
+    let file_menu = Submenu::with_items(
+        app,
+        "File",
+        true,
+        &[
+            &MenuItem::with_id(app, "new_terminal", "New Terminal", true, Some("CmdOrCtrl+T"))?,
+            &MenuItem::with_id(app, "new_window", "New Window", true, Some("CmdOrCtrl+N"))?,
+            &MenuItem::with_id(app, "pop_out_pane", "Pop Out Terminal", true, Some("CmdOrCtrl+Shift+O"))?,
+            &PredefinedMenuItem::separator(app)?,
+            &MenuItem::with_id(app, "close_pane", "Close Terminal", true, Some("CmdOrCtrl+W"))?,
+        ],
+    )?;
+    let view_menu = Submenu::with_items(
+        app,
+        "View",
+        true,
+        &[
+            &MenuItem::with_id(app, "palette", "Command Palette…", true, Some("CmdOrCtrl+K"))?,
+            &MenuItem::with_id(app, "find", "Find…", true, Some("CmdOrCtrl+F"))?,
+        ],
+    )?;
+    let window_menu = Submenu::with_items(
+        app,
+        "Window",
+        true,
+        &[
+            &PredefinedMenuItem::minimize(app, None)?,
+            &PredefinedMenuItem::maximize(app, None)?,
+            &PredefinedMenuItem::separator(app)?,
+            &PredefinedMenuItem::close_window(app, Some("Close Window"))?,
+        ],
+    )?;
+    Menu::with_items(app, &[&app_menu, &file_menu, &view_menu, &window_menu])
 }
 
 /// {clients, sessions} — the browser polled this to decide "am I the last tab?" before offering to
@@ -370,6 +444,17 @@ fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_clipboard_manager::init()) // copy/paste (navigator.clipboard is blocked on kedi://)
         .plugin(tauri_plugin_opener::init()) // open clicked links in the system browser
+        .menu(build_menu) // native menu bar: ⌘T/⌘N/⌘W/⌘K/⌘F/⌘, handled by the OS
+        .on_menu_event(|app, event| match event.id().as_ref() {
+            "new_window" => {
+                let _ = open_new_window(app);
+            }
+            // dispatched to the focused window; the frontend guards on document.hasFocus()
+            id @ ("settings" | "new_terminal" | "close_pane" | "find" | "palette" | "pop_out_pane") => {
+                let _ = app.emit("menu", id);
+            }
+            _ => {}
+        })
         // Serve the hot-swappable ui/ dir. Read fresh + no-store so edits show on reload.
         .register_asynchronous_uri_scheme_protocol("kedi", |ctx, request, responder| {
             let base = ui_dir(ctx.app_handle());
@@ -448,6 +533,7 @@ fn main() {
             open_pane,
             pane_send,
             new_window,
+            pop_out,
             clients_json,
             shutdown,
             open_url,
