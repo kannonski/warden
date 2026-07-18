@@ -154,6 +154,53 @@ fn reconcile_ui(
     }
 }
 
+/// Shell integration (zsh): point ZDOTDIR at a kedi dir whose .zshenv/.zshrc SOURCE the user's real
+/// config first, then add precmd/preexec hooks that emit OSC 133 (command marks A/C/D + exit code) and
+/// OSC 7 (cwd). Set process-wide so every pane's pty inherits it. Opt out with KEDI_NO_SHELL_INTEGRATION=1.
+/// Only touches zsh (bash/others ignore ZDOTDIR) and always falls back to the user's config, so a broken
+/// hook can't lose their environment. `KEDI_UZDOTDIR` carries their original ZDOTDIR (or $HOME).
+fn setup_shell_integration(app: &tauri::AppHandle) {
+    if std::env::var_os("KEDI_NO_SHELL_INTEGRATION").is_some() {
+        return;
+    }
+    let dir = app.path().app_data_dir().expect("app_data_dir").join("shell");
+    if std::fs::create_dir_all(&dir).is_err() {
+        return;
+    }
+    // .zshenv runs for every zsh; source the user's first (PATH etc. live here for many setups).
+    let zshenv = "[ -n \"$KEDI_UZDOTDIR\" ] && [ -f \"$KEDI_UZDOTDIR/.zshenv\" ] && \
+                  source \"$KEDI_UZDOTDIR/.zshenv\"\n";
+    // .zshrc: restore ZDOTDIR, source the user's .zshrc, then install the integration hooks.
+    let zshrc = r#"KEDI_UZDOTDIR="${KEDI_UZDOTDIR:-$HOME}"
+ZDOTDIR="$KEDI_UZDOTDIR"
+[ -f "$KEDI_UZDOTDIR/.zshrc" ] && source "$KEDI_UZDOTDIR/.zshrc"
+# ── kedi shell integration (OSC 133 command marks + OSC 7 cwd) ──
+__kedi_osc() { printf '\033]%s\007' "$1"; }
+__kedi_precmd() { local e=$?; __kedi_osc "133;D;$e"; __kedi_osc "7;file://${HOST}${PWD}"; __kedi_osc "133;A"; }
+__kedi_preexec() { __kedi_osc "133;C"; }
+if autoload -Uz add-zsh-hook 2>/dev/null && whence add-zsh-hook >/dev/null 2>&1; then
+  add-zsh-hook precmd __kedi_precmd
+  add-zsh-hook preexec __kedi_preexec
+fi
+"#;
+    if std::fs::write(dir.join(".zshenv"), zshenv).is_err()
+        || std::fs::write(dir.join(".zshrc"), zshrc).is_err()
+    {
+        return;
+    }
+    // remember the user's original ZDOTDIR so our scripts can source it, then redirect zsh to ours.
+    let user_zdotdir = std::env::var("ZDOTDIR").unwrap_or_default();
+    let user_zdotdir = if user_zdotdir.is_empty() {
+        std::env::var("HOME").unwrap_or_default()
+    } else {
+        user_zdotdir
+    };
+    unsafe {
+        std::env::set_var("KEDI_UZDOTDIR", user_zdotdir);
+        std::env::set_var("ZDOTDIR", &dir);
+    }
+}
+
 /// Minimal content-type by extension — enough for the UI asset set (html/css/js/wasm/png/svg).
 fn mime_for(path: &Path) -> &'static str {
     match path.extension().and_then(|e| e.to_str()) {
@@ -581,6 +628,7 @@ fn main() {
         .setup(|app| {
             let dir = ui_dir(&app.handle());
             seed_ui(&dir);
+            setup_shell_integration(&app.handle()); // zsh: emit OSC 133 (command marks) + OSC 7 (cwd)
 
             // The in-process warden (pty capability, recorder, policy) — same backend the WT kedi uses.
             let record_path = app

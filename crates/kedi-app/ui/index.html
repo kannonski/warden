@@ -719,13 +719,13 @@ function reorderWs(fromId, toId) {
   workspaces.splice(workspaces.findIndex((x) => x.id === toId), 0, w);
   renderTabs();
 }
-// move a pane into another tab (drag a card row onto a chip); re-lay out both the source and target
+// move a pane into another tab (drag a card row onto a chip); if the source tab is left empty, drop it
 function movePaneToWs(pane, wsId) {
   if (!pane || pane.ws === wsId || !wsById(wsId)) return;
-  const src = activeWorkspace();
+  const oldWs = pane.ws, src = wsById(oldWs);
   if (src && src.zoom === pane.id) src.zoom = null;
   pane.ws = wsId;
-  layoutActive();
+  reconcileAfterClose(oldWs); // source may now be empty → drop it; re-lay out
 }
 // keyboard tab nav
 function jumpToTab(n) { const ws = workspaces[n - 1]; if (ws) switchWs(ws.id); }
@@ -848,12 +848,22 @@ function switchWs(id) {
   if (focused) try { focused.term.focus(); } catch (_) {}
 }
 function addWs(mode) { const ws = newWorkspace(mode); activeWs = ws.id; layoutActive(); spawnFloatCascade(); }
-function closeWs(id) {
-  for (const p of wsPanes(id)) closePane(p);
-  workspaces = workspaces.filter((w) => w.id !== id);
-  if (!workspaces.length) { const ws = newWorkspace("floating"); activeWs = ws.id; }
-  else if (activeWs === id) activeWs = workspaces[0].id;
+// After a pane leaves a tab (close / detach / move): drop the tab if it's now empty (keeping at least
+// one workspace), keep `activeWs` on a real tab, re-focus a survivor, and re-lay out. The single place
+// all close/detach paths funnel through so we never strand focus on a hidden pane or an empty tab.
+function reconcileAfterClose(wsId) {
+  if (wsPanes(wsId).length === 0 && workspaces.length > 1) {
+    const idx = workspaces.findIndex((w) => w.id === wsId);
+    workspaces = workspaces.filter((w) => w.id !== wsId);
+    if (activeWs === wsId) activeWs = (workspaces[Math.min(idx, workspaces.length - 1)] || workspaces[0]).id;
+  }
+  if (!focused || focused.ws !== activeWs || focused.closing) focused = wsPanes(activeWs)[0] || null;
   layoutActive();
+}
+function closeWs(id) {
+  const panes = wsPanes(id);
+  if (panes.length) panes.forEach(closePane); // async view teardown; reconcileAfterClose cascades to drop the tab
+  else reconcileAfterClose(id);               // empty tab → remove it now
 }
 // back-compat shim for the few remaining setLayout() callers (palette / boot): map to the new model.
 function setLayout(mode) { setWsMode(mode === "tiled" || mode === "tab" ? "tiled" : "floating"); }
@@ -1171,9 +1181,21 @@ function shortName(title) {
 }
 // the representative pane for a tab's label (the focused one if it's here, else the first)
 function tabPane(ws) { return (focused && focused.ws === ws.id) ? focused : wsPanes(ws.id)[0]; }
+// jump the viewport to the previous/next command mark (⌘↑ / ⌘↓), from OSC 133 decorations
+function cmdNav(pane, dir) {
+  if (!pane || !pane.term) return;
+  pane.marks = (pane.marks || []).filter((m) => m && !m.isDisposed);
+  const lines = pane.marks.map((m) => m.line).sort((a, b) => a - b);
+  if (!lines.length) return;
+  const top = pane.term.buffer.active.viewportY;
+  const target = dir > 0 ? lines.find((l) => l > top + 1) : [...lines].reverse().find((l) => l < top - 1);
+  if (target != null) pane.term.scrollToLine(target);
+}
+function baseName(p) { if (!p) return ""; const s = String(p).replace(/\/+$/, "").split("/"); return s[s.length - 1] || "/"; }
 function tabName(ws) {
   if (ws.name) return ws.name;
-  return shortName(tabPane(ws) && tabPane(ws).title) || ("Tab " + ws.id);
+  const p = tabPane(ws);
+  return (p && baseName(p.cwd)) || shortName(p && p.title) || ("Tab " + ws.id); // prefer the live cwd
 }
 // Cheap in-place refresh of the strip's labels/counts/dots (no rebuild → won't clobber a rename input).
 function refreshTabLabels() {
@@ -1246,7 +1268,8 @@ function showTabCard(ws, tabEl) {
   card.style.setProperty("--tab-accent", ws.accent || "var(--focus)");
   card.innerHTML = '<div class="tc-head"><span class="tc-path"></span>' +
     '<span class="tc-mode">' + (ws.mode === "tiled" ? ws.layout : "floating") + "</span></div>";
-  card.querySelector(".tc-path").textContent = (tabPane(ws) && (tabPane(ws).title || "").trim()) || tabName(ws);
+  const tp = tabPane(ws);
+  card.querySelector(".tc-path").textContent = (tp && tp.cwd) || (tp && (tp.title || "").trim()) || tabName(ws);
   if (!ps.length) {
     const e = document.createElement("div"); e.className = "tc-empty"; e.textContent = "no terminals"; card.appendChild(e);
   } else {
@@ -1420,6 +1443,31 @@ async function makePane(app, attachId) {
   try { term.loadAddon(new Unicode11Addon.Unicode11Addon()); term.unicode.activeVersion = "11"; } catch (_) {}
   pane.term = term; pane.fit = fit; pane.search = search;
   pane.send = (o) => { if (pane.connected) invoke("pane_send", { sid: pane.sid, line: JSON.stringify(o) }); };
+
+  // ── shell integration: OSC 7 (cwd) + OSC 133 (command marks) emitted by the injected zsh hooks ──
+  pane.marks = []; // command markers (for ⌘↑/⌘↓ navigation), newest last
+  try {
+    term.parser.registerOscHandler(7, (data) => { // OSC 7 ; file://host/path  → live cwd
+      const m = /file:\/\/[^/]*(\/.*)$/.exec(data || "");
+      if (m) { try { pane.cwd = decodeURIComponent(m[1]); } catch (_) { pane.cwd = m[1]; } refreshTabLabels(); }
+      return true;
+    });
+    term.parser.registerOscHandler(133, (data) => { // OSC 133 ; A|B|C|D[;exit]  → command boundaries
+      const kind = (data || "")[0];
+      const bufLine = () => term.buffer.active.baseY + term.buffer.active.cursorY;
+      if (kind === "C") { try { pane._cmdMarker = term.registerMarker(0); } catch (_) { pane._cmdMarker = null; } } // command started here
+      else if (kind === "D" && pane._cmdMarker && !pane._cmdMarker.isDisposed) { // finished → decorate by exit code
+        const exit = parseInt((data.split(";")[1] || "0"), 10) || 0;
+        const color = exit === 0 ? "#a6e3a1" : "#f38ba8";
+        // scrollbar overview-ruler tick only — no inline bar (it collides with prompts like powerlevel10k
+        // that draw at column 0, and duplicates their own exit indicator). Scan/nav via the ruler + ⌘↑↓.
+        try { term.registerDecoration({ marker: pane._cmdMarker, overviewRulerOptions: { color, position: "right" } }); } catch (_) {}
+        pane.marks.push(pane._cmdMarker);
+        pane._cmdMarker = null;
+      }
+      return true;
+    });
+  } catch (_) {}
   // open only once the wrapper is in the live DOM (detached open leaves input/focus unwired), and
   // let the FIRST resize be the real fitted size (so the server spawns the shell at the true size)
   pane.open = () => {
@@ -1542,13 +1590,9 @@ function closePane(p) {
     if (p.taskChip) { p.taskChip.remove(); p.taskChip = null; taskbarSync(); }
     if (p.floatwin) { const w = p.floatwin; w.classList.add("closing"); setTimeout(() => w.remove(), 110); }
     if (focused === p) focused = null;
-    // allPanes()/wsPanes() already exclude p (p.closing is set). Re-focus a survivor in the same tab
-    // and re-lay out the active tab (re-tile / reflow), then drop the closed tab's chip.
-    const ws = activeWorkspace();
+    const ws = wsById(p.ws);
     if (ws && ws.zoom === p.id) ws.zoom = null;
-    const next = wsPanes(p.ws)[0] || allPanes()[0];
-    if (next) focused = next;
-    layoutActive();
+    reconcileAfterClose(p.ws); // drop the tab if now empty, re-focus a survivor, re-lay out
     // closed the last window everywhere → maybe offer to stop the whole server (if we're the last tab)
     if (!document.querySelector(".floatwin")) maybeOfferShutdown();
   }, wait);
@@ -1576,11 +1620,9 @@ function detachLocal(p) {
   if (p.taskChip) { p.taskChip.remove(); p.taskChip = null; taskbarSync(); }
   if (p.floatwin) { const w = p.floatwin; w.classList.add("closing"); setTimeout(() => w.remove(), 110); }
   if (focused === p) focused = null;
-  const ws = activeWorkspace();
+  const ws = wsById(p.ws);
   if (ws && ws.zoom === p.id) ws.zoom = null;
-  const next = wsPanes(p.ws)[0] || allPanes()[0];
-  if (next) focused = next;
-  layoutActive();
+  reconcileAfterClose(p.ws); // drop the tab if now empty, re-focus a survivor, re-lay out
   if (!document.querySelector(".floatwin")) resetToHint();
 }
 
@@ -2196,6 +2238,8 @@ function keyHandler(e, pane) {
     if (mk === "v") { pasteInto(pane); e._kediHandled = true; e.preventDefault(); return false; }
     if (e.key === "Enter") { toggleZoom(); e._kediHandled = true; e.preventDefault(); return false; } // ⌘↵ zoom
     if (mk >= "1" && mk <= "9") { jumpToTab(Number(mk)); e._kediHandled = true; e.preventDefault(); return false; } // ⌘1–9 → tab N
+    if (e.key === "ArrowUp") { cmdNav(pane, -1); e._kediHandled = true; e.preventDefault(); return false; } // ⌘↑ prev command
+    if (e.key === "ArrowDown") { cmdNav(pane, 1); e._kediHandled = true; e.preventDefault(); return false; } // ⌘↓ next command
     return true;
   }
   // ⌘⇧[ / ⌘⇧] → previous / next tab
