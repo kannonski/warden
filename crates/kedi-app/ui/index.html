@@ -153,19 +153,6 @@
   .grip { position:absolute; right:0; bottom:0; width:15px; height:15px; cursor:nwse-resize; z-index:2;
           background:linear-gradient(135deg, transparent 45%, var(--dim) 45%, var(--dim) 55%, transparent 55%); }
   #snap { position:absolute; display:none; border:2px solid var(--cyan); background:rgba(86,200,216,.12); border-radius:6px; pointer-events:none; z-index:9998; }
-  /* snap-up chooser: maximize vs split top/bottom, floated at the top-center */
-  #snapchoose { position:fixed; display:none; z-index:10002; top:16px; left:50%; transform:translateX(-50%);
-    gap:8px; padding:7px; background:rgba(24,24,37,.97); backdrop-filter:blur(12px); -webkit-backdrop-filter:blur(12px);
-    border:1px solid var(--edge); border-radius:12px; box-shadow:0 14px 40px rgba(0,0,0,.5); }
-  #snapchoose.show { display:flex; }
-  .sc-opt { display:flex; flex-direction:column; align-items:center; gap:7px; width:120px; padding:12px 10px; cursor:pointer;
-    border:1px solid var(--edge); border-radius:9px; color:var(--fg); font-size:12px; transition:border-color .12s, background .12s; }
-  .sc-opt:hover, .sc-opt.sel { border-color:var(--focus); background:#252539; }
-  .sc-diagram { width:66px; height:40px; border:1.5px solid var(--dim); border-radius:4px; display:flex; flex-direction:column; overflow:hidden; }
-  .sc-diagram > i { flex:1; background:var(--dim); opacity:.28; }
-  .sc-diagram.split > i:first-child { border-bottom:1.5px solid var(--focus); background:var(--focus); opacity:.5; }
-  .sc-diagram.split > i:last-child { opacity:.18; }
-  .sc-diagram.maxi > i { background:var(--focus); opacity:.4; }
   .marquee { position:absolute; border:1px dashed var(--cyan); background:rgba(137,220,235,.08); pointer-events:none; }
   #ctxmenu { position:absolute; display:none; min-width:190px; z-index:9997; padding:5px; border-radius:10px;
              background:rgba(24,24,37,.88); backdrop-filter:blur(12px); -webkit-backdrop-filter:blur(12px);
@@ -252,10 +239,6 @@
     <div id="pal-hint">every pane, every browser tab · click or ↵ to focus (this tab) or move here (another tab)</div>
   </div></div>
   <div id="snap"></div>
-  <div id="snapchoose">
-    <div class="sc-opt" data-choice="max"><div class="sc-diagram maxi"><i></i></div>maximize</div>
-    <div class="sc-opt" data-choice="split"><div class="sc-diagram split"><i></i><i></i></div>split top / bottom</div>
-  </div>
   <div id="overlay"></div>
 </div>
 <div id="taskbar"></div>
@@ -1396,106 +1379,6 @@ function snapWin(win, pane, name) {
 }
 function restoreWin(win, pane) { if (win._restore) { applyGeom(win, pane, win._restore); win._restore = null; win._snap = null; } }
 
-// ── snap-up chooser: maximize, or split the pane into a top/bottom pair ──
-// Snapping up (key or drag-to-top-edge) doesn't just maximize — it PROPOSES: maximize the pane, or
-// split it top/bottom (this pane → top half, then pick another pane for the bottom half).
-function askSnapUp(win, pane) {
-  const box = $("snapchoose");
-  const opts = [...box.querySelectorAll(".sc-opt")];
-  let sel = 0;
-  const paint = () => opts.forEach((o, i) => o.classList.toggle("sel", i === sel));
-  const close = () => {
-    box.classList.remove("show");
-    document.removeEventListener("keydown", onKey, true);
-    document.removeEventListener("mousedown", onOutside, true);
-  };
-  const apply = (choice) => {
-    close();
-    if (choice === "max") snapWin(win, pane, "max");
-    else splitTopBottom(pane);
-  };
-  const onKey = (e) => {
-    if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); close(); }
-    else if (e.key === "ArrowLeft" || e.key === "ArrowRight") {
-      e.preventDefault(); e.stopPropagation(); sel = (sel + (e.key === "ArrowRight" ? 1 : opts.length - 1)) % opts.length; paint();
-    } else if (e.key === "Enter") { e.preventDefault(); e.stopPropagation(); apply(opts[sel].dataset.choice); }
-  };
-  const onOutside = (e) => { if (!box.contains(e.target)) close(); };
-  opts.forEach((o, i) => {
-    o.onmouseenter = () => { sel = i; paint(); };
-    o.onclick = () => apply(o.dataset.choice);
-  });
-  paint();
-  box.classList.add("show");
-  document.addEventListener("keydown", onKey, true);
-  // defer the outside-click listener so the click that opened it doesn't immediately close it
-  setTimeout(() => document.addEventListener("mousedown", onOutside, true), 0);
-}
-
-// snap the pane to the TOP half, then pick another pane to fill the BOTTOM half.
-function splitTopBottom(pane) {
-  const win = pane.floatwin;
-  if (!win) return;
-  win._restore = win._restore || [win.offsetLeft, win.offsetTop, win.offsetWidth, win.offsetHeight];
-  win._snap = "top";
-  applyGeom(win, pane, snapRegion("top"));
-  pickPaneForBottom(pane);
-}
-
-// a compact picker of the OTHER panes in this tab → the chosen one snaps to the bottom half.
-function pickPaneForBottom(topPane) {
-  const others = allPanes().filter((p) => p !== topPane && !p.stowed);
-  if (!others.length) {
-    overlayFlash("split: open another terminal first (Ctrl+Shift+↵), then snap up → split");
-    return;
-  }
-  const grid = $("pal-grid");
-  const input = $("pal-in");
-  $("palette").classList.add("show");
-  input.value = ""; input.placeholder = "pick a pane for the bottom half — esc to cancel";
-  $("pal-hint").textContent = "the chosen pane fills the bottom half; " + (topPane.title || "the current pane") + " keeps the top";
-  grid.innerHTML = "";
-  let sel = 0;
-  const tiles = [];
-  const finish = () => {
-    $("palette").classList.remove("show");
-    input.placeholder = "type to filter every pane across your tabs — ↵ focus / move here · esc close";
-    input.onkeydown = null;
-    if (focused) try { focused.term.focus(); } catch (_) {}
-  };
-  const choose = (p) => {
-    finish();
-    const w = p.floatwin;
-    if (!w) return;
-    w._restore = w._restore || [w.offsetLeft, w.offsetTop, w.offsetWidth, w.offsetHeight];
-    w._snap = "bottom";
-    w.style.zIndex = ++zTop;
-    applyGeom(w, p, snapRegion("bottom"));
-    setFocus(topPane);
-  };
-  others.forEach((p, i) => {
-    const tile = document.createElement("div");
-    tile.className = "tile" + (i === sel ? " sel" : "");
-    const preview = localPreview(p) || "no output yet";
-    const isApp = !!p.app;
-    tile.innerHTML =
-      `<div class="tile-screen"><span class="glyph">${isApp ? "▤" : "❯"}</span></div>` +
-      `<div class="tile-foot"><div class="tile-title"></div><div class="tile-meta"><span>this tab</span><span class="tile-act">bottom half →</span></div></div>`;
-    tile.querySelector(".tile-screen").insertBefore(document.createTextNode(preview), tile.querySelector(".glyph"));
-    tile.querySelector(".tile-title").textContent = p.title || ("pane " + p.id);
-    tile.addEventListener("mouseenter", () => { sel = i; tiles.forEach((t, j) => t.classList.toggle("sel", j === i)); });
-    tile.addEventListener("click", () => choose(p));
-    grid.appendChild(tile); tiles.push(tile);
-  });
-  input.onkeydown = (e) => {
-    if (e.key === "Escape") { e.preventDefault(); finish(); }
-    else if (e.key === "ArrowRight" || e.key === "ArrowDown") { e.preventDefault(); sel = Math.min(others.length - 1, sel + 1); tiles.forEach((t, j) => t.classList.toggle("sel", j === sel)); }
-    else if (e.key === "ArrowLeft" || e.key === "ArrowUp") { e.preventDefault(); sel = Math.max(0, sel - 1); tiles.forEach((t, j) => t.classList.toggle("sel", j === sel)); }
-    else if (e.key === "Enter") { e.preventDefault(); choose(others[sel]); }
-  };
-  input.focus();
-}
-
 // ── minimize: two modes ──
 // Default is "minify" — collapse the window to its title bar IN PLACE (macOS window-shade); click
 // the bar to expand. If the `taskbar` setting is on, minimize stows to the bottom dock instead.
@@ -1588,8 +1471,7 @@ function dragWin(win, handle, pane) {
     };
     const up = () => {
       document.removeEventListener("mousemove", move); document.removeEventListener("mouseup", up); snap.style.display = "none";
-      if (pending === "max") askSnapUp(win, pane); // top edge → propose maximize vs split
-      else if (pending) snapWin(win, pane, pending);
+      if (pending) snapWin(win, pane, pending); // top edge → maximize; sides/corners → snap
     };
     document.addEventListener("mousemove", move); document.addEventListener("mouseup", up);
   });
@@ -2001,7 +1883,7 @@ function keyHandler(e, pane) {
     case "0": zoom(0); break;
     case "arrowleft": fw ? snapWin(fw, focused, "left") : (ok = false); break;
     case "arrowright": fw ? snapWin(fw, focused, "right") : (ok = false); break;
-    case "arrowup": fw ? askSnapUp(fw, focused) : (ok = false); break; // propose: maximize · split
+    case "arrowup": fw ? snapWin(fw, focused, "max") : (ok = false); break; // snap up → maximize
     case "arrowdown": fw ? restoreWin(fw, focused) : (ok = false); break;
     case "g": SETTINGS.layout === "stage" ? (ok = false) : tileGrid(); break; // floating: grid-arrange (stage groups by drag)
     case "l": SETTINGS.layout === "stage" && stagedGroup ? cycleGroupLayout() : (ok = false); break; // cycle group tile layout
