@@ -194,6 +194,7 @@
 </header>
 
 <div id="tabstrip"></div>
+<div id="tabcard"></div>
 <div id="canvas">
   <div id="watermark">
     <svg width="150" height="150" viewBox="0 0 100 100" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
@@ -363,29 +364,59 @@
   .setfoot .btn:hover { color:var(--fg); border-color:var(--focus); }
   .hintline { color:var(--dim); font-size:11px; }
 
-  /* ── tab-mode layout ── */
-  #tabstrip { display:none; align-items:center; gap:4px; padding:6px 10px 0; background:var(--panel);
+  /* ── tabs (workspaces) + tiled layout ── */
+  #tabstrip { display:none; align-items:flex-end; gap:5px; padding:7px 10px 0; background:var(--panel);
               border-bottom:1px solid var(--edge); overflow-x:auto; flex:0 0 auto; scrollbar-width:none; }
   #tabstrip::-webkit-scrollbar { display:none; }
   #tabstrip.show { display:flex; }
   .tab { display:inline-flex; align-items:center; gap:8px; background:var(--bg); border:1px solid var(--edge);
-         border-bottom:none; border-radius:8px 8px 0 0; color:var(--dim); font:inherit; font-size:12px;
-         padding:7px 12px; max-width:220px; cursor:pointer; transition:color .12s, background .12s; position:relative; top:1px; }
-  .tab:hover { color:var(--fg); }
+         border-bottom:none; border-radius:9px 9px 0 0; color:var(--dim); font:inherit; font-size:12.5px;
+         padding:6px 8px 7px 7px; max-width:240px; cursor:pointer; position:relative; top:1px; user-select:none;
+         transition:color .12s, background .12s, border-color .12s; }
+  .tab:hover { color:var(--fg); background:#1c1c28; }
   .tab.active { background:var(--term-bg); color:var(--fg); border-color:var(--focus); }
-  .tab .tlabel { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-  .tab .tclose { color:var(--dim); font-size:14px; line-height:1; border-radius:4px; padding:0 3px; }
-  .tab .tclose:hover { color:#1e1e2e; background:var(--red); }
-  .tab.tadd { color:var(--dim); font-size:15px; padding:6px 12px; max-width:none; }
-  .tab.tadd:hover { color:var(--focus); }
-  /* in tab mode every window fills the canvas; only the active one shows, drag/resize/chrome off */
-  body.tabmode .floatwin { inset:0 !important; left:0 !important; top:0 !important;
-                           width:100% !important; height:100% !important; border-radius:0; border:none;
-                           box-shadow:none; z-index:1 !important; animation:none; display:none; }
-  body.tabmode .floatwin.tab-active { display:flex; }
-  body.tabmode .floatwin .grip { display:none; } /* no resize grip in the single tab view */
-  body.tabmode #canvas { cursor:default; }
-  body.tabmode #taskbar { display:none !important; } /* minimize is a floating-mode concept */
+  .tab.active::after { content:""; position:absolute; left:-1px; right:-1px; bottom:-1px; height:2px; background:var(--focus); } /* seam into the canvas */
+  /* mode / cycle-layout button — a real, tappable control (grid/columns/rows/main, or floating ▢) */
+  .tmode { flex:0 0 auto; display:inline-flex; align-items:center; justify-content:center; width:24px; height:24px;
+           font-size:14px; line-height:1; border:1px solid var(--edge); border-radius:7px; background:var(--panel);
+           color:var(--dim); cursor:pointer; transition:color .12s, background .12s, border-color .12s; }
+  .tmode:hover { color:#1e1e2e; background:var(--focus); border-color:var(--focus); }
+  .tmode.on { color:var(--focus); border-color:var(--focus); }
+  .tmode.on:hover { color:#1e1e2e; }
+  .tlabel { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; padding:0 1px; }
+  .tcount { flex:0 0 auto; min-width:18px; height:17px; padding:0 5px; display:inline-flex; align-items:center; justify-content:center;
+            font-size:10.5px; font-weight:600; color:var(--dim); background:var(--edge); border-radius:9px; }
+  .tab.active .tcount { color:var(--bg); background:var(--focus); }
+  .trename { font:inherit; font-size:12.5px; width:104px; background:var(--bg); color:var(--fg);
+             border:1px solid var(--focus); border-radius:5px; padding:1px 5px; outline:none; }
+  .tclose { flex:0 0 auto; display:inline-flex; align-items:center; justify-content:center; width:18px; height:18px;
+            color:var(--dim); font-size:15px; line-height:1; border:none; background:none; border-radius:5px; cursor:pointer; }
+  .tclose:hover { color:#1e1e2e; background:var(--red); }
+  .tadd { flex:0 0 auto; display:inline-flex; align-items:center; justify-content:center; width:28px; height:28px; align-self:center;
+          color:var(--dim); font-size:18px; line-height:1; border:1px solid transparent; background:none; border-radius:8px; cursor:pointer;
+          transition:color .12s, background .12s; }
+  .tadd:hover { color:var(--focus); background:var(--bg); }
+  /* activity dot — a background tab produced output since you last looked */
+  .tdot { flex:0 0 auto; width:7px; height:7px; border-radius:50%; background:var(--cyan,#89dceb); box-shadow:0 0 6px var(--cyan,#89dceb); }
+  /* hover card — a calm popover with the tab's cwd, layout, and its panes (peek before switching) */
+  #tabcard { position:absolute; z-index:10001; display:none; min-width:210px; max-width:340px;
+             background:rgba(24,24,37,.98); backdrop-filter:blur(14px); -webkit-backdrop-filter:blur(14px);
+             border:1px solid var(--edge); border-radius:11px; box-shadow:0 16px 44px rgba(0,0,0,.5);
+             padding:10px 12px; font-size:12px; color:var(--fg); pointer-events:none; }
+  #tabcard.show { display:block; }
+  #tabcard .tc-head { display:flex; align-items:baseline; gap:8px; margin-bottom:8px; }
+  #tabcard .tc-path { flex:1 1 auto; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color:var(--fg); font-weight:600; }
+  #tabcard .tc-mode { flex:0 0 auto; font-size:10.5px; color:var(--dim); border:1px solid var(--edge); border-radius:5px; padding:1px 6px; }
+  #tabcard .tc-pane { display:flex; align-items:center; gap:8px; padding:3px 0; color:var(--dim); }
+  #tabcard .tc-pane .tc-glyph { flex:0 0 auto; color:var(--focus); }
+  #tabcard .tc-pane .tc-title { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  #tabcard .tc-pane.on { color:var(--fg); }
+  #tabcard .tc-empty { color:var(--dim); }
+  /* tiled tab: panes are snapped (geometry set inline in JS) — no manual drag/resize, no hover label */
+  body.tiled .floatwin .grip { display:none; }
+  body.tiled .floatwin { animation:none; }
+  body.tiled .panelabel { display:none; }
+  body.tiled #canvas { cursor:default; }
 
   /* Stage Manager: the focused window fills the stage; the others are LIVE, transform-scaled cards in
      an AUTO-HIDING left rail — they slide in when the mouse nears the left edge (body.stage-peek → the
@@ -435,13 +466,6 @@
     <div class="sec">appearance</div>
     <label for="set-theme">theme</label>
     <select id="set-theme"></select>
-
-    <label for="set-layout">layout</label>
-    <div class="seg" id="set-layout">
-      <button data-v="floating">floating</button>
-      <button data-v="tab">tabs</button>
-      <button data-v="stage">stage</button>
-    </div>
 
     <label for="set-taskbar">minimize to taskbar</label>
     <label class="switch"><input type="checkbox" id="set-taskbar"><span></span></label>
@@ -660,64 +684,155 @@ const allPanes = () => [...document.querySelectorAll(".pane")].map((w) => w._pan
 function setFocus(p) {
   if (!p) return;
   focused = p;
-  for (const w of document.querySelectorAll(".floatwin")) {
-    const has = w.contains(p.wrapper);
-    w.classList.toggle("focused", has);
-    w.classList.toggle("tab-active", has); // in tab mode only the active window is shown (CSS)
-  }
+  if (p.ws != null && p.ws !== activeWs) { activeWs = p.ws; layoutActive(); } // focusing a pane in another tab activates it
+  for (const w of document.querySelectorAll(".floatwin")) w.classList.toggle("focused", w.contains(p.wrapper));
   document.title = (p.title || ("pane " + p.id)) + " · kedi";
-  if (SETTINGS.layout === "tab") { renderTabs(); requestAnimationFrame(() => { try { p.fit.fit(); } catch (_) {} }); }
-  if (SETTINGS.layout === "stage") { const g = groupOf(p); stagedGroup = g ? g.id : null; stageLayout(); } // stage p's item (its group, or p alone)
+  refreshTabLabels(); // active-pane change can change the auto tab name
   try { p.term.focus(); } catch (_) {}
 }
 
-// ── layout mode: floating ⇄ tab ──────────────────────────────────────────────────────────────
-// Tab mode is a class on <body>: CSS makes every .floatwin fill the canvas and hides all but the
-// .tab-active one, so the whole window/stream/close machinery is reused untouched — only which
-// window is visible changes. A tab strip mirrors the open windows.
-function setLayout(mode) {
-  const prev = SETTINGS.layout;
-  SETTINGS.layout = (mode === "tab" || mode === "stage") ? mode : "floating";
-  const now = SETTINGS.layout;
-  // Stage mode positions windows via inline styles; save the floating styles on enter and restore
-  // them on exit (tab mode gets away with CSS-only, but the rail needs per-window JS positioning).
-  if (now === "stage" && prev !== "stage") {
-    for (const p of allPanes()) p._savedStyle = p.floatwin.style.cssText;
-  } else if (prev === "stage" && now !== "stage") {
-    for (const p of allPanes()) {
-      p.floatwin.classList.remove("on-stage", "marked");
-      p.floatwin.onmousedown = null; p.floatwin.onclick = null;
-      p.floatwin.style.cssText = p._savedStyle || ""; p._savedStyle = null;
-    }
-    document.body.classList.remove("stage-peek"); $("stagehit").innerHTML = "";
-    railScroll = 0; stagedGroup = null; dragging = false; stageSel.clear();
+// ── workspaces: tabs that hold panes; each tab is Tiled (snapped, cyclable) or Floating ──────────
+// A tab is a workspace: a set of panes + a mode. Tiled snaps its panes into a cyclable layout;
+// Floating lets them be free windows. Only the active tab's panes are shown. This replaces the old
+// global floating/tab/stage mode. `SETTINGS.layout` is kept as a mirror of the active tab's mode so
+// the many `=== "floating"` checks (drag, reflow, …) keep working.
+let workspaces = [];   // [{ id, mode:"floating"|"tiled", layout, zoom:paneId|null }]
+let activeWs = null;
+let wsSeq = 0;
+const TILE_LAYOUTS = ["grid", "columns", "rows", "main"];
+const TILE_ICON = { grid: "▦", columns: "▥", rows: "▤", main: "◧" };
+function wsById(id) { return workspaces.find((w) => w.id === id) || null; }
+function activeWorkspace() { return wsById(activeWs); }
+function wsPanes(id) { return allPanes().filter((p) => p.ws === id); }
+function newWorkspace(mode) { const ws = { id: ++wsSeq, name: "", mode: mode || "floating", layout: "grid", zoom: null }; workspaces.push(ws); return ws; }
+
+// The single layout entry point (replaces setLayout): show the active tab's panes arranged by its
+// mode, hide the rest. Called on tab switch, mode/layout/zoom change, and new/close pane.
+function layoutActive() {
+  let ws = activeWorkspace();
+  if (!ws) { ws = newWorkspace("floating"); activeWs = ws.id; }
+  SETTINGS.layout = ws.mode; // mirror for `=== "floating"` checks elsewhere
+  document.body.classList.toggle("tiled", ws.mode === "tiled");
+  document.body.classList.remove("tabmode", "stagemode");
+  for (const p of allPanes()) {
+    if (!p.floatwin) continue;
+    const vis = p.ws === ws.id, was = p.floatwin.style.display !== "none";
+    if (vis && !was) p._needRepaint = true; // hidden → shown: rebuild the WebGL atlas (avoids corruption)
+    p.floatwin.style.display = vis ? "flex" : "none";
   }
-  document.body.classList.toggle("tabmode", now === "tab");
-  document.body.classList.toggle("stagemode", now === "stage");
-  if (now === "tab" && focused) setFocus(focused);
-  if (now === "stage") stageLayout();
+  const ps = wsPanes(ws.id);
+  if (ps.length && (!focused || focused.ws !== ws.id)) focused = ps[0];
+  const c = $("canvas"), W = c.clientWidth, H = c.clientHeight, m = 8;
+  if (ws.zoom && ps.some((p) => p.id === ws.zoom)) {
+    for (const p of ps) p.floatwin.style.display = (p.id === ws.zoom) ? "flex" : "none";
+    fillWin(ps.find((p) => p.id === ws.zoom), m, m, W - 2 * m, H - 2 * m);
+  } else if (ws.mode === "tiled") {
+    tilePanes(ps, ws.layout, m, m, W - 2 * m, H - 2 * m);
+  } else {
+    for (const p of ps) restoreFloat(p);
+  }
+  for (const p of ps) p.floatwin.classList.toggle("focused", p === focused);
   renderTabs();
-  requestAnimationFrame(fitAll);
-  saveSettings();
-  if (!$("settings").classList.contains("hide")) syncSettingsForm();
+  // Resize order matters: tell the pty the new size FIRST (so the shell's SIGWINCH redraw targets the
+  // final grid), THEN reflow xterm to match. Fitting first would reflow the old buffer and strand a
+  // prompt row. ptyResize dedups, so the fit()→onResize send that follows is a no-op.
+  requestAnimationFrame(() => {
+    for (const p of ps) {
+      let dims; try { dims = p.fit.proposeDimensions(); } catch (_) {}
+      if (dims && dims.cols && dims.rows) ptyResize(p, dims.cols, dims.rows);
+      try { p.fit.fit(); } catch (_) {}
+      if (p._needRepaint) { p._needRepaint = false; repaintPane(p); } // rebuild atlas for just-shown panes
+    }
+  });
+}
+// Rebuild a pane's WebGL glyph atlas and repaint from its buffer — clears corruption after the canvas
+// was hidden (display:none in an inactive tab) or otherwise disturbed.
+function repaintPane(p) {
+  if (!p || !p.term) return;
+  try { if (p.webgl) p.webgl.clearTextureAtlas(); } catch (_) {}
+  try { p.term.refresh(0, p.term.rows - 1); } catch (_) {}
+}
+// Send a pty resize at most once per (cols,rows) — avoids redundant SIGWINCH that makes shells redraw.
+function ptyResize(p, cols, rows) {
+  if (p._sentCols === cols && p._sentRows === rows) return;
+  p._sentCols = cols; p._sentRows = rows;
+  p.send({ resize: [cols, rows] });
 }
 
-// Unified "zoom" gesture (⌘↵): no mode picking — zoom the focused pane to fill the canvas (the tab
-// view: full pane + a strip to switch), or drop back to the floating arrangement. From stage it zooms
-// the staged pane. This is what makes floating/tab feel like one canvas instead of two modes.
+// tile panes into (x,y,w,h) by layout — generalized from the retired stage tileGroup
+function tilePanes(ps, layout, x, y, w, h) {
+  const n = ps.length; if (!n) return; const gap = 8, rects = [];
+  if (layout === "rows") {
+    const th = (h - (n - 1) * gap) / n; ps.forEach((_, i) => rects.push([x, y + i * (th + gap), w, th]));
+  } else if (layout === "columns") {
+    const cw = (w - (n - 1) * gap) / n; ps.forEach((_, i) => rects.push([x + i * (cw + gap), y, cw, h]));
+  } else if (layout === "main" && n > 1) {
+    const mw = Math.round(w * 0.6), sx = x + mw + gap, sw2 = w - mw - gap, th = (h - (n - 2) * gap) / (n - 1);
+    rects.push([x, y, mw, h]);
+    for (let i = 1; i < n; i++) rects.push([sx, y + (i - 1) * (th + gap), sw2, th]);
+  } else {
+    const cols = Math.ceil(Math.sqrt(n)), rows = Math.ceil(n / cols);
+    const cw = (w - (cols - 1) * gap) / cols, ch = (h - (rows - 1) * gap) / rows;
+    ps.forEach((_, i) => { const cx = i % cols, cy = Math.floor(i / cols); rects.push([x + cx * (cw + gap), y + cy * (ch + gap), cw, ch]); });
+  }
+  ps.forEach((p, i) => { const r = rects[i] || rects[rects.length - 1]; fillWin(p, r[0], r[1], r[2], r[3]); });
+}
+function fillWin(p, x, y, w, h) {
+  if (!p || !p.floatwin) return;
+  Object.assign(p.floatwin.style, { left: x + "px", top: y + "px", width: w + "px", height: h + "px", transform: "none", zIndex: "20", display: "flex" });
+}
+// remember/restore a pane's free geometry across tiled↔floating switches
+function saveFloat(p) { if (p.floatwin) p._floatStyle = p.floatwin.style.cssText; }
+function restoreFloat(p) {
+  if (p._floatStyle) { p.floatwin.style.cssText = p._floatStyle; p._floatStyle = null; }
+  p.floatwin.style.display = "flex";
+  if (!p.floatwin.style.transform) p.floatwin.style.transform = "none";
+}
+
+// per-tab controls
+function setWsMode(mode) {
+  const ws = activeWorkspace(); if (!ws || ws.mode === mode) return;
+  if (mode === "tiled") for (const p of wsPanes(ws.id)) saveFloat(p); // keep free geometry to restore later
+  ws.mode = mode; ws.zoom = null;
+  layoutActive();
+}
+function cycleTileLayout() {
+  const ws = activeWorkspace(); if (!ws) return;
+  if (ws.mode !== "tiled") { setWsMode("tiled"); return; }
+  ws.layout = TILE_LAYOUTS[(TILE_LAYOUTS.indexOf(ws.layout) + 1) % TILE_LAYOUTS.length];
+  layoutActive();
+}
+// zoom: solo the focused pane full-canvas (works in either mode); toggle off to restore the tab.
 function toggleZoom() {
-  setLayout(SETTINGS.layout === "tab" ? "floating" : "tab");
+  const ws = activeWorkspace(); if (!ws || !focused) return;
+  if (ws.zoom) ws.zoom = null;
+  else { if (ws.mode === "floating") saveFloat(focused); ws.zoom = focused.id; } // remember free geometry to restore
+  layoutActive();
 }
-
-// Overview (⌘E): summon Stage as a transient "mission control" over your panes, then dismiss it back
-// to whatever view you came from (floating or tab). Unlike "View: Stage" (which lives in stage), this
-// remembers and restores — so overview is a peek, not a mode you get stuck in.
-let overviewFrom = null;
-function toggleOverview() {
-  if (SETTINGS.layout === "stage") { setLayout(overviewFrom || "floating"); overviewFrom = null; }
-  else { overviewFrom = SETTINGS.layout; setLayout("stage"); }
+function switchWs(id) {
+  const ws = wsById(id); if (!ws) return;
+  ws._activity = false; // visiting clears the activity dot
+  if (id === activeWs) { if (focused) try { focused.term.focus(); } catch (_) {} return; } // already active: no re-render (keeps an in-progress rename alive)
+  activeWs = id;
+  const ps = wsPanes(id); focused = ps[0] || null;
+  layoutActive();
+  if (focused) try { focused.term.focus(); } catch (_) {}
 }
+function addWs(mode) { const ws = newWorkspace(mode); activeWs = ws.id; layoutActive(); spawnFloatCascade(); }
+function closeWs(id) {
+  for (const p of wsPanes(id)) closePane(p);
+  workspaces = workspaces.filter((w) => w.id !== id);
+  if (!workspaces.length) { const ws = newWorkspace("floating"); activeWs = ws.id; }
+  else if (activeWs === id) activeWs = workspaces[0].id;
+  layoutActive();
+}
+// back-compat shim for the few remaining setLayout() callers (palette / boot): map to the new model.
+function setLayout(mode) { setWsMode(mode === "tiled" || mode === "tab" ? "tiled" : "floating"); }
 
+// (The increment-3 zoom/overview gestures were superseded by the workspace model above:
+//  toggleZoom() now solos a pane within its tab; overview/stage were retired from the UI.)
+
+// ── retired Stage Manager code (kept for reuse: tiling math → tilePanes; cards/grouping ideas) ──
 // Stage Manager layout: focused window on the stage, the rest as live scaled cards in a left rail.
 // Every window is sized to the stage (so a card is a true scaled preview and swapping needs no
 // reflow — only transform/left/top animate). Called on layout change, focus change, new/close, resize.
@@ -1012,25 +1127,118 @@ document.addEventListener("wheel", (e) => {
   e.preventDefault();
   stageScroll(e.deltaY);
 }, { passive: false });
+// The tab strip now lists WORKSPACES (each holds panes). The leading icon shows/toggles the tab's
+// mode: floating (▢, click → tile) or tiled (layout glyph, click → cycle grid/columns/rows/main).
+// A manual rename (ws.name) wins; otherwise auto-label from the active pane's title (cwd/command the
+// shell reports), falling back to "Tab N" until there's a title.
+// A shell title is often "user@host: /path" or a path or a bare command. Reduce it to a short label:
+// strip the "user@host: " prefix, and if it looks like a path take the basename (~ for $HOME).
+function shortName(title) {
+  let t = (title || "").trim();
+  if (!t) return "";
+  const c = t.indexOf(": "); if (c > -1 && c < 40) t = t.slice(c + 2).trim();
+  if (t.includes("/")) { const parts = t.replace(/\/+$/, "").split("/"); t = parts[parts.length - 1] || "/"; }
+  return t;
+}
+// the representative pane for a tab's label (the focused one if it's here, else the first)
+function tabPane(ws) { return (focused && focused.ws === ws.id) ? focused : wsPanes(ws.id)[0]; }
+function tabName(ws) {
+  if (ws.name) return ws.name;
+  return shortName(tabPane(ws) && tabPane(ws).title) || ("Tab " + ws.id);
+}
+// Cheap in-place refresh of the strip's labels/counts/dots (no rebuild → won't clobber a rename input).
+function refreshTabLabels() {
+  const tabs = [...$("tabstrip").querySelectorAll(".tab")];
+  workspaces.forEach((ws, i) => {
+    const el = tabs[i]; if (!el || el.querySelector(".trename")) return;
+    const lab = el.querySelector(".tlabel"); if (lab) lab.textContent = tabName(ws);
+    const cnt = el.querySelector(".tcount");
+    if (cnt) { const n = wsPanes(ws.id).length; cnt.textContent = n; cnt.style.display = n ? "" : "none"; }
+    const dot = el.querySelector(".tdot"); if (dot) dot.style.display = ws._activity ? "" : "none";
+  });
+}
 function renderTabs() {
   const strip = $("tabstrip");
-  if (SETTINGS.layout !== "tab") { strip.classList.remove("show"); strip.innerHTML = ""; return; }
   strip.classList.add("show");
   strip.innerHTML = "";
-  for (const p of allPanes()) {
-    const tab = document.createElement("button");
-    tab.className = "tab" + (p === focused ? " active" : "");
+  for (const ws of workspaces) {
+    const ps = wsPanes(ws.id), active = ws.id === activeWs;
+    const tab = document.createElement("div");
+    tab.className = "tab" + (active ? " active" : "");
+    tab.title = "click to switch · double-click the name to rename";
+
+    // mode / cycle-layout button (bigger, reads as a control)
+    const mode = document.createElement("button");
+    mode.className = "tmode" + (ws.mode === "tiled" ? " on" : "");
+    mode.textContent = ws.mode === "tiled" ? (TILE_ICON[ws.layout] || "▦") : "▢";
+    mode.title = ws.mode === "tiled"
+      ? ("layout: " + ws.layout + " — click to cycle (grid → columns → rows → main)")
+      : "floating — click to tile";
+    mode.addEventListener("click", (e) => { e.stopPropagation(); if (!active) switchWs(ws.id); cycleTileLayout(); });
+
+    // editable name (double-click)
     const label = document.createElement("span"); label.className = "tlabel";
-    label.textContent = p.title || ("pane " + p.id);
-    const x = document.createElement("span"); x.className = "tclose"; x.textContent = "×"; x.title = "close";
-    x.addEventListener("click", (e) => { e.stopPropagation(); closePane(p); });
-    tab.append(label, x);
-    tab.addEventListener("click", () => setFocus(p));
+    label.textContent = tabName(ws);
+    label.addEventListener("dblclick", (e) => { e.stopPropagation(); startRenameTab(ws, label); });
+
+    // activity dot — set when a background tab emitted output since last visit
+    const dot = document.createElement("span"); dot.className = "tdot";
+    if (!ws._activity) dot.style.display = "none";
+
+    // pane-count badge
+    const count = document.createElement("span"); count.className = "tcount"; count.textContent = ps.length;
+    if (!ps.length) count.style.display = "none";
+
+    const x = document.createElement("button"); x.className = "tclose"; x.textContent = "×"; x.title = "close tab";
+    x.addEventListener("click", (e) => { e.stopPropagation(); closeWs(ws.id); });
+
+    tab.append(mode, label, dot, count, x);
+    tab.addEventListener("click", () => switchWs(ws.id));
+    tab.addEventListener("mouseenter", () => showTabCard(ws, tab));
+    tab.addEventListener("mouseleave", hideTabCard);
     strip.appendChild(tab);
   }
-  const add = document.createElement("button"); add.className = "tab tadd"; add.textContent = "+"; add.title = "new terminal";
-  add.addEventListener("click", () => spawnFloatCascade());
+  const add = document.createElement("button"); add.className = "tadd"; add.textContent = "+"; add.title = "new tab (⇧⌃T)";
+  add.addEventListener("click", () => addWs("tiled"));
   strip.appendChild(add);
+}
+// hover card: cwd + layout + the tab's panes (peek before switching). Info-only (pointer-events off).
+function showTabCard(ws, tabEl) {
+  const card = $("tabcard");
+  const ps = wsPanes(ws.id);
+  const head = tabPane(ws) && (tabPane(ws).title || "").trim();
+  let html = '<div class="tc-head"><span class="tc-path"></span>' +
+    '<span class="tc-mode">' + (ws.mode === "tiled" ? ws.layout : "floating") + "</span></div>";
+  card.innerHTML = html;
+  card.querySelector(".tc-path").textContent = head || tabName(ws);
+  if (!ps.length) {
+    const e = document.createElement("div"); e.className = "tc-empty"; e.textContent = "no terminals"; card.appendChild(e);
+  } else for (const p of ps) {
+    const row = document.createElement("div"); row.className = "tc-pane" + (p === focused ? " on" : "");
+    const g = document.createElement("span"); g.className = "tc-glyph"; g.textContent = p.app ? "▤" : "❯";
+    const t = document.createElement("span"); t.className = "tc-title"; t.textContent = shortName(p.title) || ("pane " + p.id);
+    row.append(g, t); card.appendChild(row);
+  }
+  card.classList.add("show");
+  const r = tabEl.getBoundingClientRect();
+  card.style.left = Math.min(r.left, window.innerWidth - card.offsetWidth - 10) + "px";
+  card.style.top = (r.bottom + 4) + "px";
+}
+function hideTabCard() { $("tabcard").classList.remove("show"); }
+// inline rename: swap the label for a text input; Enter/blur saves, Esc cancels
+function startRenameTab(ws, label) {
+  const inp = document.createElement("input");
+  inp.className = "trename"; inp.value = ws.name || ""; inp.placeholder = "Tab " + ws.id;
+  label.replaceWith(inp); inp.focus(); inp.select();
+  let done = false;
+  const finish = (save) => { if (done) return; done = true; if (save) ws.name = inp.value.trim(); renderTabs(); };
+  inp.addEventListener("click", (e) => e.stopPropagation());
+  inp.addEventListener("keydown", (e) => {
+    e.stopPropagation();
+    if (e.key === "Enter") { e.preventDefault(); finish(true); }
+    else if (e.key === "Escape") { e.preventDefault(); finish(false); }
+  });
+  inp.addEventListener("blur", () => finish(true));
 }
 function fitAll() { for (const p of allPanes()) { try { p.fit.fit(); } catch (_) {} p.send({ resize: [p.term.cols, p.term.rows] }); } }
 
@@ -1047,8 +1255,8 @@ function reflowWindows() {
   if (!nw || !nh) return;
   const prev = _lastCanvas;
   _lastCanvas = { w: nw, h: nh };
-  if (SETTINGS.layout === "tab") { fitAll(); return; }
-  if (SETTINGS.layout === "stage") { stageLayout(); return; }
+  const ws = activeWorkspace();
+  if (ws && (ws.mode === "tiled" || ws.zoom)) { layoutActive(); return; } // re-tile / re-fill to the new size
   const rx = prev ? nw / prev.w : 1, ry = prev ? nh / prev.h : 1;
   for (const p of allPanes()) {
     const win = p.floatwin;
@@ -1136,13 +1344,17 @@ async function makePane(app, attachId) {
     // addon stays vendored as a fallback.)
     try {
       const webgl = new WebglAddon.WebglAddon();
+      // Context loss (browser WebGL-context limit across many panes, or a hidden canvas dropped) →
+      // dispose so xterm falls back to its DOM renderer instead of painting a corrupt atlas.
+      try { webgl.onContextLoss(() => { try { webgl.dispose(); } catch (_) {} pane.webgl = null; try { term.refresh(0, term.rows - 1); } catch (_) {} }); } catch (_) {}
       term.loadAddon(webgl);
+      pane.webgl = webgl; // kept so we can rebuild the glyph atlas when this pane is shown again
       document.fonts.ready.then(() => { try { webgl.clearTextureAtlas(); } catch (_) {} });
     } catch (e) { console.error("[kedi] webgl addon:", e); }
     requestAnimationFrame(() => {
       try { fit.fit(); } catch (e) { console.error("[kedi] fit:", e); }
       size.textContent = `${term.cols}×${term.rows}`;
-      pane.send({ resize: [term.cols, term.rows] });
+      ptyResize(pane, term.cols, term.rows); // one resize (spawns the shell at the fitted size); deduped
       setFocus(pane);
     });
   };
@@ -1151,7 +1363,7 @@ async function makePane(app, attachId) {
     const s = fmtTitle(t, pane); pane.title = s;
     title.textContent = s;
     if (pane.taskChip) pane.taskChip.querySelector(".tlabel").textContent = s;
-    if (SETTINGS.layout === "tab") renderTabs();
+    refreshTabLabels(); // auto-name the tab from its active pane's title
     if (focused === pane) document.title = s + " · kedi";
     pane.send({ title: s }); // publish to the server so the cross-tab palette can search it
   });
@@ -1194,7 +1406,7 @@ async function makePane(app, attachId) {
   }, true);
   term.attachCustomKeyEventHandler((e) => keyHandler(e, pane));
   term.onData((d) => pane.send({ input: d }));
-  term.onResize(({ cols, rows }) => { pane.send({ resize: [cols, rows] }); size.textContent = `${cols}×${rows}`; });
+  term.onResize(({ cols, rows }) => { ptyResize(pane, cols, rows); size.textContent = `${cols}×${rows}`; });
   wrapper.addEventListener("mousedown", () => { if (SETTINGS.layout !== "stage") setFocus(pane); }); // stage: handled by railMouseDown / tile focus
 
   // Output: Rust streams this pane's bytes over a per-pane Channel (base64). Session end (shell exit /
@@ -1202,6 +1414,11 @@ async function makePane(app, attachId) {
   const onOutput = new Channel();
   onOutput.onmessage = (b64) => {
     if (pane.closing) return; // popped/closed → don't write to a disposed terminal
+    // output in a background tab → light its activity dot (once, until you visit it)
+    if (pane.ws != null && pane.ws !== activeWs) {
+      const ws = wsById(pane.ws);
+      if (ws && !ws._activity) { ws._activity = true; refreshTabLabels(); }
+    }
     const bytes = b64ToBytes(b64);
     // a small chunk carrying a [warden] notice (e.g. policy refusal) → keep it readable
     if (!pane.notice && bytes.length < 256) {
@@ -1229,13 +1446,14 @@ function closePane(p) {
     if (p.taskChip) { p.taskChip.remove(); p.taskChip = null; taskbarSync(); }
     if (p.floatwin) { const w = p.floatwin; w.classList.add("closing"); setTimeout(() => w.remove(), 110); }
     if (focused === p) focused = null;
-    // allPanes() already excludes p (p.closing is set). In tab mode, reveal a survivor; either way
-    // rebuild the strip so the closed tab's chip is gone.
-    const next = allPanes()[0];
-    if ((SETTINGS.layout === "tab" || SETTINGS.layout === "stage") && next) setFocus(next); // setFocus() re-lays out
-    else if (SETTINGS.layout === "stage") stageLayout(); // last one closed / restack the rail
-    else renderTabs();
-    // closed the last window in this tab → maybe offer to stop the whole server (if we're the last tab)
+    // allPanes()/wsPanes() already exclude p (p.closing is set). Re-focus a survivor in the same tab
+    // and re-lay out the active tab (re-tile / reflow), then drop the closed tab's chip.
+    const ws = activeWorkspace();
+    if (ws && ws.zoom === p.id) ws.zoom = null;
+    const next = wsPanes(p.ws)[0] || allPanes()[0];
+    if (next) focused = next;
+    layoutActive();
+    // closed the last window everywhere → maybe offer to stop the whole server (if we're the last tab)
     if (!document.querySelector(".floatwin")) maybeOfferShutdown();
   }, wait);
 }
@@ -1262,10 +1480,11 @@ function detachLocal(p) {
   if (p.taskChip) { p.taskChip.remove(); p.taskChip = null; taskbarSync(); }
   if (p.floatwin) { const w = p.floatwin; w.classList.add("closing"); setTimeout(() => w.remove(), 110); }
   if (focused === p) focused = null;
-  const next = allPanes()[0];
-  if ((SETTINGS.layout === "tab" || SETTINGS.layout === "stage") && next) setFocus(next);
-  else if (SETTINGS.layout === "stage") stageLayout();
-  else renderTabs();
+  const ws = activeWorkspace();
+  if (ws && ws.zoom === p.id) ws.zoom = null;
+  const next = wsPanes(p.ws)[0] || allPanes()[0];
+  if (next) focused = next;
+  layoutActive();
   if (!document.querySelector(".floatwin")) resetToHint();
 }
 
@@ -1321,18 +1540,21 @@ function spawnFloat(x, y, w, h, app, attachId) {
     win.style.cssText = `left:${x}px;top:${y}px;width:${w}px;height:${h}px;z-index:${++zTop}`;
     win.appendChild(pane.wrapper);
     pane.floatwin = win;
+    if (activeWs == null) { const ws = newWorkspace("floating"); activeWs = ws.id; }
+    pane.ws = activeWs; // new panes join the active tab
     // Chromeless: no window buttons. Move = ⌘/Alt-drag anywhere (dragWin); resize = grip;
     // close/minimize/maximize are keyboard actions (Ctrl+Shift+W / M / ↑).
     const grip = document.createElement("div"); grip.className = "grip"; win.appendChild(grip);
     $("canvas").appendChild(win);
     dragWin(win, pane);
     resizeWin(win, grip, pane);
-    win.addEventListener("mousedown", () => { if (SETTINGS.layout === "stage") return; win.style.zIndex = ++zTop; setFocus(pane); });
+    win.addEventListener("mousedown", () => { win.style.zIndex = ++zTop; setFocus(pane); });
     $("hint").style.display = "none";
     pane.open();
-    if (SETTINGS.layout === "tab") setFocus(pane); // new tab becomes the visible one
-    if (SETTINGS.layout === "stage") { pane._savedStyle = pane.floatwin.style.cssText; setFocus(pane); } // stage it
-    renderTabs();
+    focused = pane;
+    const ws = activeWorkspace();
+    if (ws && ws.zoom) ws.zoom = pane.id; // a new pane while zoomed becomes the zoomed one
+    layoutActive(); // place it per the active tab's mode (tiled → re-tile; floating → free)
   });
 }
 function spawnFloatCascade() { const o = (cascade++ % 6) * 30; spawnFloat(40 + o, 30 + o, 760, 480); }
@@ -1811,7 +2033,6 @@ function syncSettingsForm() {
   $("set-ls").value = SETTINGS.letterSpacing; $("set-ls-val").textContent = SETTINGS.letterSpacing;
   $("set-scroll").value = SETTINGS.scrollback; $("set-scroll-val").textContent = SETTINGS.scrollback.toLocaleString();
   for (const b of $("set-cursor").children) b.classList.toggle("on", b.dataset.v === SETTINGS.cursorStyle);
-  for (const b of $("set-layout").children) b.classList.toggle("on", b.dataset.v === SETTINGS.layout);
 }
 // One helper: mutate SETTINGS[key], apply live, and reflect back into the form.
 const setOpt = (key, val) => { SETTINGS[key] = val; applySettings(); syncSettingsForm(); };
@@ -1829,7 +2050,6 @@ $("set-lh").addEventListener("input", (e) => setOpt("lineHeight", Number(e.targe
 $("set-ls").addEventListener("input", (e) => setOpt("letterSpacing", Number(e.target.value)));
 $("set-scroll").addEventListener("input", (e) => setOpt("scrollback", Number(e.target.value)));
 $("set-cursor").addEventListener("click", (e) => { const b = e.target.closest("button"); if (b) setOpt("cursorStyle", b.dataset.v); });
-$("set-layout").addEventListener("click", (e) => { const b = e.target.closest("button"); if (b) setLayout(b.dataset.v); });
 $("set-reset").addEventListener("click", () => { SETTINGS = { ...DEFAULT_SETTINGS }; setLayout(SETTINGS.layout); applySettings(); syncSettingsForm(); });
 
 // New-pane / palette shortcuts, from ANYWHERE (empty canvas, any pane, an overlay). We deliberately
@@ -1838,13 +2058,9 @@ $("set-reset").addEventListener("click", () => { SETTINGS = { ...DEFAULT_SETTING
 document.addEventListener("keydown", (e) => {
   if (e._kediHandled) return; // a focused terminal's keyHandler already handled this event
   const k = e.key.toLowerCase();
-  // ZOOM — ⌘↵ toggles the focused pane between full-canvas (tab view) and the floating arrangement.
+  // ZOOM — ⌘↵ toggles soloing the focused pane full-canvas.
   if (e.metaKey && !e.ctrlKey && !e.altKey && !e.shiftKey && (e.key === "Enter" || k === "enter")) {
     e.preventDefault(); toggleZoom(); return;
-  }
-  // OVERVIEW — ⌘E summons/dismisses the Stage overview, restoring the previous view on dismiss.
-  if (e.metaKey && !e.ctrlKey && !e.altKey && !e.shiftKey && k === "e") {
-    e.preventDefault(); toggleOverview(); return;
   }
   // NEW PANE — Ctrl+Shift+Enter. NOT Ctrl+T: a browser reserves Ctrl+T for a new browser tab and the
   // page never sees it (nothing kedi can do about that). This combo is free, so it reaches us and
@@ -1863,10 +2079,6 @@ document.addEventListener("keydown", (e) => {
   if (e.ctrlKey && e.shiftKey && (k === "," || e.key === "<")) {
     e.preventDefault(); toggleSettings(); return;
   }
-  // STAGE — Ctrl+Shift+S from anywhere (e.g. empty canvas, no pane focused) toggles Stage layout.
-  if (e.ctrlKey && e.shiftKey && k === "s") {
-    e.preventDefault(); toggleStage(); return;
-  }
   if (e.key !== "Escape") return;
   if ($("palette").classList.contains("show")) closePalette();
   else if (!$("settings").classList.contains("hide")) toggleSettings(false);
@@ -1882,7 +2094,6 @@ function keyHandler(e, pane) {
     if (mk === "c") { copySel(pane); e._kediHandled = true; e.preventDefault(); return false; }
     if (mk === "v") { pasteInto(pane); e._kediHandled = true; e.preventDefault(); return false; }
     if (e.key === "Enter") { toggleZoom(); e._kediHandled = true; e.preventDefault(); return false; } // ⌘↵ zoom
-    if (mk === "e") { toggleOverview(); e._kediHandled = true; e.preventDefault(); return false; } // ⌘E overview
     return true;
   }
   if (!e.ctrlKey || !e.shiftKey) return true;
@@ -1903,13 +2114,8 @@ function keyHandler(e, pane) {
     case "arrowright": fw ? snapWin(fw, focused, "right") : (ok = false); break;
     case "arrowup": fw ? snapWin(fw, focused, "max") : (ok = false); break; // snap up → maximize
     case "arrowdown": fw ? restoreWin(fw, focused) : (ok = false); break;
-    case "s": toggleStage(); break; // Ctrl+Shift+S = jump to / leave Stage layout
-    case "g": SETTINGS.layout === "stage" ? groupMarked() : tileGrid(); break; // stage: group marked · floating: grid-arrange
-    case " ": case "spacebar": SETTINGS.layout === "stage" ? toggleStageMark(focused) : (ok = false); break; // stage: mark/unmark
-    case "u": SETTINGS.layout === "stage" ? ungroupStaged() : (ok = false); break; // stage: ungroup staged group
-    case "l": SETTINGS.layout === "stage" && stagedGroup ? cycleGroupLayout() : (ok = false); break; // cycle group tile layout
-    case "]": SETTINGS.layout === "stage" ? cycleStage(1) : (ok = false); break;  // stage: next item
-    case "[": SETTINGS.layout === "stage" ? cycleStage(-1) : (ok = false); break; // stage: prev item
+    case "l": cycleTileLayout(); break; // Ctrl+Shift+L = tile this tab / cycle grid→columns→rows→main
+    case "t": addWs("tiled"); break; // Ctrl+Shift+T = new tab (workspace)
     case "m": focused ? minimizePane(focused) : (ok = false); break;
     case ",": case "<": toggleSettings(); break; // Ctrl+Shift+, → settings
     case "p": ok = false; break; // (palette moved to ⌘K in the native View menu)
@@ -1931,13 +2137,11 @@ function paletteCommands() {
   return [
     { id: "new-terminal", ico: "❯", label: "New Terminal", hint: "⌘T", run: () => spawnFloatCascade() },
     { id: "new-window", ico: "❐", label: "New Window", hint: "⌘N", run: () => invoke("new_window").catch(() => {}) },
-    { id: "zoom", ico: "⤢", label: () => (SETTINGS.layout === "tab" ? "Restore (Un-zoom)" : "Zoom Focused Pane"), hint: "⌘↵", kw: "maximize fullscreen focus tab", run: () => toggleZoom() },
-    { id: "overview", ico: "◫", label: () => (SETTINGS.layout === "stage" ? "Exit Overview" : "Overview (Stage)"), hint: "⌘E", kw: "stage mission control expose peek", run: () => toggleOverview() },
-    { id: "pop-out", ico: "⧉", label: "Pop Out to New Window", hint: "⇧⌘O", kw: "detach native window tab stage", run: () => { if (focused) popOut(focused); } },
-    { id: "view-floating", ico: "▢", label: "View: Floating", kw: "layout arrange window", run: () => setLayout("floating") },
-    { id: "view-tabs", ico: "▭", label: "View: Tabs", kw: "layout", run: () => setLayout("tab") },
-    { id: "view-stage", ico: "◨", label: "View: Stage Manager", kw: "layout group", run: () => setLayout("stage") },
-    { id: "arrange-grid", ico: "▦", label: "Arrange Windows in a Grid", kw: "tile layout floating", run: () => { setLayout("floating"); tileGrid(); } },
+    { id: "new-tab", ico: "⊞", label: "New Tab", kw: "workspace", run: () => addWs("tiled") },
+    { id: "zoom", ico: "⤢", label: () => (activeWorkspace() && activeWorkspace().zoom ? "Un-zoom" : "Zoom Focused Pane"), hint: "⌘↵", kw: "maximize fullscreen solo focus", run: () => toggleZoom() },
+    { id: "tile", ico: "▦", label: () => (activeWorkspace() && activeWorkspace().mode === "tiled" ? "Cycle Tile Layout" : "Tile This Tab"), hint: "⇧⌘L", kw: "grid columns rows main snap layout split", run: () => cycleTileLayout() },
+    { id: "float", ico: "▢", label: "Make Tab Floating", kw: "free windows untile", run: () => setWsMode("floating") },
+    { id: "pop-out", ico: "⧉", label: "Pop Out to New Window", hint: "⇧⌘O", kw: "detach native window", run: () => { if (focused) popOut(focused); } },
     { id: "find", ico: "⌕", label: "Find in Terminal", hint: "⌘F", run: () => toggleSearch(true) },
     { id: "audit", ico: "◉", label: "Open Audit Log", kw: "governance record log", run: () => openAudit() },
     { id: "toggle-rec", ico: "●", label: () => (recOn ? "Stop Recording" : "Start Recording"), kw: "record audit", run: () => setRec(!recOn) },
@@ -2136,13 +2340,15 @@ async function boot() {
   // no connection handshake: the warden is in-process and each pane opens its own IPC transport.
   setState("connected", true);
   try { recOn = !!(await invoke("get_recording")); } catch (_) {}
-  setLayout(SETTINGS.layout); applySettings(); // restore saved theme / font / cursor / layout
+  applySettings(); // restore saved theme / font / cursor
   // pop-out window: opened as kedi://…?attach=<sid>&solo=1 → re-attach to that running session
-  // (teleporting it here) instead of spawning a fresh terminal; solo → zoom it to fill the window.
+  // (teleporting it here) as a solo tiled tab (one pane fills the window).
   const bp = new URLSearchParams(location.search);
   const attach = bp.get("attach");
-  if (attach) { moveSessionHere(Number(attach)); if (bp.get("solo")) setLayout("tab"); }
-  else spawnFloatCascade(); // open with one terminal; ⌘T or ⌘N for more
+  const ws0 = newWorkspace("tiled"); // Tiled is the default experience; Floating stays per-tab optional
+  activeWs = ws0.id;
+  if (attach) moveSessionHere(Number(attach));
+  else spawnFloatCascade(); // open with one terminal; ⌘T new terminal · + for a new tab
   _lastCanvas = { w: $("canvas").clientWidth, h: $("canvas").clientHeight };
   // coalesce the rapid resize-event stream to one reflow per frame (avoids spamming pty resizes)
   let _reflowPending = false;
