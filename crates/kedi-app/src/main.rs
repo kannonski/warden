@@ -32,6 +32,22 @@ struct AppState {
     /// sid → the control-line sender feeding that pane's `run_pane`. Keyed by the backend-assigned sid
     /// (globally unique), so panes never collide across multiple windows.
     panes: Mutex<HashMap<u64, UnboundedSender<Vec<u8>>>>,
+    /// window label → the sids opened by that window, so closing a window can drop its panes (else the
+    /// senders linger, `run_pane` loops forever, and the sessions never close → leaked palette entries).
+    win_panes: Mutex<HashMap<String, Vec<u64>>>,
+}
+
+/// A window is gone: drop its panes' senders. Each `run_pane` then sees its client disconnect and, if it
+/// still owned the session, closes it (a session teleported elsewhere is left running). Idempotent.
+fn cleanup_window(state: &AppState, label: &str) {
+    let sids = state.win_panes.lock().unwrap().remove(label).unwrap_or_default();
+    if sids.is_empty() {
+        return;
+    }
+    let mut panes = state.panes.lock().unwrap();
+    for sid in sids {
+        panes.remove(&sid); // dropping the sender ends run_pane's msg loop → disconnect → close if owner
+    }
 }
 
 /// The hot-swappable UI directory: ~/Library/Application Support/dev.kedi.terminal/ui (macOS).
@@ -151,6 +167,7 @@ fn mime_for(path: &Path) -> &'static str {
 #[tauri::command]
 fn open_pane(
     app: tauri::AppHandle,
+    window: tauri::WebviewWindow,
     state: State<AppState>,
     on_output: Channel<String>,
 ) -> Result<u64, String> {
@@ -181,6 +198,7 @@ fn open_pane(
     });
 
     state.panes.lock().unwrap().insert(sid, msg_tx);
+    state.win_panes.lock().unwrap().entry(window.label().to_string()).or_default().push(sid);
     Ok(sid)
 }
 
@@ -212,12 +230,27 @@ fn open_window_url(app: &tauri::AppHandle, query: &str) -> Result<(), String> {
     let n = state.next_win.fetch_add(1, Ordering::Relaxed);
     let label = format!("kedi-{n}");
     let url = format!("kedi://localhost/index.html{query}");
-    WebviewWindowBuilder::new(app, &label, WebviewUrl::External(url.parse().unwrap()))
+    let win = WebviewWindowBuilder::new(app, &label, WebviewUrl::External(url.parse().unwrap()))
         .title("kedi — governed terminal")
         .inner_size(960.0, 640.0)
         .build()
         .map_err(|e| e.to_string())?;
+    watch_window_close(&win);
     Ok(())
+}
+
+/// When a window is destroyed, drop the panes it opened so their sessions don't leak (otherwise the
+/// senders live on, `run_pane` never sees a disconnect, and stale sessions pile up in the palette).
+fn watch_window_close(win: &tauri::WebviewWindow) {
+    let app = win.app_handle().clone();
+    let label = win.label().to_string();
+    win.on_window_event(move |event| {
+        if matches!(event, tauri::WindowEvent::Destroyed) {
+            if let Some(state) = app.try_state::<AppState>() {
+                cleanup_window(&state, &label);
+            }
+        }
+    });
 }
 
 /// Shared by the `new_window` command and the native File ▸ New Window menu item.
@@ -502,10 +535,11 @@ fn main() {
                 next_sid: AtomicU64::new(1),
                 next_win: AtomicU64::new(2), // window 1 is "main"; extras are kedi-2, kedi-3, …
                 panes: Mutex::new(HashMap::new()),
+                win_panes: Mutex::new(HashMap::new()),
             });
 
             println!("kedi-app: serving hot-swappable UI from {}", dir.display());
-            WebviewWindowBuilder::new(
+            let main = WebviewWindowBuilder::new(
                 app,
                 "main",
                 WebviewUrl::External("kedi://localhost/index.html".parse().unwrap()),
@@ -513,6 +547,7 @@ fn main() {
             .title("kedi — governed terminal")
             .inner_size(960.0, 640.0)
             .build()?;
+            watch_window_close(&main); // drop this window's panes when it closes → its sessions close
 
             // hot-swap watchers: ui/ → reload the window; plugins/ → notify the frontend (live list).
             let ui_app = app.handle().clone();
