@@ -160,6 +160,13 @@
   #pal-empty { color:var(--dim); padding:26px; text-align:center; font-size:13px; }
   #pal-foot { display:flex; gap:16px; padding:8px 14px; border-top:1px solid var(--edge); flex:0 0 auto;
               color:var(--dim); font-size:11px; letter-spacing:.03em; }
+  /* perf HUD — live echo latency + output throughput (toggle from ⌘K → "Perf HUD") */
+  #perfhud { position:fixed; right:12px; bottom:12px; z-index:10002; display:none; pointer-events:none;
+             background:rgba(17,17,27,.92); border:1px solid var(--edge); border-radius:8px; padding:7px 11px;
+             font:11px/1.5 var(--mono,monospace); color:var(--fg); box-shadow:0 8px 24px rgba(0,0,0,.5); white-space:nowrap; }
+  #perfhud.show { display:block; }
+  #perfhud b { color:var(--focus); font-weight:600; }
+  #perfhud .dim { color:var(--dim); }
 </style>
 </head>
 <body>
@@ -175,6 +182,7 @@
 
 <div id="tabstrip"></div>
 <div id="tabcard"></div>
+<div id="perfhud"></div>
 <div id="canvas">
   <div id="watermark">
     <svg width="150" height="150" viewBox="0 0 100 100" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
@@ -1484,7 +1492,7 @@ async function makePane(app, attachId) {
     }
   }, true);
   term.attachCustomKeyEventHandler((e) => keyHandler(e, pane));
-  term.onData((d) => { if (pane.connected) invoke("pane_input", { sid: pane.sid, data: d }); }); // keystroke fast-path (no JSON round-trip)
+  term.onData((d) => { if (pane.connected) { perfInput(pane); invoke("pane_input", { sid: pane.sid, data: d }); } }); // keystroke fast-path (no JSON round-trip)
   term.onResize(({ cols, rows }) => { ptyResize(pane, cols, rows); size.textContent = `${cols}×${rows}`; });
   wrapper.addEventListener("mousedown", () => { if (SETTINGS.layout !== "stage") setFocus(pane); }); // stage: handled by railMouseDown / tile focus
 
@@ -1501,11 +1509,18 @@ async function makePane(app, attachId) {
     const bytes = msg instanceof ArrayBuffer ? new Uint8Array(msg)
       : ArrayBuffer.isView(msg) ? new Uint8Array(msg.buffer, msg.byteOffset, msg.byteLength)
       : b64ToBytes(msg); // fallback for any stringy frame
+    perfOutput(pane, bytes.length); // probe: echo latency + throughput
     // a small chunk carrying a [warden] notice (e.g. policy refusal) → keep it readable
     if (!pane.notice && bytes.length < 256) {
       try { if (new TextDecoder().decode(bytes).includes("[warden]")) pane.notice = true; } catch (_) {}
     }
-    term.write(bytes, () => syncRender(term));
+    // Backpressure: ack bytes back to the pump once xterm has consumed this write (batched, so the
+    // backend never runs >1MB ahead of the display → no flood-freeze). Small writes = interactive echo
+    // → also force the immediate render (the 3ms path); big writes ride xterm's rAF batching.
+    const n = bytes.length;
+    const ack = () => { pane._ack = (pane._ack || 0) + n; if (pane._ack >= 32768) { invoke("pane_ack", { sid: pane.sid, bytes: pane._ack }); pane._ack = 0; } };
+    if (n < 2048) term.write(bytes, () => { syncRender(term); ack(); });
+    else term.write(bytes, ack);
   };
   pane.sid = await invoke("open_pane", { onOutput }); // backend assigns a globally-unique pane sid
   pane.sessionId = attachId != null ? attachId : pane.sid; // durable session id (stable across pop-out/move)
@@ -2225,6 +2240,33 @@ function keyHandler(e, pane) {
 // pushed, so we can tell our own panes apart from other tabs' and map a row back to a local pane.
 const pal = { items: [], rowEls: [], sel: 0, all: [] };
 
+// ── perf probes: live echo latency (keystroke → echoed byte) + output throughput (MB/s) ──────────
+// Toggle from ⌘K → "Perf HUD". echo latency is the full round trip: onData → pane_input → pty →
+// shell echo → raw channel → onmessage. Throughput is bytes received over a rolling 1s window.
+const PERF = { on: false, echo: [], win: [], timer: null };
+function perfInput(pane) { if (PERF.on && pane._echoT0 == null) pane._echoT0 = performance.now(); } // stamp a keystroke
+function perfOutput(pane, n) {
+  if (!PERF.on) return;
+  const now = performance.now();
+  if (pane._echoT0 != null) { PERF.echo.push(now - pane._echoT0); if (PERF.echo.length > 300) PERF.echo.shift(); pane._echoT0 = null; }
+  PERF.win.push({ t: now, n });
+}
+function perfPct(a, p) { if (!a.length) return 0; const s = [...a].sort((x, y) => x - y); return s[Math.min(s.length - 1, Math.floor(p * s.length))]; }
+function perfRender() {
+  const now = performance.now();
+  PERF.win = PERF.win.filter((w) => w.t > now - 1000);
+  const mbps = (PERF.win.reduce((a, w) => a + w.n, 0) / 1048576).toFixed(2);
+  const p50 = perfPct(PERF.echo, 0.5).toFixed(1), p95 = perfPct(PERF.echo, 0.95).toFixed(1);
+  $("perfhud").innerHTML = `echo <b>${p50}</b><span class="dim">ms p50 ·</span> <b>${p95}</b><span class="dim">ms p95</span><br>` +
+    `out <b>${mbps}</b><span class="dim"> MB/s ·</span> <b>${PERF.echo.length}</b><span class="dim"> keys</span>`;
+}
+function togglePerf() {
+  PERF.on = !PERF.on;
+  $("perfhud").classList.toggle("show", PERF.on);
+  clearInterval(PERF.timer);
+  if (PERF.on) { PERF.echo = []; PERF.win = []; PERF.timer = setInterval(perfRender, 250); perfRender(); }
+}
+
 // Command palette actions (⌘K). Filtered by the same query as sessions and shown above them. `label`
 // may be a function for dynamic text (e.g. start/stop recording). Add pop-out / groups here later.
 function paletteCommands() {
@@ -2239,6 +2281,7 @@ function paletteCommands() {
     { id: "find", ico: "⌕", label: "Find in Terminal", hint: "⌘F", run: () => toggleSearch(true) },
     { id: "audit", ico: "◉", label: "Open Audit Log", kw: "governance record log", run: () => openAudit() },
     { id: "toggle-rec", ico: "●", label: () => (recOn ? "Stop Recording" : "Start Recording"), kw: "record audit", run: () => setRec(!recOn) },
+    { id: "perf", ico: "◱", label: () => (PERF.on ? "Hide Perf HUD" : "Show Perf HUD"), kw: "latency throughput benchmark measure fps speed", run: () => togglePerf() },
     { id: "settings", ico: "⚙", label: "Settings", hint: "⌘,", run: () => toggleSettings(true) },
     { id: "close", ico: "✕", label: "Close Terminal", hint: "⌘W", run: () => { if (focused) closePane(focused); } },
   ];

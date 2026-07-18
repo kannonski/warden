@@ -8,13 +8,14 @@
 // the window when a file changes. Edit HTML/CSS/JS on disk → see it, no rebuild.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use tauri::ipc::Channel;
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem, Submenu};
 use tauri::{Emitter, Manager, State, WebviewUrl, WebviewWindowBuilder};
+use tokio::sync::Notify;
 use tokio::sync::mpsc::{UnboundedSender, unbounded_channel};
 
 /// Baked-in default UI, copied out to the on-disk ui/ dir on first run (also the crate's frontendDist).
@@ -35,6 +36,15 @@ struct AppState {
     /// window label → the sids opened by that window, so closing a window can drop its panes (else the
     /// senders linger, `run_pane` loops forever, and the sessions never close → leaked palette entries).
     win_panes: Mutex<HashMap<String, Vec<u64>>>,
+    /// per-pane output flow control (backpressure): how many bytes we've sent the webview that it hasn't
+    /// yet acked (rendered), + a waker. The output pump pauses when this exceeds the window, so a fast
+    /// producer can't flood the webview into a freeze.
+    flow: Mutex<HashMap<u64, Arc<PaneFlow>>>,
+}
+
+struct PaneFlow {
+    inflight: AtomicI64,   // bytes sent to the webview but not yet acked
+    notify: Notify,        // pane_ack wakes the paused pump
 }
 
 /// A window is gone: drop its panes' senders. Each `run_pane` then sees its client disconnect and, if it
@@ -45,8 +55,10 @@ fn cleanup_window(state: &AppState, label: &str) {
         return;
     }
     let mut panes = state.panes.lock().unwrap();
+    let mut flow = state.flow.lock().unwrap();
     for sid in sids {
         panes.remove(&sid); // dropping the sender ends run_pane's msg loop → disconnect → close if owner
+        flow.remove(&sid);
     }
 }
 
@@ -175,27 +187,52 @@ fn open_pane(
     let (out_tx, mut out_rx) = unbounded_channel::<Vec<u8>>();
     let handle = state.rt.handle().clone();
 
-    // output pump: coalesce queued pty bytes into ONE base64 frame, but capped so the base64 string
-    // stays under Tauri's 8KB Channel fast-path threshold. Under that, a frame is delivered by a direct
-    // JS `eval` (fast); over it (and all raw>1KB), Tauri falls back to a per-message fetch round-trip,
-    // which crawls (~0.27 MB/s). So: coalesce ~6KB raw (→ ~8KB base64) per frame = big AND fast-path.
+    let sid = state.next_sid.fetch_add(1, Ordering::Relaxed);
+    let flow = Arc::new(PaneFlow { inflight: AtomicI64::new(0), notify: Notify::new() });
+    state.flow.lock().unwrap().insert(sid, flow.clone());
+
+    // Output pump with backpressure. Each frame is base64 (kept ~8KB so it takes Tauri's fast direct-
+    // eval Channel path). We never run more than WINDOW bytes ahead of what the webview has acked
+    // (rendered) — that's what stops a fast producer (`cat`, `yes`) from flooding the webview into a
+    // freeze. Output is buffered locally, capped at BACKLOG_MAX; a runaway infinite flood drops OLDEST
+    // to stay alive (can't push backpressure to the shell through the sync governed sink — see notes).
     handle.spawn(async move {
         use base64::{Engine, engine::general_purpose::STANDARD};
-        while let Some(first) = out_rx.recv().await {
-            let mut buf = first;
-            while buf.len() < 6000 {
-                match out_rx.try_recv() {
-                    Ok(more) => buf.extend_from_slice(&more),
-                    Err(_) => break,
+        const WINDOW: i64 = 1 << 20;        // 1 MB the webview may be behind before we pause
+        const BACKLOG_MAX: usize = 8 << 20; // 8 MB local cap; beyond it, drop oldest (unsustainable flood)
+        let mut backlog: VecDeque<u8> = VecDeque::new();
+        loop {
+            if backlog.is_empty() {
+                match out_rx.recv().await {
+                    Some(b) => backlog.extend(b),
+                    None => break, // pane gone
                 }
             }
-            if on_output.send(STANDARD.encode(&buf)).is_err() {
-                break;
+            while let Ok(b) = out_rx.try_recv() {
+                backlog.extend(b);
+            }
+            if backlog.len() > BACKLOG_MAX {
+                backlog.drain(..backlog.len() - BACKLOG_MAX); // drop oldest to stay bounded
+            }
+            // send while the webview has room in the window
+            while !backlog.is_empty() && flow.inflight.load(Ordering::Relaxed) < WINDOW {
+                let take = backlog.len().min(6000);
+                let chunk: Vec<u8> = backlog.drain(..take).collect();
+                flow.inflight.fetch_add(chunk.len() as i64, Ordering::Relaxed);
+                if on_output.send(STANDARD.encode(&chunk)).is_err() {
+                    return;
+                }
+            }
+            // webview is behind → wait for an ack (or more output) before looping
+            if flow.inflight.load(Ordering::Relaxed) >= WINDOW {
+                tokio::select! {
+                    _ = flow.notify.notified() => {}
+                    b = out_rx.recv() => match b { Some(x) => backlog.extend(x), None => break },
+                }
             }
         }
     });
 
-    let sid = state.next_sid.fetch_add(1, Ordering::Relaxed);
     let warden = state.warden.clone();
     // "" → run_pane's pty broker spawns $SHELL; explicit fallback for GUI launches where $SHELL may
     // be unset. Ignored for a plugin pane (the frontend sends {"app":name} → an app cap, not a shell).
@@ -228,6 +265,7 @@ fn pane_send(state: State<AppState>, sid: u64, line: String) {
     };
     if ends {
         state.panes.lock().unwrap().remove(&sid);
+        state.flow.lock().unwrap().remove(&sid);
     }
 }
 
@@ -239,6 +277,16 @@ fn pane_input(state: State<AppState>, sid: u64, data: String) {
     if let Some(tx) = state.panes.lock().unwrap().get(&sid) {
         let payload = serde_json::to_string(&data).unwrap_or_else(|_| "\"\"".into());
         let _ = tx.send(format!("{{\"input\":{payload}}}\n").into_bytes());
+    }
+}
+
+/// Output flow control: the webview acks bytes it has rendered so the pump can send more. Keeps the
+/// backend from running more than a window ahead of the display (the anti-freeze backpressure).
+#[tauri::command]
+fn pane_ack(state: State<AppState>, sid: u64, bytes: u32) {
+    if let Some(flow) = state.flow.lock().unwrap().get(&sid) {
+        flow.inflight.fetch_sub(bytes as i64, Ordering::Relaxed);
+        flow.notify.notify_one();
     }
 }
 
@@ -556,6 +604,7 @@ fn main() {
                 next_win: AtomicU64::new(2), // window 1 is "main"; extras are kedi-2, kedi-3, …
                 panes: Mutex::new(HashMap::new()),
                 win_panes: Mutex::new(HashMap::new()),
+                flow: Mutex::new(HashMap::new()),
             });
 
             println!("kedi-app: serving hot-swappable UI from {}", dir.display());
@@ -588,6 +637,7 @@ fn main() {
             open_pane,
             pane_send,
             pane_input,
+            pane_ack,
             new_window,
             pop_out,
             clients_json,
