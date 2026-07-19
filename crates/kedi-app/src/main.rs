@@ -309,11 +309,22 @@ fn open_pane(
     });
 
     let warden = state.warden.clone();
+    let label = window.label().to_string();
+    let task_label = label.clone();
     // Empty command → the pty broker launches $SHELL directly as a LOGIN shell (see pty.rs). Launching
     // as login is what makes a Dock/launcher-started terminal inherit the user's real PATH/env (brew,
     // mise, …) — GUI processes otherwise get a minimal environment. (Plugin panes send {"app"} instead.)
     handle.spawn(async move {
         kedi::run_pane(warden, sid, String::new(), msg_rx, out_tx).await;
+        // run loop ended → drop this pane's bookkeeping so it never lingers in the maps (else a reloaded
+        // window's superseded panes would accumulate until the window closed).
+        if let Some(st) = app.try_state::<AppState>() {
+            st.panes.lock().unwrap().remove(&sid);
+            st.flow.lock().unwrap().remove(&sid);
+            if let Some(v) = st.win_panes.lock().unwrap().get_mut(&task_label) {
+                v.retain(|x| *x != sid);
+            }
+        }
         // session ended (shell exit / kill / self-exit) → tell the frontend to close this pane
         let _ = app.emit("pane-exit", sid);
     });
@@ -323,7 +334,7 @@ fn open_pane(
         .win_panes
         .lock()
         .unwrap()
-        .entry(window.label().to_string())
+        .entry(label)
         .or_default()
         .push(sid);
     Ok(sid)
@@ -358,6 +369,31 @@ fn pane_input(state: State<AppState>, sid: u64, data: String) {
     if let Some(tx) = state.panes.lock().unwrap().get(&sid) {
         let payload = serde_json::to_string(&data).unwrap_or_else(|_| "\"\"".into());
         let _ = tx.send(format!("{{\"input\":{payload}}}\n").into_bytes());
+    }
+}
+
+/// Reap this window's orphaned panes after a reload. A webview reload leaves the previous page's panes'
+/// control senders in `state.panes` (they're only dropped when the window *closes*), so their `run_pane`
+/// loops block forever on `msgs.recv()`. Once the frontend has re-attached the sessions it's keeping
+/// (which supersedes those old viewers), dropping every sender NOT in `keep` unblocks the stale loops —
+/// and because they were superseded, they exit WITHOUT closing the session. `keep` = the current page's
+/// live pane sids (monotonic, so never collides with an older orphan's sid).
+#[tauri::command]
+fn reap_window_panes(state: State<AppState>, window: tauri::WebviewWindow, keep: Vec<u64>) {
+    let label = window.label().to_string();
+    let keep: std::collections::HashSet<u64> = keep.into_iter().collect();
+    let mut win_panes = state.win_panes.lock().unwrap();
+    let mut panes = state.panes.lock().unwrap();
+    let mut flow = state.flow.lock().unwrap();
+    if let Some(sids) = win_panes.get_mut(&label) {
+        sids.retain(|sid| {
+            if keep.contains(sid) {
+                return true;
+            }
+            panes.remove(sid); // drop the sender → the stuck run_pane loop ends (superseded → session lives)
+            flow.remove(sid);
+            false
+        });
     }
 }
 
@@ -923,6 +959,7 @@ fn main() {
             pane_send,
             pane_input,
             pane_ack,
+            reap_window_panes,
             new_window,
             pop_out,
             open_path,
