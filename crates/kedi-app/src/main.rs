@@ -539,19 +539,30 @@ fn open_url(url: String) {
         .spawn();
 }
 
-/// Open a file path (optionally at a line) from a ⌘-clicked link in the terminal. Runs through the
-/// user's LOGIN shell so PATH resolves their editor (`code`, `$VISUAL`/`$EDITOR`), falling back to the
-/// OS opener. Path & line are passed as positional args (never interpolated) — no shell injection.
+/// Open a file path (optionally at a line) from a ⌘-clicked link in the terminal. Type-aware: a clicked
+/// `path:line` or a text/source file opens in the user's `$EDITOR` (fallback `$VISUAL`) with the line
+/// jump; anything else (images, PDFs, archives, binaries…) goes to the OS opener, which respects the
+/// per-type default app. Runs through the LOGIN shell so `$EDITOR`/PATH resolve as they do at the
+/// prompt. Path & line are positional args (never interpolated) — no shell injection.
 #[tauri::command]
 fn open_path(path: String, line: u32) {
     let shell = std::env::var("SHELL").unwrap_or_else(|_| "sh".to_string());
     let script = r#"f="$1"; l="$2"; [ "$l" = "0" ] && l=""
-if command -v code >/dev/null 2>&1; then
-  [ -n "$l" ] && code -g "$f:$l" || code -g "$f"
-elif [ -n "${VISUAL}${EDITOR}" ]; then
-  ed="${VISUAL:-$EDITOR}"; [ -n "$l" ] && "$ed" "+$l" "$f" || "$ed" "$f"
-elif [ "$(uname)" = "Darwin" ]; then open "$f"
-else xdg-open "$f"; fi"#;
+ed="${EDITOR:-$VISUAL}"
+open_os() { if [ "$(uname)" = "Darwin" ]; then open "$f"; else xdg-open "$f"; fi; }
+# text/source → editor; everything else → default app. A clicked path:line is source by definition.
+istext=0
+if [ -n "$l" ]; then istext=1
+elif command -v file >/dev/null 2>&1; then
+  case "$(file --mime-type -b -- "$f" 2>/dev/null)" in
+    text/*|application/json|application/javascript|application/xml|application/x-sh|inode/x-empty) istext=1 ;;
+  esac
+fi
+if [ "$istext" = "1" ] && [ -n "$ed" ]; then
+  [ -n "$l" ] && "$ed" "+$l" "$f" || "$ed" "$f"
+else
+  open_os
+fi"#;
     let _ = std::process::Command::new(shell)
         .args(["-lc", script, "kedi", &path, &line.to_string()])
         .spawn();
