@@ -1,40 +1,58 @@
 name: release
 
-# On a version tag, build the self-contained kedi binary per platform and attach it to the
-# GitHub Release. kedi bakes its HTML in and loads xterm.js from a CDN, so each artifact is one file.
+# Build the kedi terminal (the Tauri app, crates/kedi-app) for every platform on a version tag (or a
+# manual run) and upload to a draft GitHub Release: macOS universal .dmg/.app, Linux .AppImage/.deb/.rpm.
+# The UI is static (embedded via include_dir), so there is no JS build step.
 on:
   push:
-    tags: ['v*']
-
-permissions:
-  contents: write
+    tags: ["v*"]
+  workflow_dispatch:
 
 jobs:
   build:
+    permissions:
+      contents: write
     strategy:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-latest
-            target: x86_64-unknown-linux-gnu
-            name: kedi-linux-x86_64
-          - os: macos-14
-            target: aarch64-apple-darwin
-            name: kedi-macos-aarch64
-    runs-on: ${{ matrix.os }}
+          - platform: macos-latest
+            rust-targets: aarch64-apple-darwin,x86_64-apple-darwin
+            args: --target universal-apple-darwin
+          - platform: ubuntu-22.04
+            rust-targets: ""
+            args: ""
+    runs-on: ${{ matrix.platform }}
     steps:
       - uses: actions/checkout@v4
+
+      - name: Install Linux dependencies
+        if: matrix.platform == 'ubuntu-22.04'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev libgtk-3-dev librsvg2-dev patchelf \
+            libayatana-appindicator3-dev build-essential
+
       - uses: dtolnay/rust-toolchain@stable
         with:
-          targets: ${{ matrix.target }}
+          targets: ${{ matrix.rust-targets }}
+
       - uses: Swatinem/rust-cache@v2
-      - name: build kedi
-        run: cargo build -p kedi --release --target ${{ matrix.target }}
-      - name: stage artifact
-        run: |
-          mkdir -p dist
-          cp "target/${{ matrix.target }}/release/kedi" "dist/${{ matrix.name }}"
-      - uses: softprops/action-gh-release@v2
         with:
-          files: dist/${{ matrix.name }}
-          generate_release_notes: true
+          workspaces: ". -> target"
+
+      - uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Signing/notarization intentionally omitted for now. To enable later, add here:
+          #   macOS:  APPLE_CERTIFICATE, APPLE_CERTIFICATE_PASSWORD, APPLE_SIGNING_IDENTITY,
+          #           APPLE_ID, APPLE_PASSWORD, APPLE_TEAM_ID
+          #   updater: TAURI_SIGNING_PRIVATE_KEY, TAURI_SIGNING_PRIVATE_KEY_PASSWORD
+        with:
+          projectPath: crates/kedi-app
+          tagName: ${{ github.ref_name }}
+          releaseName: "kedi ${{ github.ref_name }}"
+          releaseDraft: true
+          prerelease: false
+          args: ${{ matrix.args }}
