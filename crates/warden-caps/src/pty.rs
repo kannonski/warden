@@ -53,7 +53,13 @@ impl PtyCap {
             .take()
             .ok_or_else(|| WardenError::Cap("pty slave already taken".into()))?;
         let mut cmd = if self.command.trim().is_empty() {
-            CommandBuilder::new(std::env::var("SHELL").unwrap_or_else(|_| "bash".into()))
+            // default interactive shell, launched as a LOGIN shell (`-l`) so it sources the user's
+            // profile — essential when kedi is started from the Dock/a desktop launcher (GUI processes
+            // inherit a minimal environment; login sourcing restores PATH: brew, mise, …). Portable:
+            // zsh/bash/fish all take -l.
+            let mut c = CommandBuilder::new(std::env::var("SHELL").unwrap_or_else(|_| "bash".into()));
+            c.arg("-l");
+            c
         } else {
             let mut c = CommandBuilder::new("sh");
             c.arg("-c");

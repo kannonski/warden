@@ -171,6 +171,11 @@ fn setup_shell_integration(app: &tauri::AppHandle) {
     // .zshenv runs for every zsh; source the user's first (PATH etc. live here for many setups).
     let zshenv = "[ -n \"$KEDI_UZDOTDIR\" ] && [ -f \"$KEDI_UZDOTDIR/.zshenv\" ] && \
                   source \"$KEDI_UZDOTDIR/.zshenv\"\n";
+    // .zprofile runs for LOGIN shells (we launch login) BEFORE .zshrc, while ZDOTDIR is still ours —
+    // source the user's so login-only PATH additions aren't lost. (.zlogin is read after .zshrc restores
+    // ZDOTDIR to the user's dir, so zsh picks up their .zlogin directly — no shim needed for it.)
+    let zprofile = "[ -n \"$KEDI_UZDOTDIR\" ] && [ -f \"$KEDI_UZDOTDIR/.zprofile\" ] && \
+                    source \"$KEDI_UZDOTDIR/.zprofile\"\n";
     // .zshrc: restore ZDOTDIR, source the user's .zshrc, then install the integration hooks.
     let zshrc = r#"KEDI_UZDOTDIR="${KEDI_UZDOTDIR:-$HOME}"
 ZDOTDIR="$KEDI_UZDOTDIR"
@@ -185,6 +190,7 @@ if autoload -Uz add-zsh-hook 2>/dev/null && whence add-zsh-hook >/dev/null 2>&1;
 fi
 "#;
     if std::fs::write(dir.join(".zshenv"), zshenv).is_err()
+        || std::fs::write(dir.join(".zprofile"), zprofile).is_err()
         || std::fs::write(dir.join(".zshrc"), zshrc).is_err()
     {
         return;
@@ -282,11 +288,11 @@ fn open_pane(
     });
 
     let warden = state.warden.clone();
-    // "" → run_pane's pty broker spawns $SHELL; explicit fallback for GUI launches where $SHELL may
-    // be unset. Ignored for a plugin pane (the frontend sends {"app":name} → an app cap, not a shell).
-    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
+    // Empty command → the pty broker launches $SHELL directly as a LOGIN shell (see pty.rs). Launching
+    // as login is what makes a Dock/launcher-started terminal inherit the user's real PATH/env (brew,
+    // mise, …) — GUI processes otherwise get a minimal environment. (Plugin panes send {"app"} instead.)
     handle.spawn(async move {
-        kedi::run_pane(warden, sid, shell, msg_rx, out_tx).await;
+        kedi::run_pane(warden, sid, String::new(), msg_rx, out_tx).await;
         // session ended (shell exit / kill / self-exit) → tell the frontend to close this pane
         let _ = app.emit("pane-exit", sid);
     });
@@ -473,6 +479,8 @@ fn open_url(url: String) {
     let _ = std::process::Command::new("/usr/bin/open").arg(&url).spawn();
     #[cfg(target_os = "linux")]
     let _ = std::process::Command::new("xdg-open").arg(&url).spawn();
+    #[cfg(target_os = "windows")]
+    let _ = std::process::Command::new("cmd").args(["/C", "start", "", &url]).spawn();
 }
 
 // ── audit / governance IPC (ports of the old HTTP routes; same JSON shapes) ───────────────────────
