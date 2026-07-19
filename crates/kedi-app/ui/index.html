@@ -160,6 +160,57 @@
   #pal-empty { color:var(--dim); padding:26px; text-align:center; font-size:13px; }
   #pal-foot { display:flex; gap:16px; padding:8px 14px; border-top:1px solid var(--edge); flex:0 0 auto;
               color:var(--dim); font-size:11px; letter-spacing:.03em; }
+  /* Recall — the session timeline (⌘R): the palette shell, pointed at this shell's command history */
+  #recall { position:fixed; inset:0; display:none; z-index:10001; background:rgba(9,11,16,.5);
+            backdrop-filter:blur(3px); -webkit-backdrop-filter:blur(3px); }
+  #recall.show { display:flex; flex-direction:column; align-items:center; }
+  #rc-box { width:min(760px,94vw); margin-top:9vh; display:flex; flex-direction:column; min-height:0; max-height:74vh;
+            background:rgba(24,24,37,.98); backdrop-filter:blur(20px); -webkit-backdrop-filter:blur(20px);
+            border:1px solid var(--edge); border-radius:14px; box-shadow:0 24px 70px rgba(0,0,0,.6); overflow:hidden; }
+  #rc-search { display:flex; align-items:center; gap:10px; padding:13px 16px; border-bottom:1px solid var(--edge); flex:0 0 auto; }
+  #rc-search .pal-ico { color:var(--dim); font-size:15px; flex:0 0 auto; }
+  #rc-in { flex:1 1 auto; background:none; border:none; outline:none; color:var(--fg); font:15px/1.3 var(--mono,monospace); }
+  #rc-in::placeholder { color:var(--dim); }
+  #rc-facets { display:flex; gap:6px; flex:0 0 auto; }
+  .rc-pill { font-size:11px; padding:3px 9px; border-radius:999px; border:1px solid var(--edge); color:var(--dim);
+             cursor:pointer; user-select:none; white-space:nowrap; }
+  .rc-pill.on { background:var(--focus); color:#11111b; border-color:var(--focus); font-weight:600; }
+  .rc-sep { width:1px; align-self:stretch; background:var(--edge); margin:2px 2px; }
+  #rc-scope { flex:0 0 auto; color:var(--dim); font-size:11px; max-width:34%; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  #rc-list { overflow-y:auto; padding:6px; scrollbar-width:thin; }
+  #rc-list::-webkit-scrollbar { width:8px; } #rc-list::-webkit-scrollbar-thumb { background:var(--edge); border-radius:4px; }
+  .rrow { display:flex; align-items:center; gap:11px; padding:7px 10px; border-radius:8px; cursor:pointer; color:var(--fg); font-size:13px; }
+  .rrow.sel { background:var(--focus); color:#11111b; }
+  .rrow.gone { opacity:.5; } /* scrolled out of scrollback — metadata only, no jump/copy/diff */
+  .rrow .rst { width:14px; text-align:center; flex:0 0 auto; font-size:12px; }
+  .rrow .rst.ok { color:#a6e3a1; } .rrow .rst.bad { color:#f38ba8; }
+  .rrow.sel .rst.ok, .rrow.sel .rst.bad { color:#11111b; }
+  .rrow .rcmd { flex:1 1 auto; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; font-family:var(--mono,monospace); }
+  .rrow .rcmd .hl { color:var(--focus); font-weight:600; }
+  .rrow.sel .rcmd .hl { color:#11111b; text-decoration:underline; }
+  .rrow .rcwd { flex:0 0 auto; color:var(--dim); font-size:11px; max-width:22%; overflow:hidden; text-overflow:ellipsis; }
+  .rrow .rdur { flex:0 0 auto; color:var(--dim); font-size:11px; width:52px; text-align:right; }
+  .rrow .rwhen { flex:0 0 auto; color:var(--dim); font-size:11px; width:64px; text-align:right; }
+  .rrow.sel .rcwd, .rrow.sel .rdur, .rrow.sel .rwhen { color:#11111b; opacity:.75; }
+  #rc-empty { color:var(--dim); padding:30px; text-align:center; font-size:13px; line-height:1.6; }
+  #rc-foot { display:flex; gap:15px; padding:8px 14px; border-top:1px solid var(--edge); flex:0 0 auto;
+             color:var(--dim); font-size:11px; letter-spacing:.02em; flex-wrap:wrap; }
+  #rc-foot b { color:var(--fg); font-weight:600; }
+  /* diff viewer — two runs of one command, line by line */
+  #rcdiff { position:fixed; inset:0; display:none; z-index:10003; background:rgba(9,11,16,.6);
+            backdrop-filter:blur(3px); -webkit-backdrop-filter:blur(3px); flex-direction:column; align-items:center; }
+  #rcdiff.show { display:flex; }
+  #rcd-box { width:min(900px,94vw); margin-top:8vh; max-height:80vh; display:flex; flex-direction:column;
+             background:rgba(24,24,37,.99); border:1px solid var(--edge); border-radius:14px; box-shadow:0 24px 70px rgba(0,0,0,.6); overflow:hidden; }
+  #rcd-head { display:flex; align-items:center; gap:10px; padding:12px 16px; border-bottom:1px solid var(--edge); font-size:13px; }
+  #rcd-head .rcd-cmd { flex:1 1 auto; font-family:var(--mono,monospace); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  #rcd-head .rcd-stat { flex:0 0 auto; color:var(--dim); font-size:11px; }
+  #rcd-body { overflow:auto; padding:8px 0; font:12px/1.55 var(--mono,monospace); scrollbar-width:thin; }
+  #rcd-body .dl { padding:0 16px; white-space:pre; }
+  #rcd-body .dl.add { background:rgba(166,227,161,.14); color:#a6e3a1; }
+  #rcd-body .dl.del { background:rgba(243,139,168,.14); color:#f38ba8; }
+  #rcd-body .dl.ctx { color:var(--dim); }
+  #rcd-foot { padding:8px 14px; border-top:1px solid var(--edge); color:var(--dim); font-size:11px; }
   /* perf HUD — live echo latency + output throughput (toggle from ⌘K → "Perf HUD") */
   #perfhud { position:fixed; right:12px; bottom:12px; z-index:10002; display:none; pointer-events:none;
              background:rgba(17,17,27,.92); border:1px solid var(--edge); border-radius:8px; padding:7px 11px;
@@ -200,6 +251,28 @@
     <div id="pal-search"><span class="pal-ico">⌕</span><input id="pal-in" type="text" placeholder="Search commands, tabs, sessions…" autocomplete="off" spellcheck="false"></div>
     <div id="pal-list"></div>
     <div id="pal-foot"><span>↑↓ navigate</span><span>↵ run</span><span>esc close</span></div>
+  </div></div>
+  <div id="recall"><div id="rc-box">
+    <div id="rc-search">
+      <span class="pal-ico">↺</span>
+      <input id="rc-in" type="text" placeholder="Recall a command in this terminal…" autocomplete="off" spellcheck="false">
+      <span id="rc-facets">
+        <span class="rc-pill on" data-scope="session">this terminal</span>
+        <span class="rc-pill" data-scope="recent" title="every session on disk — survives pop-out & restart">⏳ earlier</span>
+        <span class="rc-sep"></span>
+        <span class="rc-pill on" data-filter="all">all</span>
+        <span class="rc-pill" data-filter="fail">✗</span>
+        <span class="rc-pill" data-filter="slow">⏱</span>
+      </span>
+      <span id="rc-scope"></span>
+    </div>
+    <div id="rc-list"></div>
+    <div id="rc-foot"><span><b>⌘C</b> copy output</span><span><b>⌘D</b> diff earlier run</span><span><b>↵</b> jump</span><span><b>⌘↵</b> re-run</span><span><b>⇥</b> filter</span><span><b>⌘E</b> earlier</span><span><b>esc</b> close</span></div>
+  </div></div>
+  <div id="rcdiff"><div id="rcd-box">
+    <div id="rcd-head"><span class="rcd-cmd"></span><span class="rcd-stat"></span></div>
+    <div id="rcd-body"></div>
+    <div id="rcd-foot"><b style="color:#f38ba8">−</b> previous run · <b style="color:#a6e3a1">+</b> this run · <b>esc</b> back</div>
   </div></div>
   <div id="snap"></div>
   <div id="overlay"></div>
@@ -1186,6 +1259,26 @@ function shortName(title) {
 }
 // the representative pane for a tab's label (the focused one if it's here, else the first)
 function tabPane(ws) { return (focused && focused.ws === ws.id) ? focused : wsPanes(ws.id)[0]; }
+// "command finished" native notification — only when it ran a while AND you're looking elsewhere
+// (another tab, or kedi isn't the focused window), so foreground quick commands never nag.
+function fmtDur(ms) {
+  const s = Math.round(ms / 1000);
+  return s >= 60 ? Math.floor(s / 60) + "m" + (s % 60) + "s" : (ms >= 9500 ? s + "s" : (ms / 1000).toFixed(1) + "s");
+}
+async function notifyDone(pane, exit, ms) {
+  if (ms < 8000) return; // only slow commands
+  if (pane.ws === activeWs && document.hasFocus()) return; // you're already watching it
+  try {
+    const n = window.__TAURI__ && window.__TAURI__.notification;
+    if (!n) return;
+    if (!(await n.isPermissionGranted())) return;
+    const ws = wsById(pane.ws), where = ws ? tabName(ws) : ("pane " + pane.id);
+    n.sendNotification({
+      title: (exit === 0 ? "✓ " : "✗ ") + where,
+      body: (exit === 0 ? "done" : "exit " + exit) + " · " + fmtDur(ms),
+    });
+  } catch (_) {}
+}
 // jump the viewport to the previous/next command mark (⌘↑ / ⌘↓), from OSC 133 decorations
 function cmdNav(pane, dir) {
   if (!pane || !pane.term) return;
@@ -1196,21 +1289,53 @@ function cmdNav(pane, dir) {
   const target = dir > 0 ? lines.find((l) => l > top + 1) : [...lines].reverse().find((l) => l < top - 1);
   if (target != null) pane.term.scrollToLine(target);
 }
-// copy the output of the last finished command (from OSC 133 C→D marks): the lines between the command
-// line and the next prompt. Needs shell integration; the command must still be in scrollback.
-function copyLastOutput(p) {
-  p = p || focused;
-  if (!p || !p.lastCmd) { overlayFlash("no command output yet (needs shell integration)"); return; }
-  const { start, end } = p.lastCmd;
-  if (!start || start.isDisposed) { overlayFlash("that command scrolled out of history"); return; }
-  const buf = p.term.buffer.active;
+// decode a base64 OSC payload (the command line shipped by the preexec hook) back to a UTF-8 string.
+function decodeOsc(b64) {
+  try {
+    const bytes = Uint8Array.from(atob((b64 || "").replace(/\s+/g, "")), (c) => c.charCodeAt(0));
+    return new TextDecoder().decode(bytes);
+  } catch (_) { return ""; }
+}
+// the output of one finished command. Prefers the text captured + stored at command-end (survives
+// scrollback trimming, pop-out, and restart); falls back to slicing the live xterm buffer between the
+// OSC 133 C→D marks. null only if neither is available (no stored text and the marks are gone).
+function outputText(pane, entry) {
+  if (!entry) return null;
+  if (typeof entry.out === "string") return entry.out; // captured clean text (live-entry, loaded, or recent)
+  if (!pane) return null;
+  const { start, end } = entry;
+  if (!start || start.isDisposed) return null;
+  const buf = pane.term.buffer.active;
   const from = start.line + 1; // line after the command itself
   const to = (end && !end.isDisposed ? end.line : buf.length) - 1; // line before the next prompt
   const lines = [];
   for (let y = from; y <= to; y++) { const l = buf.getLine(y); if (l) lines.push(l.translateToString(true)); }
-  const text = cleanSel(lines.join("\n")).replace(/\n+$/, "");
+  return cleanSel(lines.join("\n")).replace(/\n+$/, "");
+}
+// copy the output of the last finished command. Needs shell integration; must still be in scrollback.
+function copyLastOutput(p) {
+  p = p || focused;
+  if (!p || !p.lastCmd) { overlayFlash("no command output yet (needs shell integration)"); return; }
+  const text = outputText(p, p.lastCmd);
+  if (text == null) { overlayFlash("that command scrolled out of history"); return; }
   if (text) { clipWrite(text); overlayFlash("copied last command output"); }
   else overlayFlash("last command had no output");
+}
+// fire-and-forget: persist a finished command to its session's on-disk timeline (strip the live markers,
+// which can't be serialized and aren't needed once the output text is captured).
+function persistEntry(pane, entry) {
+  if (!pane || pane.sessionId == null) return;
+  const rec = { cmd: entry.cmd, cwd: entry.cwd, exit: entry.exit, ms: entry.ms, at: entry.at, out: entry.out || "" };
+  try { invoke("history_push", { session: pane.sessionId, entry: JSON.stringify(rec) }).catch(() => {}); } catch (_) {}
+}
+// "2m ago" / "just now" — relative timestamp for Recall rows.
+function fmtAgo(at) {
+  const s = Math.max(0, Math.round((Date.now() - at) / 1000));
+  if (s < 5) return "now";
+  if (s < 60) return s + "s ago";
+  const m = Math.floor(s / 60); if (m < 60) return m + "m ago";
+  const h = Math.floor(m / 60); if (h < 24) return h + "h ago";
+  return Math.floor(h / 24) + "d ago";
 }
 function baseName(p) { if (!p) return ""; const s = String(p).replace(/\/+$/, "").split("/"); return s[s.length - 1] || "/"; }
 function tabName(ws) {
@@ -1475,6 +1600,7 @@ async function makePane(app, attachId) {
 
   // ── shell integration: OSC 7 (cwd) + OSC 133 (command marks) emitted by the injected zsh hooks ──
   pane.marks = []; // command markers (for ⌘↑/⌘↓ navigation), newest last
+  pane.history = []; // finished commands this session: {cmd,cwd,exit,ms,at,start,end} — for Recall (⌘R)
   try {
     term.parser.registerOscHandler(7, (data) => { // OSC 7 ; file://host/path  → live cwd
       const m = /file:\/\/[^/]*(\/.*)$/.exec(data || "");
@@ -1484,9 +1610,12 @@ async function makePane(app, attachId) {
     term.parser.registerOscHandler(133, (data) => { // OSC 133 ; A|B|C|D[;exit]  → command boundaries
       const kind = (data || "")[0];
       const bufLine = () => term.buffer.active.baseY + term.buffer.active.cursorY;
-      if (kind === "C") { try { pane._cmdMarker = term.registerMarker(0); } catch (_) { pane._cmdMarker = null; } } // command started here
+      if (kind === "C") { try { pane._cmdMarker = term.registerMarker(0); } catch (_) { pane._cmdMarker = null; } pane._cmdStart = performance.now(); pane._pendingCmd = ""; } // command started here
+      else if (kind === "E") { pane._pendingCmd = decodeOsc(data.slice(2)); } // the command line itself (base64)
       else if (kind === "D" && pane._cmdMarker && !pane._cmdMarker.isDisposed) { // finished → decorate by exit code
         const exit = parseInt((data.split(";")[1] || "0"), 10) || 0;
+        const ms = pane._cmdStart ? performance.now() - pane._cmdStart : 0;
+        notifyDone(pane, exit, ms); pane._cmdStart = null; // notify if it was slow + you're looking elsewhere
         const color = exit === 0 ? "#a6e3a1" : "#f38ba8";
         // scrollbar overview-ruler tick only — no inline bar (it collides with prompts like powerlevel10k
         // that draw at column 0, and duplicates their own exit indicator). Scan/nav via the ruler + ⌘↑↓.
@@ -1495,9 +1624,45 @@ async function makePane(app, attachId) {
         // remember this finished command's output range (command line → the line before the next prompt)
         let endM = null; try { endM = term.registerMarker(0); } catch (_) {}
         pane.lastCmd = { start: pane._cmdMarker, end: endM, exit };
-        pane._cmdMarker = null;
+        // build the timeline entry, then capture the clean xterm-rendered output NOW (before entry.out is
+        // set, so outputText reads the live buffer) and cap it — so it stays copyable after the buffer
+        // scrolls, a pop-out, or a restart. Persist to the session's on-disk file. Keep the last 50.
+        // during the post-attach replay grace, the marks are re-emitted echoes of already-persisted
+        // commands — skip recording them (the real timeline was restored from disk by history_load).
+        if (!(pane._histReadyAt && Date.now() < pane._histReadyAt)) {
+          const entry = { cmd: (pane._pendingCmd || "").trim(), cwd: pane.cwd || "", exit, ms, at: Date.now(), start: pane._cmdMarker, end: endM };
+          const cap = outputText(pane, entry); entry.out = (cap == null) ? "" : cap.slice(0, 128 * 1024);
+          pane.history.push(entry);
+          if (pane.history.length > 50) { const old = pane.history.shift(); try { old.end && old.end.dispose(); } catch (_) {} }
+          persistEntry(pane, entry);
+        }
+        pane._pendingCmd = ""; pane._cmdMarker = null;
       }
       return true;
+    });
+  } catch (_) {}
+
+  // ── clickable file paths: ⌘-click a `path` or `path:line[:col]` → open in editor (open_path) ──
+  try {
+    term.registerLinkProvider({
+      provideLinks(y, cb) {
+        const row = term.buffer.active.getLine(y - 1); // provider row is 1-based over the buffer
+        if (!row) { cb(undefined); return; }
+        const text = row.translateToString(true);
+        // a path with a slash, OR a filename.ext — each optionally followed by :line[:col]
+        const re = /(~?\.{0,2}\/[\w.\-\/]+|\b[\w.\-]+\.[A-Za-z][\w]{0,7})(?::(\d+))?(?::\d+)?/g;
+        const links = []; let m;
+        while ((m = re.exec(text))) {
+          if (/^https?:/i.test(m[0])) continue; // URLs are the WebLinks addon's job
+          const path = m[1], line = m[2] ? parseInt(m[2], 10) : 0, x = m.index + 1;
+          links.push({
+            text: m[0],
+            range: { start: { x, y }, end: { x: x + m[0].length - 1, y } },
+            activate: () => invoke("open_path", { path, line }).catch(() => {}),
+          });
+        }
+        cb(links.length ? links : undefined);
+      },
     });
   } catch (_) {}
   // open only once the wrapper is in the live DOM (detached open leaves input/focus unwired), and
@@ -1610,6 +1775,17 @@ async function makePane(app, attachId) {
   pane.send({ tab: paneKey(pane) }); // tag this session with our per-pane key (for the palette)
   pane.send({ hello: WHO }); // introduce the claimed identity — first control line
   pane.moved = !!attachId; // a moved pane: its title/size arrive from the session's replayed output
+  // On a move/pop-out the session replays its recent output (ring), which re-fires OSC 133 for commands
+  // we've already persisted → suppress history recording briefly so replayed marks don't double-record;
+  // the real timeline is restored from disk by history_load below.
+  if (attachId) pane._histReadyAt = Date.now() + 1500;
+  // Recall: reload this session's persisted timeline so its output stays copyable after a pop-out/move
+  // (or a restart, if this session id recurs). Loaded entries carry their stored output but no live
+  // markers, so they can be copied/diff'd but not jumped-to. Merge under any commands that already ran.
+  invoke("history_load", { session: pane.sessionId }).then((lines) => {
+    const loaded = (lines || []).map((l) => { try { return JSON.parse(l); } catch (_) { return null; } }).filter(Boolean);
+    if (loaded.length) pane.history = loaded.concat(pane.history || []).slice(-50);
+  }).catch(() => {});
   return pane;
 }
 
@@ -2260,6 +2436,9 @@ document.addEventListener("keydown", (e) => {
   if (e.metaKey && e.shiftKey && !e.ctrlKey && !e.altKey && (e.key === "{" || e.key === "[")) { e.preventDefault(); cycleTab(-1); return; }
   if (e.metaKey && e.shiftKey && !e.ctrlKey && !e.altKey && (e.key === "}" || e.key === "]")) { e.preventDefault(); cycleTab(1); return; }
   if (e.ctrlKey && e.key === "Tab") { e.preventDefault(); cycleTab(e.shiftKey ? -1 : 1); return; }
+  // RECALL — ⌘R opens the session timeline (also works from the empty canvas). preventDefault stops the
+  // webview's reload; from a focused terminal keyHandler catches it first (this is the no-pane path).
+  if (e.metaKey && !e.ctrlKey && !e.altKey && !e.shiftKey && k === "r") { e.preventDefault(); openRecall(); return; }
   // NEW PANE — Ctrl+Shift+Enter. NOT Ctrl+T: a browser reserves Ctrl+T for a new browser tab and the
   // page never sees it (nothing kedi can do about that). This combo is free, so it reaches us and
   // opens a pane inside the current kedi.
@@ -2278,7 +2457,9 @@ document.addEventListener("keydown", (e) => {
     e.preventDefault(); toggleSettings(); return;
   }
   if (e.key !== "Escape") return;
-  if ($("palette").classList.contains("show")) closePalette();
+  if ($("rcdiff").classList.contains("show")) closeDiff();
+  else if ($("recall").classList.contains("show")) closeRecall();
+  else if ($("palette").classList.contains("show")) closePalette();
   else if (!$("settings").classList.contains("hide")) toggleSettings(false);
   else if (!$("audit").classList.contains("hide")) closeAudit();
 });
@@ -2296,6 +2477,7 @@ function keyHandler(e, pane) {
     if (mk >= "1" && mk <= "9") { jumpToTab(Number(mk)); e._kediHandled = true; e.preventDefault(); return false; } // ⌘1–9 → tab N
     if (e.key === "ArrowUp") { cmdNav(pane, -1); e._kediHandled = true; e.preventDefault(); return false; } // ⌘↑ prev command
     if (e.key === "ArrowDown") { cmdNav(pane, 1); e._kediHandled = true; e.preventDefault(); return false; } // ⌘↓ next command
+    if (mk === "r") { openRecall(); e._kediHandled = true; e.preventDefault(); return false; } // ⌘R recall (session timeline)
     return true;
   }
   // ⌘⇧[ / ⌘⇧] → previous / next tab
@@ -2379,6 +2561,7 @@ function paletteCommands() {
     { id: "float", ico: "▢", label: "Make Tab Floating", kw: "free windows untile", run: () => setWsMode("floating") },
     { id: "pop-out", ico: "⧉", label: "Pop Out to New Window", hint: "⇧⌘O", kw: "detach native window", run: () => { if (focused) popOut(focused); } },
     { id: "copy-output", ico: "⧉", label: "Copy Last Command Output", kw: "clipboard yank stdout osc133 shell", run: () => copyLastOutput(focused) },
+    { id: "recall", ico: "↺", label: "Recall Commands", hint: "⌘R", kw: "history timeline session jump rerun diff osc133 shell", run: () => setTimeout(openRecall, 0) },
     { id: "find", ico: "⌕", label: "Find in Terminal", hint: "⌘F", run: () => toggleSearch(true) },
     { id: "audit", ico: "◉", label: "Open Audit Log", kw: "governance record log", run: () => openAudit() },
     { id: "toggle-rec", ico: "●", label: () => (recOn ? "Stop Recording" : "Start Recording"), kw: "record audit", run: () => setRec(!recOn) },
@@ -2523,6 +2706,204 @@ $("pal-in").addEventListener("keydown", (e) => {
 // click the backdrop (outside a tile / the input) closes the exposé
 $("palette").addEventListener("mousedown", (e) => { if (e.target.id === "palette" || e.target.id === "pal-box") closePalette(); });
 
+// ══ Recall — the session timeline (⌘R) ═══════════════════════════════════════════════════════════════
+// A structured lens over THIS shell's command history (built from OSC 133 marks). Not a re-render of the
+// terminal — an index you summon, filter, and act on: jump to a command, copy/diff its output, re-run it.
+// scope: "session" = this terminal's live+loaded history · "recent" = every session on disk (the
+// cross-restart / cross-pane archive, fetched lazily). filter: all / failed / slow.
+const rc = { pane: null, scope: "session", filter: "all", recent: null, sel: 0, items: [], rowEls: [] };
+const FILTERS = ["all", "fail", "slow"];
+
+function recallSource() { return rc.scope === "recent" ? (rc.recent || []) : ((rc.pane && rc.pane.history) || []); }
+function updateScopeLabel() {
+  const el = $("rc-scope"), p = rc.pane;
+  el.textContent = rc.scope === "recent" ? "all sessions"
+    : p ? ((p.cwd ? baseName(p.cwd) : shortName(p.title)) || ("pane " + p.id)) : "";
+}
+function openRecall() {
+  const box = $("recall");
+  if (box.classList.contains("show")) return;
+  rc.pane = focused; rc.sel = 0; rc.scope = "session"; rc.filter = "all"; rc.recent = null;
+  [...$("rc-facets").querySelectorAll("[data-scope]")].forEach((el) => el.classList.toggle("on", el.dataset.scope === "session"));
+  [...$("rc-facets").querySelectorAll("[data-filter]")].forEach((el) => el.classList.toggle("on", el.dataset.filter === "all"));
+  updateScopeLabel();
+  box.classList.add("show");
+  const input = $("rc-in"); input.value = ""; input.focus();
+  renderRecall();
+}
+function closeRecall() {
+  $("recall").classList.remove("show");
+  if (focused) try { focused.term.focus(); } catch (_) {}
+}
+// entries for the active scope, newest-first, after filter + fuzzy match. `idx` indexes the scope's
+// source array (used only as a stable key; diff/prev-run is resolved by timestamp, not index).
+function recallItems() {
+  const src = recallSource();
+  if (!src.length) return [];
+  const q = $("rc-in").value.trim();
+  const arr = src.map((h, i) => ({ h, i })).sort((a, b) => (b.h.at || 0) - (a.h.at || 0)); // newest first
+  const out = [];
+  for (const { h, i } of arr) {
+    if (!h.cmd) continue;
+    if (rc.filter === "fail" && h.exit === 0) continue;
+    if (rc.filter === "slow" && (h.ms || 0) < 5000) continue;
+    const m = fuzzy(h.cmd, q); if (!m) continue;
+    out.push({ h, idx: i, hits: m.hits, score: m.score });
+  }
+  return out;
+}
+function renderRecall() {
+  const items = recallItems();
+  rc.items = items; rc.rowEls = [];
+  if (rc.sel >= items.length) rc.sel = Math.max(0, items.length - 1);
+  const list = $("rc-list"); list.innerHTML = "";
+  if (!items.length) {
+    const e = document.createElement("div"); e.id = "rc-empty";
+    const q = $("rc-in").value.trim();
+    e.textContent = q ? "no matches"
+      : rc.scope === "recent" ? (rc.recent == null ? "loading…" : "no earlier commands on disk yet")
+      : !rc.pane ? "focus a terminal first"
+      : "no commands recorded yet — needs shell integration (Settings)";
+    list.appendChild(e); return;
+  }
+  items.forEach((it, i) => {
+    const h = it.h, gone = typeof h.out !== "string" && (!h.start || h.start.isDisposed); // no output to recover
+    const row = document.createElement("div");
+    row.className = "rrow" + (i === rc.sel ? " sel" : "") + (gone ? " gone" : "");
+    const st = document.createElement("span"); st.className = "rst " + (h.exit === 0 ? "ok" : "bad"); st.textContent = h.exit === 0 ? "✓" : "✗";
+    const cmd = document.createElement("span"); cmd.className = "rcmd"; cmd.appendChild(hlFrag(h.cmd, it.hits));
+    const cwd = document.createElement("span"); cwd.className = "rcwd"; cwd.textContent = h.cwd ? baseName(h.cwd) : "";
+    const dur = document.createElement("span"); dur.className = "rdur"; dur.textContent = h.ms ? fmtDur(h.ms) : "";
+    const when = document.createElement("span"); when.className = "rwhen"; when.textContent = fmtAgo(h.at);
+    row.append(st, cmd, cwd, dur, when);
+    row.addEventListener("mouseenter", () => paintRecall(i));
+    row.addEventListener("click", () => recallJump(i));
+    list.appendChild(row); rc.rowEls.push(row);
+  });
+}
+function paintRecall(i) {
+  if (!rc.rowEls.length) return;
+  rc.sel = Math.max(0, Math.min(i, rc.rowEls.length - 1));
+  rc.rowEls.forEach((el, k) => el.classList.toggle("sel", k === rc.sel));
+  const el = rc.rowEls[rc.sel]; if (el && el.scrollIntoView) el.scrollIntoView({ block: "nearest" });
+}
+function setFilter(f) {
+  rc.filter = f; rc.sel = 0;
+  [...$("rc-facets").querySelectorAll("[data-filter]")].forEach((el) => el.classList.toggle("on", el.dataset.filter === f));
+  renderRecall();
+}
+function setScope(s) {
+  rc.scope = s; rc.sel = 0;
+  [...$("rc-facets").querySelectorAll("[data-scope]")].forEach((el) => el.classList.toggle("on", el.dataset.scope === s));
+  updateScopeLabel();
+  if (s === "recent" && rc.recent == null) {           // fetch the on-disk archive once per open
+    renderRecall();                                     // shows "loading…"
+    invoke("history_recent").then((lines) => {
+      rc.recent = (lines || []).map((l) => { try { return JSON.parse(l); } catch (_) { return null; } }).filter(Boolean);
+      if (rc.scope === "recent") renderRecall();
+    }).catch(() => { rc.recent = []; if (rc.scope === "recent") renderRecall(); });
+  } else renderRecall();
+}
+// ── row actions ──
+function recallJump(i) {          // ↵ — scroll the terminal to that command
+  const it = rc.items[i]; if (!it) return;
+  const p = rc.pane, h = it.h;
+  closeRecall();
+  if (!p || !h.start || h.start.isDisposed) { overlayFlash(rc.scope === "recent" ? "jump only works for this terminal's live commands" : "that command scrolled out of view"); return; }
+  try { p.term.scrollToLine(Math.max(0, h.start.line - 1)); } catch (_) {}
+}
+function recallCopy(i) {          // ⌘C — copy that command's output
+  const it = rc.items[i]; if (!it) return;
+  const text = outputText(rc.pane, it.h);
+  if (text == null) { overlayFlash("that command scrolled out of history"); return; }
+  if (text) { clipWrite(text); overlayFlash("copied output of: " + it.h.cmd); closeRecall(); }
+  else overlayFlash("that command had no output");
+}
+function recallRerun(i) {          // ⌘↵ — send the command text to the shell again
+  const it = rc.items[i]; if (!it) return;
+  const p = rc.pane;
+  closeRecall();
+  if (!p || !p.connected) { overlayFlash("terminal is gone"); return; }
+  try { invoke("pane_input", { sid: p.sid, data: it.h.cmd + "\r" }); } catch (_) {}
+}
+function recallDiff(i) {            // ⌘D — diff this run against the most recent EARLIER run of the same command
+  const it = rc.items[i]; if (!it) return;
+  const src = recallSource(), cur = it.h;
+  let prev = null;
+  for (const h of src) { if (h.cmd === cur.cmd && (h.at || 0) < (cur.at || 0) && (!prev || (h.at || 0) > (prev.at || 0))) prev = h; }
+  if (!prev) { overlayFlash("no earlier run of “" + cur.cmd + "”"); return; }
+  const a = outputText(rc.pane, prev), b = outputText(rc.pane, cur);
+  if (a == null || b == null) { overlayFlash("output for one run isn't available — can't diff"); return; }
+  showDiff(cur.cmd, a, b, prev, cur);
+}
+function recallAct(key, e) {        // keyboard dispatch from the input while a row is selected
+  const i = rc.sel;
+  if (e.metaKey && key === "Enter") { e.preventDefault(); recallRerun(i); return true; }
+  if (key === "Enter") { e.preventDefault(); recallJump(i); return true; }
+  if (e.metaKey && key.toLowerCase() === "c") { e.preventDefault(); recallCopy(i); return true; }
+  if (e.metaKey && key.toLowerCase() === "d") { e.preventDefault(); recallDiff(i); return true; }
+  return false;
+}
+$("rc-in").addEventListener("input", () => { rc.sel = 0; renderRecall(); });
+$("rc-in").addEventListener("keydown", (e) => {
+  if (e.key === "ArrowDown") { e.preventDefault(); paintRecall(rc.sel + 1); return; }
+  if (e.key === "ArrowUp") { e.preventDefault(); paintRecall(rc.sel - 1); return; }
+  if (e.key === "Tab") { e.preventDefault(); const n = FILTERS.indexOf(rc.filter); setFilter(FILTERS[(n + (e.shiftKey ? FILTERS.length - 1 : 1)) % FILTERS.length]); return; }
+  if (e.key === "`" || (e.metaKey && e.key.toLowerCase() === "e")) { e.preventDefault(); setScope(rc.scope === "recent" ? "session" : "recent"); return; }
+  if (!rc.items.length) return;
+  recallAct(e.key, e);
+});
+$("rc-facets").addEventListener("click", (e) => {
+  const el = e.target.closest("[data-scope],[data-filter]"); if (!el) return;
+  if (el.dataset.scope) setScope(el.dataset.scope); else setFilter(el.dataset.filter);
+  $("rc-in").focus();
+});
+$("recall").addEventListener("mousedown", (e) => { if (e.target.id === "recall" || e.target.id === "rc-box") closeRecall(); });
+
+// ── diff viewer: a minimal LCS line-diff of two output blocks (capped so huge outputs stay responsive) ──
+function lineDiff(aText, bText) {
+  const A = aText.split("\n"), B = bText.split("\n");
+  const CAP = 1200;
+  if (A.length > CAP || B.length > CAP) return null; // too big to diff cheaply
+  const n = A.length, m = B.length;
+  const dp = new Uint16Array((n + 1) * (m + 1));
+  for (let i = n - 1; i >= 0; i--)
+    for (let j = m - 1; j >= 0; j--)
+      dp[i * (m + 1) + j] = A[i] === B[j] ? dp[(i + 1) * (m + 1) + (j + 1)] + 1
+        : Math.max(dp[(i + 1) * (m + 1) + j], dp[i * (m + 1) + (j + 1)]);
+  const rows = []; let i = 0, j = 0;
+  while (i < n && j < m) {
+    if (A[i] === B[j]) { rows.push({ t: "ctx", s: A[i] }); i++; j++; }
+    else if (dp[(i + 1) * (m + 1) + j] >= dp[i * (m + 1) + (j + 1)]) { rows.push({ t: "del", s: A[i] }); i++; }
+    else { rows.push({ t: "add", s: B[j] }); j++; }
+  }
+  while (i < n) rows.push({ t: "del", s: A[i++] });
+  while (j < m) rows.push({ t: "add", s: B[j++] });
+  return rows;
+}
+function showDiff(cmd, aText, bText, prev, cur) {
+  const rows = lineDiff(aText, bText);
+  const body = $("rcd-body"); body.innerHTML = "";
+  $("rcd-box").querySelector(".rcd-cmd").textContent = cmd;
+  const stat = $("rcd-box").querySelector(".rcd-stat");
+  if (!rows) { const d = document.createElement("div"); d.className = "dl ctx"; d.style.padding = "16px"; d.textContent = "output too large to diff (>1200 lines)"; body.appendChild(d); stat.textContent = ""; }
+  else {
+    let add = 0, del = 0;
+    for (const r of rows) { if (r.t === "add") add++; else if (r.t === "del") del++; }
+    if (!add && !del) { const d = document.createElement("div"); d.className = "dl ctx"; d.style.padding = "16px"; d.textContent = "identical output — nothing changed between the two runs"; body.appendChild(d); }
+    else for (const r of rows) {
+      const d = document.createElement("div"); d.className = "dl " + r.t;
+      d.textContent = (r.t === "add" ? "+ " : r.t === "del" ? "− " : "  ") + r.s;
+      body.appendChild(d);
+    }
+    stat.textContent = fmtAgo(prev.at) + " → " + fmtAgo(cur.at) + "  ·  +" + add + " −" + del;
+  }
+  $("recall").classList.remove("show");
+  $("rcdiff").classList.add("show");
+}
+function closeDiff() { $("rcdiff").classList.remove("show"); openRecall(); }
+$("rcdiff").addEventListener("mousedown", (e) => { if (e.target.id === "rcdiff" || e.target.id === "rcd-box") closeDiff(); });
+
 function overlay(html) { const o = $("overlay"); o.style.display = "grid"; o.innerHTML = html; }
 
 // A pane's session ended host-side (shell exit / kill / self-exit) → close its window.
@@ -2542,6 +2923,7 @@ listen("menu", (e) => {
     case "settings": toggleSettings(true); break;
     case "find": toggleSearch(true); break;
     case "palette": openPalette(); break;
+    case "recall": openRecall(); break;
   }
 });
 
@@ -2557,6 +2939,7 @@ async function boot() {
   setState("connected", true);
   try { recOn = !!(await invoke("get_recording")); } catch (_) {}
   try { shellIntegrationOn = await invoke("shell_integration_state"); } catch (_) {}
+  try { const n = window.__TAURI__ && window.__TAURI__.notification; if (n && !(await n.isPermissionGranted())) await n.requestPermission(); } catch (_) {}
   applySettings(); // restore saved theme / font / cursor
   // pop-out window: opened as kedi://…?attach=<sid>&solo=1 → re-attach to that running session
   // (teleporting it here) as a solo tiled tab (one pane fills the window).
