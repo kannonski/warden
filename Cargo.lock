@@ -2674,7 +2674,7 @@ dependencies = [
 
 [[package]]
 name = "kedi"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "async-trait",
  "futures",
@@ -2696,7 +2696,7 @@ dependencies = [
 
 [[package]]
 name = "kedi-app"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "base64 0.22.1",
  "include_dir",
@@ -5929,7 +5929,7 @@ dependencies = [
 
 [[package]]
 name = "warden"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "async-trait",
  "futures",
@@ -5947,7 +5947,7 @@ dependencies = [
 
 [[package]]
 name = "warden-caps"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "async-trait",
  "futures",
@@ -5960,7 +5960,7 @@ dependencies = [
 
 [[package]]
 name = "warden-core"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "async-trait",
  "futures",
@@ -5970,7 +5970,7 @@ dependencies = [
 
 [[package]]
 name = "warden-gateway"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "async-trait",
  "quinn",
@@ -5981,7 +5981,7 @@ dependencies = [
 
 [[package]]
 name = "warden-host"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "async-trait",
  "futures",
@@ -5991,7 +5991,7 @@ dependencies = [
 
 [[package]]
 name = "warden-record"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -6001,7 +6001,7 @@ dependencies = [
 
 [[package]]
 name = "warden-secret"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "async-trait",
  "hmac",
@@ -6012,7 +6012,7 @@ dependencies = [
 
 [[package]]
 name = "warden-transport"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "async-trait",
  "quinn",
@@ -6027,7 +6027,7 @@ dependencies = [
 
 [[package]]
 name = "warden-wasm"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "async-trait",
  "futures",
