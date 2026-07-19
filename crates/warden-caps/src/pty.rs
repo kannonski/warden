@@ -57,9 +57,37 @@ impl PtyCap {
             // profile — essential when kedi is started from the Dock/a desktop launcher (GUI processes
             // inherit a minimal environment; login sourcing restores PATH: brew, mise, …). Portable:
             // zsh/bash/fish all take -l.
-            let mut c =
-                CommandBuilder::new(std::env::var("SHELL").unwrap_or_else(|_| "bash".into()));
-            c.arg("-l");
+            //
+            // bash exception: it has no ZDOTDIR-style redirect, so shell integration is injected via
+            // `--init-file` when the host set KEDI_BASH_INIT (the init file emulates the login profile
+            // chain itself, then installs the hooks). zsh uses ZDOTDIR; fish uses XDG_DATA_DIRS —
+            // both are pure env vars, so they need no argv changes here.
+            let shell = std::env::var("SHELL").unwrap_or_else(|_| {
+                if cfg!(windows) {
+                    "powershell.exe".into() // Windows has no $SHELL convention
+                } else {
+                    "bash".into()
+                }
+            });
+            let base = std::path::Path::new(&shell)
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("");
+            let mut c = CommandBuilder::new(&shell);
+            let bash_init = std::env::var("KEDI_BASH_INIT").ok();
+            if base == "bash"
+                && let Some(init) = bash_init.filter(|p| std::path::Path::new(p).exists())
+            {
+                c.arg("--init-file");
+                c.arg(init);
+            } else if !cfg!(windows) {
+                c.arg("-l"); // powershell/cmd have no login flag; unix shells all take -l
+            }
+            c
+        } else if cfg!(windows) {
+            let mut c = CommandBuilder::new("cmd");
+            c.arg("/C");
+            c.arg(&self.command);
             c
         } else {
             let mut c = CommandBuilder::new("sh");
