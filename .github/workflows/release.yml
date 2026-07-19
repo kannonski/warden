@@ -1,8 +1,8 @@
 name: release
 
 # Build the kedi terminal (the Tauri app, crates/kedi-app) for every platform on a version tag (or a
-# manual run) and upload to a draft GitHub Release: macOS universal .dmg/.app, Linux .AppImage/.deb/.rpm.
-# The UI is static (embedded via include_dir), so there is no JS build step.
+# manual run) and upload to a draft GitHub Release: macOS universal .dmg/.app, Linux .AppImage/.deb/.rpm,
+# Windows .msi/.exe (NSIS). The UI is static (embedded via include_dir), so there is no JS build step.
 on:
   push:
     tags: ["v*"]
@@ -20,6 +20,9 @@ jobs:
             rust-targets: aarch64-apple-darwin,x86_64-apple-darwin
             args: --target universal-apple-darwin
           - platform: ubuntu-22.04
+            rust-targets: ""
+            args: ""
+          - platform: windows-latest
             rust-targets: ""
             args: ""
     runs-on: ${{ matrix.platform }}

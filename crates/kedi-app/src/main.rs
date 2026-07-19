@@ -165,11 +165,15 @@ fn reconcile_ui(
     }
 }
 
-/// Shell integration (zsh): point ZDOTDIR at a kedi dir whose .zshenv/.zshrc SOURCE the user's real
-/// config first, then add precmd/preexec hooks that emit OSC 133 (command marks A/C/D + exit code) and
-/// OSC 7 (cwd). Set process-wide so every pane's pty inherits it. Opt out with KEDI_NO_SHELL_INTEGRATION=1.
-/// Only touches zsh (bash/others ignore ZDOTDIR) and always falls back to the user's config, so a broken
-/// hook can't lose their environment. `KEDI_UZDOTDIR` carries their original ZDOTDIR (or $HOME).
+/// Shell integration (zsh + bash + fish): install hooks that emit OSC 133 (command marks A/C/D/E +
+/// exit code) and OSC 7 (cwd) — without ever editing the user's own config files. Each shell gets its
+/// native injection channel, set process-wide so every pane's pty inherits it:
+///   zsh  — ZDOTDIR points at our dir; our .zshrc sources the user's real config first, then hooks.
+///   bash — no ZDOTDIR equivalent: KEDI_BASH_INIT names an --init-file (honored by the pty broker)
+///          that emulates the login profile chain itself, then hooks PROMPT_COMMAND + a DEBUG trap.
+///   fish — a vendor_conf.d snippet on XDG_DATA_DIRS; fish auto-sources it after the user's config.
+/// Opt out with KEDI_NO_SHELL_INTEGRATION=1 or the Settings toggle (.disabled flag file). Every path
+/// falls back to the user's config, so a broken hook can't lose their environment.
 fn setup_shell_integration(app: &tauri::AppHandle) {
     let dir = app
         .path()
@@ -212,6 +216,55 @@ fi
     {
         return;
     }
+    // bash: an --init-file (see KEDI_BASH_INIT in the pty broker). It emulates the login profile chain
+    // (kedi is often Dock-launched — PATH lives in profile files), sources .bashrc as a fallback, then
+    // installs the hooks. PROMPT_COMMAND emits D/7/A; a DEBUG trap plays preexec (C + the base64'd
+    // command line, once per accepted command — __kedi_inp/__kedi_ran gate out prompt-command noise).
+    let bashinit = r#"[ -f /etc/profile ] && . /etc/profile
+if [ -f "$HOME/.bash_profile" ]; then . "$HOME/.bash_profile"
+elif [ -f "$HOME/.bash_login" ]; then . "$HOME/.bash_login"
+elif [ -f "$HOME/.profile" ]; then . "$HOME/.profile"
+elif [ -f "$HOME/.bashrc" ]; then . "$HOME/.bashrc"
+fi
+# ── kedi shell integration (OSC 133 command marks + OSC 7 cwd) ──
+__kedi_osc() { printf '\033]%s\007' "$1"; }
+__kedi_status() { __kedi_e=$?; __kedi_inp=1; }
+__kedi_prompt() {
+  __kedi_osc "133;D;${__kedi_e:-0}"; __kedi_osc "7;file://${HOSTNAME}${PWD}"; __kedi_osc "133;A"
+  __kedi_inp=0; __kedi_ran=0
+}
+__kedi_debug() {
+  [ "${__kedi_inp:-0}" = 1 ] && return
+  [ "${__kedi_ran:-1}" = 1 ] && return
+  [ -n "$COMP_LINE" ] && return
+  __kedi_ran=1
+  __kedi_osc "133;C"
+  __kedi_osc "133;E;$(printf '%s' "$BASH_COMMAND" | base64 | tr -d '\n')"
+}
+__kedi_ran=1; __kedi_inp=0
+PROMPT_COMMAND="__kedi_status${PROMPT_COMMAND:+;$PROMPT_COMMAND};__kedi_prompt"
+trap '__kedi_debug' DEBUG
+"#;
+    // fish: a vendor_conf.d snippet, auto-sourced AFTER the user's own config — pure event hooks.
+    let fishconf = r#"status is-interactive; or exit
+function __kedi_osc; printf '\033]%s\007' $argv[1]; end
+function __kedi_preexec --on-event fish_preexec
+    __kedi_osc "133;C"
+    __kedi_osc "133;E;"(printf '%s' "$argv[1]" | base64 | tr -d '\n')
+end
+function __kedi_postexec --on-event fish_postexec
+    __kedi_osc "133;D;$status"
+end
+function __kedi_prompt --on-event fish_prompt
+    __kedi_osc "7;file://$hostname$PWD"
+    __kedi_osc "133;A"
+end
+"#;
+    let bash_init_path = dir.join("bash-init.sh");
+    let fish_dir = dir.join("fish-data").join("fish").join("vendor_conf.d");
+    let bash_ok = std::fs::write(&bash_init_path, bashinit).is_ok();
+    let fish_ok = std::fs::create_dir_all(&fish_dir).is_ok()
+        && std::fs::write(fish_dir.join("kedi.fish"), fishconf).is_ok();
     // remember the user's original ZDOTDIR so our scripts can source it, then redirect zsh to ours.
     let user_zdotdir = std::env::var("ZDOTDIR").unwrap_or_default();
     let user_zdotdir = if user_zdotdir.is_empty() {
@@ -222,6 +275,18 @@ fi
     unsafe {
         std::env::set_var("KEDI_UZDOTDIR", user_zdotdir);
         std::env::set_var("ZDOTDIR", &dir);
+        if bash_ok {
+            std::env::set_var("KEDI_BASH_INIT", &bash_init_path);
+        }
+        if fish_ok {
+            // append ours so the system's vendor dirs keep priority; fish defaults apply when unset
+            let existing = std::env::var("XDG_DATA_DIRS")
+                .unwrap_or_else(|_| "/usr/local/share:/usr/share".into());
+            std::env::set_var(
+                "XDG_DATA_DIRS",
+                format!("{existing}:{}", dir.join("fish-data").display()),
+            );
+        }
     }
 }
 
@@ -582,8 +647,18 @@ fn open_url(url: String) {
 /// prompt. Path & line are positional args (never interpolated) — no shell injection.
 #[tauri::command]
 fn open_path(path: String, line: u32) {
-    let shell = std::env::var("SHELL").unwrap_or_else(|_| "sh".to_string());
-    let script = r#"f="$1"; l="$2"; [ "$l" = "0" ] && l=""
+    // Windows: no $SHELL / sh script machinery — hand the path to the OS opener (default app).
+    #[cfg(target_os = "windows")]
+    {
+        let _ = line;
+        let _ = std::process::Command::new("cmd")
+            .args(["/C", "start", "", &path])
+            .spawn();
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let shell = std::env::var("SHELL").unwrap_or_else(|_| "sh".to_string());
+        let script = r#"f="$1"; l="$2"; [ "$l" = "0" ] && l=""
 ed="${EDITOR:-$VISUAL}"
 open_os() { if [ "$(uname)" = "Darwin" ]; then open "$f"; else xdg-open "$f"; fi; }
 # text/source → editor; everything else → default app. A clicked path:line is source by definition.
@@ -599,9 +674,10 @@ if [ "$istext" = "1" ] && [ -n "$ed" ]; then
 else
   open_os
 fi"#;
-    let _ = std::process::Command::new(shell)
-        .args(["-lc", script, "kedi", &path, &line.to_string()])
-        .spawn();
+        let _ = std::process::Command::new(shell)
+            .args(["-lc", script, "kedi", &path, &line.to_string()])
+            .spawn();
+    }
 }
 
 // ── audit / governance IPC (ports of the old HTTP routes; same JSON shapes) ───────────────────────
@@ -717,7 +793,9 @@ fn history_load(state: State<AppState>, session: u64) -> Vec<String> {
 }
 
 /// Every persisted entry across all sessions (this launch and prior ones still on disk) — the "earlier"
-/// scope in Recall. The frontend sorts by timestamp and caps; here we just bound by the retained files.
+/// scope in Recall. METADATA ONLY: the stored output is stripped and replaced by a {file, idx} ref the
+/// frontend redeems on demand via `history_output` — opening the scope must not load every session's
+/// output (up to 30 files × 50 entries × 128KB) into memory at once.
 #[tauri::command]
 fn history_recent(state: State<AppState>) -> Vec<String> {
     let mut out = Vec::new();
@@ -726,12 +804,41 @@ fn history_recent(state: State<AppState>) -> Vec<String> {
             let p = e.path();
             if p.extension().map(|x| x == "jsonl").unwrap_or(false)
                 && let Ok(d) = std::fs::read_to_string(&p)
+                && let Some(name) = p.file_name().and_then(|n| n.to_str())
             {
-                out.extend(d.lines().filter(|l| !l.is_empty()).map(String::from));
+                for (i, line) in d.lines().enumerate() {
+                    if line.is_empty() {
+                        continue;
+                    }
+                    if let Ok(mut v) = serde_json::from_str::<serde_json::Value>(line)
+                        && let Some(o) = v.as_object_mut()
+                    {
+                        o.remove("out");
+                        o.insert("ref".into(), serde_json::json!({ "f": name, "i": i }));
+                        out.push(v.to_string());
+                    }
+                }
             }
         }
     }
     out
+}
+
+/// Redeem a `history_recent` ref: the stored output of one entry (file + line index). The file name is
+/// validated as a bare `*.jsonl` (no separators) so a ref can never read outside the history dir.
+#[tauri::command]
+fn history_output(state: State<AppState>, file: String, idx: usize) -> String {
+    if file.contains('/') || file.contains('\\') || !file.ends_with(".jsonl") {
+        return String::new();
+    }
+    let Ok(d) = std::fs::read_to_string(state.hist_dir.join(&file)) else {
+        return String::new();
+    };
+    d.lines()
+        .nth(idx)
+        .and_then(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+        .and_then(|v| v.get("out").and_then(|o| o.as_str()).map(String::from))
+        .unwrap_or_default()
 }
 
 /// Installed WASM-TUI plugins (name + icon), read fresh from plugins.toml each call.
@@ -974,6 +1081,7 @@ fn main() {
             history_push,
             history_load,
             history_recent,
+            history_output,
             plugins_json,
             install_plugin,
             remove_plugin,

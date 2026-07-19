@@ -810,6 +810,7 @@ function reorderWs(fromId, toId) {
   const [w] = workspaces.splice(from, 1);
   workspaces.splice(workspaces.findIndex((x) => x.id === toId), 0, w);
   renderTabs();
+  saveLayoutSoon();
 }
 // move a pane into another tab (drag a card row onto a chip); if the source tab is left empty, drop it
 function movePaneToWs(pane, wsId) {
@@ -864,6 +865,7 @@ function layoutActive() {
       if (p._needRepaint) { p._needRepaint = false; repaintPane(p); } // rebuild atlas for just-shown panes
     }
   });
+  saveLayoutSoon(); // layoutActive runs on every structural change — the restore snapshot's catch-all
 }
 // Resize a pane without corrupting the prompt. Order is everything (verified against the vendored
 // xterm 5.5.0 with a headless repro): if xterm REFLOWS first, a full-width prompt line (p10k et al)
@@ -1438,6 +1440,20 @@ function outputText(pane, entry) {
   for (let y = from; y <= to; y++) { const l = buf.getLine(y); if (l) lines.push(l.translateToString(true)); }
   return cleanSel(lines.join("\n")).replace(/\n+$/, "");
 }
+// async output resolution: live entries carry their text (entry.out); "earlier"-scope entries carry a
+// {f, idx} ref instead (history_recent is metadata-only) — redeem it on demand and cache the result.
+async function outputTextAsync(pane, entry) {
+  const t = outputText(pane, entry);
+  if (t != null) return t;
+  if (entry && entry.ref) {
+    try {
+      const s = await invoke("history_output", { file: entry.ref.f, idx: entry.ref.i });
+      entry.out = s || ""; // cache — repeated copy/diff won't re-read the file
+      return entry.out;
+    } catch (_) {}
+  }
+  return null;
+}
 // copy the output of the last finished command. Needs shell integration; must still be in scrollback.
 function copyLastOutput(p) {
   p = p || focused;
@@ -1613,7 +1629,7 @@ function startRenameTab(ws, label) {
   inp.className = "trename"; inp.value = ws.name || ""; inp.placeholder = "Tab " + ws.id;
   label.replaceWith(inp); inp.focus(); inp.select();
   let done = false;
-  const finish = (save) => { if (done) return; done = true; if (save) ws.name = inp.value.trim(); renderTabs(); };
+  const finish = (save) => { if (done) return; done = true; if (save) { ws.name = inp.value.trim(); saveLayoutSoon(); } renderTabs(); };
   inp.addEventListener("click", (e) => e.stopPropagation());
   inp.addEventListener("keydown", (e) => {
     e.stopPropagation();
@@ -2011,15 +2027,15 @@ function confirmShutdown(sessions) {
 let weStoppedIt = false; // set when WE asked the server to stop → friendlier wt.closed message
 
 // ── float windows ──
-function spawnFloat(x, y, w, h, app, attachId) {
-  makePane(app, attachId).then((pane) => {
+function spawnFloat(x, y, w, h, app, attachId, wsId) {
+  return makePane(app, attachId).then((pane) => {
     const win = document.createElement("div");
     win.className = "floatwin";
     win.style.cssText = `left:${x}px;top:${y}px;width:${w}px;height:${h}px;z-index:${++zTop}`;
     win.appendChild(pane.wrapper);
     pane.floatwin = win;
     if (activeWs == null) { const ws = newWorkspace("floating"); activeWs = ws.id; }
-    pane.ws = activeWs; // new panes join the active tab
+    pane.ws = wsId != null ? wsId : activeWs; // join the requested tab (restore) or the active one
     // Chromeless: no window buttons. Move = ⌘/Alt-drag anywhere (dragWin); resize = grip;
     // close/minimize/maximize are keyboard actions (Ctrl+Shift+W / M / ↑).
     const grip = document.createElement("div"); grip.className = "grip"; win.appendChild(grip);
@@ -2030,9 +2046,10 @@ function spawnFloat(x, y, w, h, app, attachId) {
     $("hint").style.display = "none";
     pane.open();
     focused = pane;
-    const ws = activeWorkspace();
+    const ws = wsById(pane.ws);
     if (ws && ws.zoom) ws.zoom = pane.id; // a new pane while zoomed becomes the zoomed one
     layoutActive(); // place it per the active tab's mode (tiled → re-tile; floating → free)
+    return pane;
   });
 }
 function spawnFloatCascade() { const o = (cascade++ % 6) * 30; spawnFloat(40 + o, 30 + o, 760, 480); }
@@ -2042,18 +2059,67 @@ function moveSessionHere(sessionId) {
   const o = (cascade++ % 6) * 30;
   spawnFloat(40 + o, 30 + o, 760, 480, null, sessionId);
 }
-// On (re)load, re-attach this window's still-alive sessions rather than dropping to one fresh pane: a
-// webview reload tears down the pane views, but the backend sessions keep running (their control channel
-// outlives the reload) tagged with our now-persistent TAB_ID. Returns true if it restored anything.
-// They come back into the one default tiled tab — full multi-tab / geometry restore is a follow-up.
+// ── full session/layout restore ──────────────────────────────────────────────────────────────────
+// The workspace model (tabs, modes, layouts, split weights, floating geometry, pane→session map) is
+// snapshotted to localStorage per window (debounced on every layout-affecting change). On boot we
+// rebuild it: a pane whose session is still alive RE-ATTACHES (webview reload — sessions survive,
+// tagged with our persistent TAB_ID); a dead one gets a FRESH shell in the same spot (app relaunch).
+// Either way the shape of your workspace comes back.
+let _layoutReady = false; // don't save until boot's restore finished (a partial state must never win)
+function layoutSnapshot() {
+  return {
+    active: workspaces.findIndex((w) => w.id === activeWs),
+    tabs: workspaces.map((ws) => ({
+      name: ws.name, mode: ws.mode, layout: ws.layout, accent: ws.accent,
+      weights: ws._w || null, // tile split ratios — persists the dragged gutters
+      panes: wsPanes(ws.id).map((p) => {
+        const st = p.floatwin ? p.floatwin.style : null;
+        return { sessionId: p.sessionId, float: st ? {
+          x: Math.round(parseFloat(st.left) || 40), y: Math.round(parseFloat(st.top) || 30),
+          w: Math.round(parseFloat(st.width) || 760), h: Math.round(parseFloat(st.height) || 480) } : null };
+      }),
+    })),
+  };
+}
+let _saveT = 0;
+function saveLayoutSoon() {
+  if (!_layoutReady) return;
+  clearTimeout(_saveT);
+  _saveT = setTimeout(() => { try { localStorage.setItem("kedi.layout." + WIN, JSON.stringify(layoutSnapshot())); } catch (_) {} }, 500);
+}
 async function restoreSessions() {
-  let sessions = [];
-  try { sessions = JSON.parse(await invoke("sessions_json")).sessions || []; } catch (_) { return false; }
-  const mine = sessions
-    .filter((s) => s && typeof s.tab === "string" && s.tab.startsWith(TAB_ID + ":"))
-    .sort((a, b) => a.id - b.id);
-  if (!mine.length) return false;
-  for (const s of mine) moveSessionHere(s.id);
+  let live = [];
+  try {
+    live = (JSON.parse(await invoke("sessions_json")).sessions || [])
+      .filter((s) => s && typeof s.tab === "string" && s.tab.startsWith(TAB_ID + ":"))
+      .sort((a, b) => a.id - b.id);
+  } catch (_) {}
+  let snap = null;
+  try { snap = JSON.parse(localStorage.getItem("kedi.layout." + WIN) || "null"); } catch (_) {}
+  if (!snap || !Array.isArray(snap.tabs) || !snap.tabs.length) {
+    if (!live.length) return false;             // nothing to restore at all → boot spawns one fresh pane
+    for (const s of live) moveSessionHere(s.id); // sessions but no snapshot → the old single-tab restore
+    return true;
+  }
+  const alive = new Set(live.map((s) => s.id)), claimed = new Set();
+  let activeId = null;
+  for (let i = 0; i < snap.tabs.length; i++) {
+    const t = snap.tabs[i];
+    const ws = i === 0 ? workspaces[0] : newWorkspace(t.mode); // boot pre-made the first tab; reuse it
+    ws.mode = t.mode || "tiled"; ws.layout = t.layout || "grid"; ws.name = t.name || "";
+    if (t.accent) ws.accent = t.accent;
+    if (t.weights) ws._w = t.weights;
+    if (i === snap.active) activeId = ws.id;
+    for (const p of (t.panes || [])) {
+      const sid = (p.sessionId != null && alive.has(p.sessionId) && !claimed.has(p.sessionId)) ? p.sessionId : null;
+      if (sid) claimed.add(sid);
+      const g = p.float || {};
+      await spawnFloat(g.x ?? 60, g.y ?? 40, g.w ?? 760, g.h ?? 480, null, sid, ws.id); // sequential: keeps order stable
+    }
+  }
+  // a surviving session the snapshot didn't know about still deserves a home (e.g. moved-in mid-crash)
+  for (const s of live) if (!claimed.has(s.id)) await spawnFloat(60, 40, 760, 480, null, s.id, workspaces[0].id);
+  switchWs(activeId ?? workspaces[0].id);
   return true;
 }
 // open a floating pane hosting a WASM-TUI plugin (kedi:app) by name; falls back to a shell pane
@@ -2100,6 +2166,7 @@ function applyGeom(win, pane, [x, y, w, h]) {
   setTimeout(() => {
     win.classList.remove("animate");
     settleResize(pane); // pty-first, reflow-after-redraw (keeps the prompt intact)
+    saveLayoutSoon();
   }, 150);
 }
 function snapWin(win, pane, name) {
@@ -2186,6 +2253,7 @@ function dragWin(win, pane) {
       document.removeEventListener("mousemove", move); document.removeEventListener("mouseup", up);
       snap.style.display = "none"; document.body.classList.remove("moving");
       if (pending) snapWin(win, pane, pending); // top edge → maximize; sides/corners → snap
+      saveLayoutSoon();
     };
     document.addEventListener("mousemove", move); document.addEventListener("mouseup", up);
   }, true);
@@ -2197,7 +2265,7 @@ function resizeWin(win, grip, pane) {
     // size the box live, but fit/resize the terminal ONCE on release — a per-move fit floods the shell
     // with SIGWINCH (each = xterm reflow + prompt redraw → junk lines accumulating in scrollback).
     const move = (ev) => { win.style.width = Math.max(200, ow + ev.clientX - sx) + "px"; win.style.height = Math.max(130, oh + ev.clientY - sy) + "px"; };
-    const up = () => { document.removeEventListener("mousemove", move); document.removeEventListener("mouseup", up); settleResize(pane); };
+    const up = () => { document.removeEventListener("mousemove", move); document.removeEventListener("mouseup", up); settleResize(pane); saveLayoutSoon(); };
     document.addEventListener("mousemove", move); document.addEventListener("mouseup", up);
   });
 }
@@ -2914,7 +2982,7 @@ function renderRecall() {
     list.appendChild(e); return;
   }
   items.forEach((it, i) => {
-    const h = it.h, gone = typeof h.out !== "string" && (!h.start || h.start.isDisposed); // no output to recover
+    const h = it.h, gone = typeof h.out !== "string" && !h.ref && (!h.start || h.start.isDisposed); // no output to recover
     const row = document.createElement("div");
     row.className = "rrow" + (i === rc.sel ? " sel" : "") + (gone ? " gone" : "");
     const st = document.createElement("span"); st.className = "rst " + (h.exit === 0 ? "ok" : "bad"); st.textContent = h.exit === 0 ? "✓" : "✗";
@@ -2959,9 +3027,9 @@ function recallJump(i) {          // ↵ — scroll the terminal to that command
   if (!p || !h.start || h.start.isDisposed) { overlayFlash(rc.scope === "recent" ? "jump only works for this terminal's live commands" : "that command scrolled out of view"); return; }
   try { p.term.scrollToLine(Math.max(0, h.start.line - 1)); } catch (_) {}
 }
-function recallCopy(i) {          // ⌘C — copy that command's output
+async function recallCopy(i) {          // ⌘C — copy that command's output
   const it = rc.items[i]; if (!it) return;
-  const text = outputText(rc.pane, it.h);
+  const text = await outputTextAsync(rc.pane, it.h);
   if (text == null) { overlayFlash("that command scrolled out of history"); return; }
   if (text) { clipWrite(text); overlayFlash("copied output of: " + it.h.cmd); closeRecall(); }
   else overlayFlash("that command had no output");
@@ -2973,13 +3041,13 @@ function recallRerun(i) {          // ⌘↵ — send the command text to the sh
   if (!p || !p.connected) { overlayFlash("terminal is gone"); return; }
   try { invoke("pane_input", { sid: p.sid, data: it.h.cmd + "\r" }); } catch (_) {}
 }
-function recallDiff(i) {            // ⌘D — diff this run against the most recent EARLIER run of the same command
+async function recallDiff(i) {            // ⌘D — diff this run against the most recent EARLIER run of the same command
   const it = rc.items[i]; if (!it) return;
   const src = recallSource(), cur = it.h;
   let prev = null;
   for (const h of src) { if (h.cmd === cur.cmd && (h.at || 0) < (cur.at || 0) && (!prev || (h.at || 0) > (prev.at || 0))) prev = h; }
   if (!prev) { overlayFlash("no earlier run of “" + cur.cmd + "”"); return; }
-  const a = outputText(rc.pane, prev), b = outputText(rc.pane, cur);
+  const [a, b] = await Promise.all([outputTextAsync(rc.pane, prev), outputTextAsync(rc.pane, cur)]);
   if (a == null || b == null) { overlayFlash("output for one run isn't available — can't diff"); return; }
   showDiff(cur.cmd, a, b, prev, cur);
 }
@@ -3095,7 +3163,10 @@ async function boot() {
   const ws0 = newWorkspace("tiled"); // Tiled is the default experience; Floating stays per-tab optional
   activeWs = ws0.id;
   if (attach) moveSessionHere(Number(attach));
-  else if (!(await restoreSessions())) spawnFloatCascade(); // reattach this window's panes, else one fresh terminal
+  else if (!(await restoreSessions())) spawnFloatCascade(); // rebuild tabs/panes from the snapshot, else one fresh terminal
+  // arm the layout snapshotting only now — saves during a half-restored boot must never clobber a good
+  // snapshot. First save after 1s (restore's async spawns have landed by then).
+  setTimeout(() => { _layoutReady = true; saveLayoutSoon(); }, 1000);
   // A reload leaves the previous page's panes orphaned server-side (their sessions were just re-attached
   // above, superseding the old viewers). Once those re-attaches have landed, reap every pane sender that
   // isn't one of THIS page's live panes — ending the stale run_pane loops without closing any session.
