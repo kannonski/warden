@@ -40,6 +40,12 @@ struct AppState {
     /// yet acked (rendered), + a waker. The output pump pauses when this exceeds the window, so a fast
     /// producer can't flood the webview into a freeze.
     flow: Mutex<HashMap<u64, Arc<PaneFlow>>>,
+    /// Recall (command timeline) persistence. `hist_dir` is <app_data>/history; each logical session gets
+    /// its own append-only `<launch_id>-<session>.jsonl`. `launch_id` (unix secs at boot) disambiguates
+    /// sessions across restarts — the numeric session id resets to 1 each launch, so without it a fresh
+    /// session would inherit a prior run's history.
+    hist_dir: PathBuf,
+    launch_id: u64,
 }
 
 struct PaneFlow {
@@ -192,7 +198,9 @@ ZDOTDIR="$KEDI_UZDOTDIR"
 # ── kedi shell integration (OSC 133 command marks + OSC 7 cwd) ──
 __kedi_osc() { printf '\033]%s\007' "$1"; }
 __kedi_precmd() { local e=$?; __kedi_osc "133;D;$e"; __kedi_osc "7;file://${HOST}${PWD}"; __kedi_osc "133;A"; }
-__kedi_preexec() { __kedi_osc "133;C"; }
+# preexec: mark command start (C), then ship the command line itself (E), base64'd so any bytes
+# survive the OSC transport (once per command — not the output hot path, so the subshell is cheap).
+__kedi_preexec() { __kedi_osc "133;C"; __kedi_osc "133;E;$(printf '%s' "$1" | base64 | tr -d '\n')"; }
 if autoload -Uz add-zsh-hook 2>/dev/null && whence add-zsh-hook >/dev/null 2>&1; then
   add-zsh-hook precmd __kedi_precmd
   add-zsh-hook preexec __kedi_preexec
@@ -477,6 +485,7 @@ fn build_menu(app: &tauri::AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
                 Some("CmdOrCtrl+K"),
             )?,
             &MenuItem::with_id(app, "find", "Find…", true, Some("CmdOrCtrl+F"))?,
+            &MenuItem::with_id(app, "recall", "Recall Commands…", true, Some("CmdOrCtrl+R"))?,
         ],
     )?;
     let window_menu = Submenu::with_items(
@@ -530,6 +539,24 @@ fn open_url(url: String) {
         .spawn();
 }
 
+/// Open a file path (optionally at a line) from a ⌘-clicked link in the terminal. Runs through the
+/// user's LOGIN shell so PATH resolves their editor (`code`, `$VISUAL`/`$EDITOR`), falling back to the
+/// OS opener. Path & line are passed as positional args (never interpolated) — no shell injection.
+#[tauri::command]
+fn open_path(path: String, line: u32) {
+    let shell = std::env::var("SHELL").unwrap_or_else(|_| "sh".to_string());
+    let script = r#"f="$1"; l="$2"; [ "$l" = "0" ] && l=""
+if command -v code >/dev/null 2>&1; then
+  [ -n "$l" ] && code -g "$f:$l" || code -g "$f"
+elif [ -n "${VISUAL}${EDITOR}" ]; then
+  ed="${VISUAL:-$EDITOR}"; [ -n "$l" ] && "$ed" "+$l" "$f" || "$ed" "$f"
+elif [ "$(uname)" = "Darwin" ]; then open "$f"
+else xdg-open "$f"; fi"#;
+    let _ = std::process::Command::new(shell)
+        .args(["-lc", script, "kedi", &path, &line.to_string()])
+        .spawn();
+}
+
 // ── audit / governance IPC (ports of the old HTTP routes; same JSON shapes) ───────────────────────
 
 /// Live sessions, in the browser's `/sessions` shape ({warden, sessions:[SessionView]}) — the palette
@@ -565,6 +592,99 @@ fn set_recording(state: State<AppState>, on: bool) -> bool {
 #[tauri::command]
 fn kill_session(state: State<AppState>, session: u64, by: String) -> bool {
     state.warden.kill(warden_core::SessionId(session), &by)
+}
+
+// ── Recall persistence: a per-session command timeline on disk (survives pop-out + restart) ──────────
+const HIST_KEEP: usize = 50; // commands retained per session
+const HIST_SESSIONS_KEEP: usize = 30; // session files retained (newest by mtime)
+
+/// This launch's on-disk file for one logical session (`<app_data>/history/<launch>-<session>.jsonl`).
+fn session_file(state: &AppState, session: u64) -> PathBuf {
+    state
+        .hist_dir
+        .join(format!("{}-{}.jsonl", state.launch_id, session))
+}
+
+/// Keep only the newest HIST_SESSIONS_KEEP `*.jsonl` files (by mtime); delete the rest. Bounds disk use.
+fn prune_sessions(dir: &Path) {
+    let mut files: Vec<(std::time::SystemTime, PathBuf)> = match std::fs::read_dir(dir) {
+        Ok(rd) => rd
+            .flatten()
+            .filter_map(|e| {
+                let p = e.path();
+                if p.extension().map(|x| x == "jsonl").unwrap_or(false) {
+                    let m = e.metadata().ok()?.modified().ok()?;
+                    Some((m, p))
+                } else {
+                    None
+                }
+            })
+            .collect(),
+        Err(_) => return,
+    };
+    if files.len() <= HIST_SESSIONS_KEEP {
+        return;
+    }
+    files.sort_by_key(|(m, _)| *m); // oldest first
+    for (_, p) in files.iter().take(files.len() - HIST_SESSIONS_KEEP) {
+        let _ = std::fs::remove_file(p);
+    }
+}
+
+/// Append one finished command (a JSON-serialized entry, already a single line) to its session's file.
+/// The frontend built the entry from OSC 133 marks (clean, xterm-rendered output — no ANSI). Compacts
+/// to the last HIST_KEEP once the file drifts past a slack threshold, so appends stay cheap.
+#[tauri::command]
+fn history_push(state: State<AppState>, session: u64, entry: String) {
+    use std::io::Write;
+    let path = session_file(&state, session);
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+    {
+        let _ = writeln!(f, "{entry}");
+    }
+    if let Ok(data) = std::fs::read_to_string(&path) {
+        let lines: Vec<&str> = data.lines().filter(|l| !l.is_empty()).collect();
+        if lines.len() > HIST_KEEP + 10 {
+            let kept = lines[lines.len() - HIST_KEEP..].join("\n");
+            let _ = std::fs::write(&path, kept + "\n");
+        }
+    }
+    prune_sessions(&state.hist_dir);
+}
+
+/// This launch's persisted entries for one session (oldest→newest) — reloaded when a window opens or a
+/// popped-out session re-attaches, so its output stays copyable even though the live buffer is gone.
+#[tauri::command]
+fn history_load(state: State<AppState>, session: u64) -> Vec<String> {
+    std::fs::read_to_string(session_file(&state, session))
+        .map(|d| {
+            d.lines()
+                .filter(|l| !l.is_empty())
+                .map(String::from)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Every persisted entry across all sessions (this launch and prior ones still on disk) — the "earlier"
+/// scope in Recall. The frontend sorts by timestamp and caps; here we just bound by the retained files.
+#[tauri::command]
+fn history_recent(state: State<AppState>) -> Vec<String> {
+    let mut out = Vec::new();
+    if let Ok(rd) = std::fs::read_dir(&state.hist_dir) {
+        for e in rd.flatten() {
+            let p = e.path();
+            if p.extension().map(|x| x == "jsonl").unwrap_or(false)
+                && let Ok(d) = std::fs::read_to_string(&p)
+            {
+                out.extend(d.lines().filter(|l| !l.is_empty()).map(String::from));
+            }
+        }
+    }
+    out
 }
 
 /// Installed WASM-TUI plugins (name + icon), read fresh from plugins.toml each call.
@@ -684,13 +804,14 @@ fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_clipboard_manager::init()) // copy/paste (navigator.clipboard is blocked on kedi://)
         .plugin(tauri_plugin_opener::init()) // open clicked links in the system browser
+        .plugin(tauri_plugin_notification::init()) // "command finished" notifications
         .menu(build_menu) // native menu bar: ⌘T/⌘N/⌘W/⌘K/⌘F/⌘, handled by the OS
         .on_menu_event(|app, event| match event.id().as_ref() {
             "new_window" => {
                 let _ = open_new_window(app);
             }
             // dispatched to the focused window; the frontend guards on document.hasFocus()
-            id @ ("settings" | "new_terminal" | "close_pane" | "find" | "palette"
+            id @ ("settings" | "new_terminal" | "close_pane" | "find" | "palette" | "recall"
             | "pop_out_pane") => {
                 let _ = app.emit("menu", id);
             }
@@ -733,6 +854,13 @@ fn main() {
                 .expect("app_data_dir")
                 .join("record.jsonl");
             std::fs::create_dir_all(record_path.parent().unwrap()).ok();
+            // Recall history store: <app_data>/history, stamped with this launch's epoch.
+            let hist_dir = record_path.parent().unwrap().join("history");
+            std::fs::create_dir_all(&hist_dir).ok();
+            let launch_id = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
             let (warden, rec) =
                 kedi::terminal_warden(&record_path.to_string_lossy(), false, Vec::new())
                     .expect("kedi-app: warden init failed");
@@ -749,6 +877,8 @@ fn main() {
                 panes: Mutex::new(HashMap::new()),
                 win_panes: Mutex::new(HashMap::new()),
                 flow: Mutex::new(HashMap::new()),
+                hist_dir,
+                launch_id,
             });
 
             println!("kedi-app: serving hot-swappable UI from {}", dir.display());
@@ -784,6 +914,7 @@ fn main() {
             pane_ack,
             new_window,
             pop_out,
+            open_path,
             clients_json,
             shutdown,
             open_url,
@@ -792,6 +923,9 @@ fn main() {
             get_recording,
             set_recording,
             kill_session,
+            history_push,
+            history_load,
+            history_recent,
             plugins_json,
             install_plugin,
             remove_plugin,
