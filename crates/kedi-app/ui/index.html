@@ -855,17 +855,35 @@ function layoutActive() {
   }
   for (const p of ps) p.floatwin.classList.toggle("focused", p === focused);
   renderTabs();
-  // Resize order matters: tell the pty the new size FIRST (so the shell's SIGWINCH redraw targets the
-  // final grid), THEN reflow xterm to match. Fitting first would reflow the old buffer and strand a
-  // prompt row. ptyResize dedups, so the fit()→onResize send that follows is a no-op.
+  // During a live window-resize stream (_fitHold) skip resizes entirely: positions track per frame,
+  // one settleResize per pane when the stream settles.
   requestAnimationFrame(() => {
+    if (_fitHold) return;
     for (const p of ps) {
-      let dims; try { dims = p.fit.proposeDimensions(); } catch (_) {}
-      if (dims && dims.cols && dims.rows) ptyResize(p, dims.cols, dims.rows);
-      try { p.fit.fit(); } catch (_) {}
+      settleResize(p);
       if (p._needRepaint) { p._needRepaint = false; repaintPane(p); } // rebuild atlas for just-shown panes
     }
   });
+}
+// Resize a pane without corrupting the prompt. Order is everything (verified against the vendored
+// xterm 5.5.0 with a headless repro): if xterm REFLOWS first, a full-width prompt line (p10k et al)
+// wraps, the cursor shifts a row, and the shell's SIGWINCH redraw — whose cursor-up count predates the
+// reflow — lands one row low, stranding a stale prompt line in scrollback on EVERY resize. So: tell the
+// pty first, then fit/reflow xterm only after the shell's redraw bytes have arrived (next output chunk,
+// or a 120ms deadline when nothing redraws — e.g. a bare `cat`). The ALTERNATE screen (vim, htop) gets
+// the opposite: it never reflows and full-screen redraws target the new grid, so fit immediately.
+function settleResize(p) {
+  if (!p || !p.term || !p.fit) return;
+  let dims; try { dims = p.fit.proposeDimensions(); } catch (_) {}
+  if (!dims || !dims.cols || !dims.rows) return;
+  clearTimeout(p._fitTimer); p._fitWait = null;
+  const doFit = () => { p._fitWait = null; clearTimeout(p._fitTimer); try { p.fit.fit(); } catch (_) {} };
+  if (dims.cols === p.term.cols && dims.rows === p.term.rows) { doFit(); return; } // px-only: no SIGWINCH in play
+  ptyResize(p, dims.cols, dims.rows); // the shell redraws for the new grid…
+  let alt = false; try { alt = p.term.buffer.active.type === "alternate"; } catch (_) {}
+  if (alt || !p.connected) { doFit(); return; }
+  p._fitWait = doFit;                       // …reflow once its redraw lands (see onOutput)
+  p._fitTimer = setTimeout(doFit, 120);     // or shortly, if nothing redraws
 }
 // Rebuild a pane's WebGL glyph atlas and repaint from its buffer — clears corruption after the canvas
 // was hidden (display:none in an inactive tab) or otherwise disturbed.
@@ -969,7 +987,6 @@ function startGutterDrag(e, ws, meta) {
   }
   meta.el.classList.add("dragging");
   try { meta.el.setPointerCapture(e.pointerId); } catch (_) {}
-  let raf = 0;
   const move = (ev) => {
     const delta = (horiz ? ev.clientX : ev.clientY) - start;
     if (ctx.kind === "main") {
@@ -980,8 +997,8 @@ function startGutterDrag(e, ws, meta) {
       ctx.arr[ctx.k] = (ctx.a + dd) / ctx.content * ctx.sum;
       ctx.arr[ctx.k + 1] = (ctx.b - dd) / ctx.content * ctx.sum;
     }
-    positionTiles(ws);
-    if (!raf) raf = requestAnimationFrame(() => { raf = 0; for (const p of wsPanes(ws.id)) { try { p.fit.fit(); } catch (_) {} } });
+    positionTiles(ws); // positions only — NO fit during the drag. Each fit = SIGWINCH + xterm reflow +
+    // a zsh/p10k prompt redraw; per-frame that injects junk lines into scrollback. One fit on release.
   };
   const up = () => {
     meta.el.classList.remove("dragging");
@@ -1605,7 +1622,10 @@ function startRenameTab(ws, label) {
   });
   inp.addEventListener("blur", () => finish(true));
 }
-function fitAll() { for (const p of allPanes()) { try { p.fit.fit(); } catch (_) {} p.send({ resize: [p.term.cols, p.term.rows] }); } }
+// held during a live window-resize stream (see the boot resize listener); resize sends go through
+// ptyResize so an unchanged size never SIGWINCHes the shell.
+let _fitHold = false;
+function fitAll() { if (_fitHold) return; for (const p of allPanes()) settleResize(p); }
 
 // On a browser resize, reflow floating windows to the new canvas so nothing is lost off-screen:
 //  - a SNAPPED/maximized window re-snaps to its region recomputed for the new size (a left-half
@@ -1872,9 +1892,12 @@ async function makePane(app, attachId) {
     // backend never runs >1MB ahead of the display → no flood-freeze). Small writes = interactive echo
     // → also force the immediate render (the 3ms path); big writes ride xterm's rAF batching.
     const n = bytes.length;
+    // settleResize is waiting on the shell's post-SIGWINCH redraw: run the deferred fit as soon as
+    // this chunk (the redraw) is fully written — reflow AFTER redraw is what keeps the prompt intact.
+    const settle = () => { const f = pane._fitWait; if (f) { pane._fitWait = null; f(); } };
     const ack = () => { pane._ack = (pane._ack || 0) + n; if (pane._ack >= 32768) { invoke("pane_ack", { sid: pane.sid, bytes: pane._ack }); pane._ack = 0; } };
-    if (n < 2048) term.write(bytes, () => { syncRender(term); ack(); });
-    else term.write(bytes, ack);
+    if (n < 2048) term.write(bytes, () => { syncRender(term); ack(); settle(); });
+    else term.write(bytes, () => { ack(); settle(); });
   };
   pane.sid = await invoke("open_pane", { onOutput }); // backend assigns a globally-unique pane sid
   pane.sessionId = attachId != null ? attachId : pane.sid; // durable session id (stable across pop-out/move)
@@ -2076,8 +2099,7 @@ function applyGeom(win, pane, [x, y, w, h]) {
   win.style.left = x + "px"; win.style.top = y + "px"; win.style.width = w + "px"; win.style.height = h + "px";
   setTimeout(() => {
     win.classList.remove("animate");
-    try { pane.fit.fit(); } catch (_) {}
-    pane.send({ resize: [pane.term.cols, pane.term.rows] });
+    settleResize(pane); // pty-first, reflow-after-redraw (keeps the prompt intact)
   }, 150);
 }
 function snapWin(win, pane, name) {
@@ -2120,7 +2142,7 @@ function restoreFromTaskbar(pane) {
   win.classList.remove("stowed", "stowing");
   win.style.zIndex = ++zTop;
   if (pane.taskChip) { pane.taskChip.remove(); pane.taskChip = null; taskbarSync(); }
-  requestAnimationFrame(() => { try { pane.fit.fit(); } catch (_) {} pane.send({ resize: [pane.term.cols, pane.term.rows] }); setFocus(pane); });
+  requestAnimationFrame(() => { settleResize(pane); setFocus(pane); });
 }
 // layout manager (start): arrange all (non-minimized) windows into an even grid
 function tileGrid() {
@@ -2172,8 +2194,10 @@ function resizeWin(win, grip, pane) {
   grip.addEventListener("mousedown", (e) => {
     e.preventDefault(); e.stopPropagation();
     const sx = e.clientX, sy = e.clientY, ow = win.offsetWidth, oh = win.offsetHeight;
-    const move = (ev) => { win.style.width = Math.max(200, ow + ev.clientX - sx) + "px"; win.style.height = Math.max(130, oh + ev.clientY - sy) + "px"; try { pane.fit.fit(); } catch (_) {} };
-    const up = () => { document.removeEventListener("mousemove", move); document.removeEventListener("mouseup", up); try { pane.fit.fit(); } catch (_) {} pane.send({ resize: [pane.term.cols, pane.term.rows] }); };
+    // size the box live, but fit/resize the terminal ONCE on release — a per-move fit floods the shell
+    // with SIGWINCH (each = xterm reflow + prompt redraw → junk lines accumulating in scrollback).
+    const move = (ev) => { win.style.width = Math.max(200, ow + ev.clientX - sx) + "px"; win.style.height = Math.max(130, oh + ev.clientY - sy) + "px"; };
+    const up = () => { document.removeEventListener("mousemove", move); document.removeEventListener("mouseup", up); settleResize(pane); };
     document.addEventListener("mousemove", move); document.addEventListener("mouseup", up);
   });
 }
@@ -3077,9 +3101,14 @@ async function boot() {
   // isn't one of THIS page's live panes — ending the stale run_pane loops without closing any session.
   setTimeout(() => { try { invoke("reap_window_panes", { keep: allPanes().map((p) => p.sid) }).catch(() => {}); } catch (_) {} }, 2000);
   _lastCanvas = { w: $("canvas").clientWidth, h: $("canvas").clientHeight };
-  // coalesce the rapid resize-event stream to one reflow per frame (avoids spamming pty resizes)
-  let _reflowPending = false;
+  // Live window resize: positions/sizes track per frame (cheap CSS via reflowWindows), but terminal
+  // fits are HELD until the stream settles, then run once — per-frame fits are a SIGWINCH storm (each
+  // one = xterm reflow + zsh/p10k prompt redraw) that leaves junk lines in scrollback.
+  let _reflowPending = false, _settleTimer = 0;
   window.addEventListener("resize", () => {
+    _fitHold = true;
+    clearTimeout(_settleTimer);
+    _settleTimer = setTimeout(() => { _fitHold = false; reflowWindows(); }, 150); // one fit at the end
     if (_reflowPending) return;
     _reflowPending = true;
     requestAnimationFrame(() => { _reflowPending = false; reflowWindows(); });
