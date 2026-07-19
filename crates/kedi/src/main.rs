@@ -149,7 +149,11 @@ fn serve_one(mut stream: TcpStream, pages: &Pages) {
     // Binary PWA icons: served as raw bytes, so they take a dedicated write path (the text branches
     // below all yield a String). Drain the request headers first, then stream the PNG.
     if path.starts_with("/icon-192.png") || path.starts_with("/icon-512.png") {
-        let bytes: &[u8] = if path.starts_with("/icon-512") { ICON_512 } else { ICON_192 };
+        let bytes: &[u8] = if path.starts_with("/icon-512") {
+            ICON_512
+        } else {
+            ICON_192
+        };
         loop {
             let mut h = String::new();
             match reader.read_line(&mut h) {
@@ -544,9 +548,7 @@ fn open_in_browser(url: &str) {
                 return;
             }
         }
-        if try_spawn("open", &["-a", "Google Chrome", url]) || try_spawn("open", &[url]) {
-            return;
-        }
+        let _ = try_spawn("open", &["-a", "Google Chrome", url]) || try_spawn("open", &[url]);
     }
     #[cfg(not(target_os = "macos"))]
     {
@@ -669,7 +671,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 match TcpListener::bind(addr) {
                     Ok(l) => v.push(l),
                     Err(e) => {
-                        eprintln!("kedi: http bind {addr} failed: {e}  (a stray kedi? `pkill -x kedi`)");
+                        eprintln!(
+                            "kedi: http bind {addr} failed: {e}  (a stray kedi? `pkill -x kedi`)"
+                        );
                         std::process::exit(1);
                     }
                 }

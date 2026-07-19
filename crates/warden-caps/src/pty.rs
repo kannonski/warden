@@ -57,7 +57,8 @@ impl PtyCap {
             // profile — essential when kedi is started from the Dock/a desktop launcher (GUI processes
             // inherit a minimal environment; login sourcing restores PATH: brew, mise, …). Portable:
             // zsh/bash/fish all take -l.
-            let mut c = CommandBuilder::new(std::env::var("SHELL").unwrap_or_else(|_| "bash".into()));
+            let mut c =
+                CommandBuilder::new(std::env::var("SHELL").unwrap_or_else(|_| "bash".into()));
             c.arg("-l");
             c
         } else {

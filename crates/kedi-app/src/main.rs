@@ -43,14 +43,19 @@ struct AppState {
 }
 
 struct PaneFlow {
-    inflight: AtomicI64,   // bytes sent to the webview but not yet acked
-    notify: Notify,        // pane_ack wakes the paused pump
+    inflight: AtomicI64, // bytes sent to the webview but not yet acked
+    notify: Notify,      // pane_ack wakes the paused pump
 }
 
 /// A window is gone: drop its panes' senders. Each `run_pane` then sees its client disconnect and, if it
 /// still owned the session, closes it (a session teleported elsewhere is left running). Idempotent.
 fn cleanup_window(state: &AppState, label: &str) {
-    let sids = state.win_panes.lock().unwrap().remove(label).unwrap_or_default();
+    let sids = state
+        .win_panes
+        .lock()
+        .unwrap()
+        .remove(label)
+        .unwrap_or_default();
     if sids.is_empty() {
         return;
     }
@@ -160,7 +165,11 @@ fn reconcile_ui(
 /// Only touches zsh (bash/others ignore ZDOTDIR) and always falls back to the user's config, so a broken
 /// hook can't lose their environment. `KEDI_UZDOTDIR` carries their original ZDOTDIR (or $HOME).
 fn setup_shell_integration(app: &tauri::AppHandle) {
-    let dir = app.path().app_data_dir().expect("app_data_dir").join("shell");
+    let dir = app
+        .path()
+        .app_data_dir()
+        .expect("app_data_dir")
+        .join("shell");
     // opt out via env, or the persisted Settings toggle (a `.disabled` flag file in the shell dir)
     if std::env::var_os("KEDI_NO_SHELL_INTEGRATION").is_some() || dir.join(".disabled").exists() {
         return;
@@ -242,7 +251,10 @@ fn open_pane(
     let handle = state.rt.handle().clone();
 
     let sid = state.next_sid.fetch_add(1, Ordering::Relaxed);
-    let flow = Arc::new(PaneFlow { inflight: AtomicI64::new(0), notify: Notify::new() });
+    let flow = Arc::new(PaneFlow {
+        inflight: AtomicI64::new(0),
+        notify: Notify::new(),
+    });
     state.flow.lock().unwrap().insert(sid, flow.clone());
 
     // Output pump with backpressure. Each frame is base64 (kept ~8KB so it takes Tauri's fast direct-
@@ -252,7 +264,7 @@ fn open_pane(
     // to stay alive (can't push backpressure to the shell through the sync governed sink — see notes).
     handle.spawn(async move {
         use base64::{Engine, engine::general_purpose::STANDARD};
-        const WINDOW: i64 = 1 << 20;        // 1 MB the webview may be behind before we pause
+        const WINDOW: i64 = 1 << 20; // 1 MB the webview may be behind before we pause
         const BACKLOG_MAX: usize = 8 << 20; // 8 MB local cap; beyond it, drop oldest (unsustainable flood)
         let mut backlog: VecDeque<u8> = VecDeque::new();
         loop {
@@ -272,7 +284,8 @@ fn open_pane(
             while !backlog.is_empty() && flow.inflight.load(Ordering::Relaxed) < WINDOW {
                 let take = backlog.len().min(6000);
                 let chunk: Vec<u8> = backlog.drain(..take).collect();
-                flow.inflight.fetch_add(chunk.len() as i64, Ordering::Relaxed);
+                flow.inflight
+                    .fetch_add(chunk.len() as i64, Ordering::Relaxed);
                 if on_output.send(STANDARD.encode(&chunk)).is_err() {
                     return;
                 }
@@ -298,7 +311,13 @@ fn open_pane(
     });
 
     state.panes.lock().unwrap().insert(sid, msg_tx);
-    state.win_panes.lock().unwrap().entry(window.label().to_string()).or_default().push(sid);
+    state
+        .win_panes
+        .lock()
+        .unwrap()
+        .entry(window.label().to_string())
+        .or_default()
+        .push(sid);
     Ok(sid)
 }
 
@@ -367,10 +386,10 @@ fn watch_window_close(win: &tauri::WebviewWindow) {
     let app = win.app_handle().clone();
     let label = win.label().to_string();
     win.on_window_event(move |event| {
-        if matches!(event, tauri::WindowEvent::Destroyed) {
-            if let Some(state) = app.try_state::<AppState>() {
-                cleanup_window(&state, &label);
-            }
+        if matches!(event, tauri::WindowEvent::Destroyed)
+            && let Some(state) = app.try_state::<AppState>()
+        {
+            cleanup_window(&state, &label);
         }
     });
 }
@@ -420,11 +439,29 @@ fn build_menu(app: &tauri::AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
         "File",
         true,
         &[
-            &MenuItem::with_id(app, "new_terminal", "New Terminal", true, Some("CmdOrCtrl+T"))?,
+            &MenuItem::with_id(
+                app,
+                "new_terminal",
+                "New Terminal",
+                true,
+                Some("CmdOrCtrl+T"),
+            )?,
             &MenuItem::with_id(app, "new_window", "New Window", true, Some("CmdOrCtrl+N"))?,
-            &MenuItem::with_id(app, "pop_out_pane", "Pop Out Terminal", true, Some("CmdOrCtrl+Shift+O"))?,
+            &MenuItem::with_id(
+                app,
+                "pop_out_pane",
+                "Pop Out Terminal",
+                true,
+                Some("CmdOrCtrl+Shift+O"),
+            )?,
             &PredefinedMenuItem::separator(app)?,
-            &MenuItem::with_id(app, "close_pane", "Close Terminal", true, Some("CmdOrCtrl+W"))?,
+            &MenuItem::with_id(
+                app,
+                "close_pane",
+                "Close Terminal",
+                true,
+                Some("CmdOrCtrl+W"),
+            )?,
         ],
     )?;
     let view_menu = Submenu::with_items(
@@ -432,7 +469,13 @@ fn build_menu(app: &tauri::AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
         "View",
         true,
         &[
-            &MenuItem::with_id(app, "palette", "Command Palette…", true, Some("CmdOrCtrl+K"))?,
+            &MenuItem::with_id(
+                app,
+                "palette",
+                "Command Palette…",
+                true,
+                Some("CmdOrCtrl+K"),
+            )?,
             &MenuItem::with_id(app, "find", "Find…", true, Some("CmdOrCtrl+F"))?,
         ],
     )?;
@@ -476,11 +519,15 @@ fn open_url(url: String) {
         return;
     }
     #[cfg(target_os = "macos")]
-    let _ = std::process::Command::new("/usr/bin/open").arg(&url).spawn();
+    let _ = std::process::Command::new("/usr/bin/open")
+        .arg(&url)
+        .spawn();
     #[cfg(target_os = "linux")]
     let _ = std::process::Command::new("xdg-open").arg(&url).spawn();
     #[cfg(target_os = "windows")]
-    let _ = std::process::Command::new("cmd").args(["/C", "start", "", &url]).spawn();
+    let _ = std::process::Command::new("cmd")
+        .args(["/C", "start", "", &url])
+        .spawn();
 }
 
 // ── audit / governance IPC (ports of the old HTTP routes; same JSON shapes) ───────────────────────
@@ -558,14 +605,22 @@ fn shell_integration_state(app: tauri::AppHandle) -> bool {
     if std::env::var_os("KEDI_NO_SHELL_INTEGRATION").is_some() {
         return false;
     }
-    let dir = app.path().app_data_dir().map(|p| p.join("shell")).unwrap_or_default();
+    let dir = app
+        .path()
+        .app_data_dir()
+        .map(|p| p.join("shell"))
+        .unwrap_or_default();
     !dir.join(".disabled").exists()
 }
 
 /// Persist the shell-integration preference (takes effect on next launch — injection happens at startup).
 #[tauri::command]
 fn set_shell_integration(app: tauri::AppHandle, enabled: bool) -> Result<(), String> {
-    let dir = app.path().app_data_dir().map_err(|e| e.to_string())?.join("shell");
+    let dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| e.to_string())?
+        .join("shell");
     std::fs::create_dir_all(&dir).ok();
     let flag = dir.join(".disabled");
     if enabled {
@@ -611,7 +666,10 @@ fn spawn_watcher(dir: PathBuf, mut on_change: impl FnMut() + Send + 'static) {
                 continue;
             }
             // coalesce the rest of the burst (editors write several events per save)
-            while rx.recv_timeout(std::time::Duration::from_millis(120)).is_ok() {}
+            while rx
+                .recv_timeout(std::time::Duration::from_millis(120))
+                .is_ok()
+            {}
             on_change();
         }
     });
@@ -632,7 +690,8 @@ fn main() {
                 let _ = open_new_window(app);
             }
             // dispatched to the focused window; the frontend guards on document.hasFocus()
-            id @ ("settings" | "new_terminal" | "close_pane" | "find" | "palette" | "pop_out_pane") => {
+            id @ ("settings" | "new_terminal" | "close_pane" | "find" | "palette"
+            | "pop_out_pane") => {
                 let _ = app.emit("menu", id);
             }
             _ => {}
@@ -652,7 +711,10 @@ fn main() {
                         .unwrap(),
                     Err(_) => tauri::http::Response::builder()
                         .status(tauri::http::StatusCode::NOT_FOUND)
-                        .header(tauri::http::header::CONTENT_TYPE, "text/plain; charset=utf-8")
+                        .header(
+                            tauri::http::header::CONTENT_TYPE,
+                            "text/plain; charset=utf-8",
+                        )
                         .body(format!("kedi: not found: {}", full.display()).into_bytes())
                         .unwrap(),
                 };
@@ -660,9 +722,9 @@ fn main() {
             });
         })
         .setup(|app| {
-            let dir = ui_dir(&app.handle());
+            let dir = ui_dir(app.handle());
             seed_ui(&dir);
-            setup_shell_integration(&app.handle()); // zsh: emit OSC 133 (command marks) + OSC 7 (cwd)
+            setup_shell_integration(app.handle()); // zsh: emit OSC 133 (command marks) + OSC 7 (cwd)
 
             // The in-process warden (pty capability, recorder, policy) — same backend the WT kedi uses.
             let record_path = app

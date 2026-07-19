@@ -820,9 +820,7 @@ pub async fn run_pane(
                     tokio::spawn(pump); // the caller drives the long-lived pump (kernel schedules none)
                 }
                 Err(e) => {
-                    let _ = out.send(
-                        format!("\r\n\x1b[1;31m[warden] {e}\x1b[0m\r\n").into_bytes(),
-                    );
+                    let _ = out.send(format!("\r\n\x1b[1;31m[warden] {e}\x1b[0m\r\n").into_bytes());
                     return;
                 }
             }
