@@ -117,6 +117,11 @@
 
   .grip { position:absolute; right:0; bottom:0; width:15px; height:15px; cursor:nwse-resize; z-index:2;
           background:linear-gradient(135deg, transparent 45%, var(--dim) 45%, var(--dim) 55%, transparent 55%); }
+  /* draggable splits between tiled panes (columns / rows / main-split) */
+  .tile-gutter { position:absolute; z-index:25; background:transparent; touch-action:none; transition:background .1s; }
+  .tile-gutter.col { cursor:col-resize; }
+  .tile-gutter.row { cursor:row-resize; }
+  .tile-gutter:hover, .tile-gutter.dragging { background:var(--focus); opacity:.45; border-radius:3px; }
   #snap { position:absolute; display:none; border:2px solid var(--cyan); background:rgba(86,200,216,.12); border-radius:6px; pointer-events:none; z-index:9998; }
   .marquee { position:absolute; border:1px dashed var(--cyan); background:rgba(137,220,235,.08); pointer-events:none; }
   #ctxmenu { position:absolute; display:none; min-width:190px; z-index:9997; padding:5px; border-radius:10px;
@@ -748,10 +753,19 @@ let WHO = sanitizeWho(new URLSearchParams(location.search).get("who") || localSt
 localStorage.setItem("kedi.who", WHO);
 function renderWho() { $("idchip").querySelector("b").textContent = WHO; }
 
-// A random id for THIS browser tab. Each pane pushes a `<TAB_ID>:<pane.id>` key to the server (the
-// {"tab"} frame), so the cross-tab session palette can tell "a pane in this tab" (focus) from "a
-// session in another tab" (move here), and map a /sessions row back to its own pane.
-const TAB_ID = (crypto.randomUUID ? crypto.randomUUID() : String(Math.random())).replace(/[^a-z0-9]/gi, "").slice(0, 16);
+// This OS window's stable label (survives a webview reload; unlike TAB_ID it isn't regenerated).
+let WIN = "main";
+try { WIN = window.__TAURI__.window.getCurrentWindow().label || "main"; } catch (_) {}
+// A key for THIS window's panes. Each pane pushes a `<TAB_ID>:<pane.id>` key to the server (the {"tab"}
+// frame), so the cross-window session palette can tell "a pane in this window" (focus) from "a session
+// elsewhere" (move here), and map a /sessions row back to its own pane. Persisted per-window so it
+// survives a reload — that's what lets boot re-find and re-attach this window's sessions (below).
+const TAB_ID = (() => {
+  const k = "kedi.tabid." + WIN;
+  let t = null; try { t = localStorage.getItem(k); } catch (_) {}
+  if (!t) { t = (crypto.randomUUID ? crypto.randomUUID() : String(Math.random())).replace(/[^a-z0-9]/gi, "").slice(0, 16); try { localStorage.setItem(k, t); } catch (_) {} }
+  return t;
+})();
 const paneKey = (p) => `${TAB_ID}:${p.id}`;
 
 
@@ -830,6 +844,7 @@ function layoutActive() {
   const ps = wsPanes(ws.id);
   if (ps.length && (!focused || focused.ws !== ws.id)) focused = ps[0];
   const c = $("canvas"), W = c.clientWidth, H = c.clientHeight, m = 8;
+  clearGutters(); // drop any splits from a prior layout; tilePanes rebuilds them for the tiled branch
   if (ws.zoom && ps.some((p) => p.id === ws.zoom)) {
     for (const p of ps) p.floatwin.style.display = (p.id === ws.zoom) ? "flex" : "none";
     fillWin(ps.find((p) => p.id === ws.zoom), m, m, W - 2 * m, H - 2 * m);
@@ -866,23 +881,117 @@ function ptyResize(p, cols, rows) {
   p.send({ resize: [cols, rows] });
 }
 
-// tile panes into (x,y,w,h) by layout — generalized from the retired stage tileGroup
+// ── tiled layout with draggable gutters ──────────────────────────────────────────────────────────
+// Panes tile into (x,y,w,h) by layout; the split sizes are per-workspace weights the user can drag.
+// columns/rows → n-1 gutters resize adjacent panes; main → one vertical gutter (main:stack ratio) plus
+// row gutters inside the stack; grid → equal, no gutters (its splits aren't a simple line). Weights live
+// on the workspace and reset to equal when the pane count changes (so add/close never strands a ratio).
+let GUTTERS = [];
+const TILE_GAP = 8, TILE_MIN = 90; // px: pane gap, and the smallest a pane may be dragged to
+function clearGutters() { for (const g of GUTTERS) g.remove(); GUTTERS = []; }
+function tileW(ws, key, n) { ws._w = ws._w || {}; let a = ws._w[key]; if (!Array.isArray(a) || a.length !== n) { a = new Array(n).fill(1); ws._w[key] = a; } return a; }
+function mainRatio(ws) { const v = (ws._w && ws._w.mainW) || 0.6; return Math.max(0.15, Math.min(0.85, v)); }
+// split length L (with (m-1) gaps) among m weights → [{off,size}]
+function splitW(start, L, w) {
+  const sum = w.reduce((s, x) => s + x, 0) || 1, content = L - (w.length - 1) * TILE_GAP;
+  const out = []; let pos = start;
+  for (const wi of w) { const size = content * wi / sum; out.push({ off: pos, size }); pos += size + TILE_GAP; }
+  return out;
+}
 function tilePanes(ps, layout, x, y, w, h) {
-  const n = ps.length; if (!n) return; const gap = 8, rects = [];
-  if (layout === "rows") {
-    const th = (h - (n - 1) * gap) / n; ps.forEach((_, i) => rects.push([x, y + i * (th + gap), w, th]));
-  } else if (layout === "columns") {
-    const cw = (w - (n - 1) * gap) / n; ps.forEach((_, i) => rects.push([x + i * (cw + gap), y, cw, h]));
-  } else if (layout === "main" && n > 1) {
-    const mw = Math.round(w * 0.6), sx = x + mw + gap, sw2 = w - mw - gap, th = (h - (n - 2) * gap) / (n - 1);
-    rects.push([x, y, mw, h]);
-    for (let i = 1; i < n; i++) rects.push([sx, y + (i - 1) * (th + gap), sw2, th]);
-  } else {
+  const n = ps.length; if (!n) return;
+  const ws = activeWorkspace();
+  clearGutters();
+  ws._tile = { ps, layout, x, y, w, h, gutters: [] };
+  const addG = (meta) => {
+    const g = document.createElement("div");
+    g.className = "tile-gutter " + (meta.horiz ? "col" : "row"); // horiz drag = col-resize cursor
+    $("canvas").appendChild(g); GUTTERS.push(g);
+    meta.el = g; ws._tile.gutters.push(meta);
+    g.addEventListener("pointerdown", (e) => startGutterDrag(e, ws, meta));
+  };
+  if (layout === "columns") { for (let k = 0; k < n - 1; k++) addG({ role: "col", key: "col", k, horiz: true }); }
+  else if (layout === "rows") { for (let k = 0; k < n - 1; k++) addG({ role: "row", key: "row", k, horiz: false }); }
+  else if (layout === "main" && n > 1) { addG({ role: "main", horiz: true }); for (let k = 0; k < n - 2; k++) addG({ role: "stack", key: "stack", k, horiz: false }); }
+  else if (layout === "grid" && n > 1) { // shared column + row lines
     const cols = Math.ceil(Math.sqrt(n)), rows = Math.ceil(n / cols);
-    const cw = (w - (cols - 1) * gap) / cols, ch = (h - (rows - 1) * gap) / rows;
-    ps.forEach((_, i) => { const cx = i % cols, cy = Math.floor(i / cols); rects.push([x + cx * (cw + gap), y + cy * (ch + gap), cw, ch]); });
+    for (let k = 0; k < cols - 1; k++) addG({ role: "gcol", key: "gcol", k, horiz: true });
+    for (let k = 0; k < rows - 1; k++) addG({ role: "grow", key: "grow", k, horiz: false });
   }
-  ps.forEach((p, i) => { const r = rects[i] || rects[rects.length - 1]; fillWin(p, r[0], r[1], r[2], r[3]); });
+  positionTiles(ws);
+}
+// place panes + gutters from the stored context and current weights (cheap CSS writes; no xterm fit)
+function positionTiles(ws) {
+  const t = ws._tile; if (!t) return;
+  const { ps, layout, x, y, w, h } = t, n = ps.length;
+  const place = (el, l, tp, ww, hh) => Object.assign(el.style, { left: l + "px", top: tp + "px", width: ww + "px", height: hh + "px" });
+  if (layout === "columns") {
+    const segs = splitW(x, w, tileW(ws, "col", n));
+    ps.forEach((p, i) => fillWin(p, segs[i].off, y, segs[i].size, h));
+    for (const g of t.gutters) { const s = segs[g.k]; place(g.el, s.off + s.size - 1, y, TILE_GAP + 2, h); }
+  } else if (layout === "rows") {
+    const segs = splitW(y, h, tileW(ws, "row", n));
+    ps.forEach((p, i) => fillWin(p, x, segs[i].off, w, segs[i].size));
+    for (const g of t.gutters) { const s = segs[g.k]; place(g.el, x, s.off + s.size - 1, w, TILE_GAP + 2); }
+  } else if (layout === "main" && n > 1) {
+    const mw = Math.round(w * mainRatio(ws)), sx = x + mw + TILE_GAP, sw2 = w - mw - TILE_GAP;
+    fillWin(ps[0], x, y, mw, h);
+    const segs = splitW(y, h, tileW(ws, "stack", n - 1));
+    for (let i = 1; i < n; i++) fillWin(ps[i], sx, segs[i - 1].off, sw2, segs[i - 1].size);
+    for (const g of t.gutters) {
+      if (g.role === "main") place(g.el, x + mw - 1, y, TILE_GAP + 2, h);
+      else { const s = segs[g.k]; place(g.el, sx, s.off + s.size - 1, sw2, TILE_GAP + 2); }
+    }
+  } else { // grid — column widths (shared down each column) and row heights (shared across each row)
+    const cols = Math.ceil(Math.sqrt(n)), rows = Math.ceil(n / cols);
+    const cseg = splitW(x, w, tileW(ws, "gcol", cols)), rseg = splitW(y, h, tileW(ws, "grow", rows));
+    ps.forEach((p, i) => { const cx = i % cols, cy = Math.floor(i / cols); fillWin(p, cseg[cx].off, rseg[cy].off, cseg[cx].size, rseg[cy].size); });
+    for (const g of t.gutters) {
+      if (g.role === "gcol") { const s = cseg[g.k]; place(g.el, s.off + s.size - 1, y, TILE_GAP + 2, h); }
+      else { const s = rseg[g.k]; place(g.el, x, s.off + s.size - 1, w, TILE_GAP + 2); }
+    }
+  }
+}
+function startGutterDrag(e, ws, meta) {
+  e.preventDefault(); e.stopPropagation();
+  const t = ws._tile; if (!t) return;
+  const { w, h } = t;
+  const horiz = meta.horiz;
+  const start = horiz ? e.clientX : e.clientY;
+  let ctx;
+  if (meta.role === "main") {
+    ctx = { kind: "main", startPx: mainRatio(ws) * w, total: w };
+  } else {
+    // the weight array was already created (to the right length) by positionTiles, so read it directly
+    const arr = ws._w[meta.key], sum = arr.reduce((s, v) => s + v, 0) || 1, m = arr.length;
+    const content = (horiz ? w : h) - (m - 1) * TILE_GAP, k = meta.k;
+    ctx = { kind: "weights", arr, k, sum, content, a: arr[k] / sum * content, b: arr[k + 1] / sum * content };
+  }
+  meta.el.classList.add("dragging");
+  try { meta.el.setPointerCapture(e.pointerId); } catch (_) {}
+  let raf = 0;
+  const move = (ev) => {
+    const delta = (horiz ? ev.clientX : ev.clientY) - start;
+    if (ctx.kind === "main") {
+      const px = Math.max(TILE_MIN, Math.min(ctx.total - TILE_MIN, ctx.startPx + delta));
+      ws._w.mainW = px / ctx.total;
+    } else {
+      const dd = Math.max(-(ctx.a - TILE_MIN), Math.min(ctx.b - TILE_MIN, delta));
+      ctx.arr[ctx.k] = (ctx.a + dd) / ctx.content * ctx.sum;
+      ctx.arr[ctx.k + 1] = (ctx.b - dd) / ctx.content * ctx.sum;
+    }
+    positionTiles(ws);
+    if (!raf) raf = requestAnimationFrame(() => { raf = 0; for (const p of wsPanes(ws.id)) { try { p.fit.fit(); } catch (_) {} } });
+  };
+  const up = () => {
+    meta.el.classList.remove("dragging");
+    try { meta.el.releasePointerCapture(e.pointerId); } catch (_) {}
+    meta.el.removeEventListener("pointermove", move);
+    meta.el.removeEventListener("pointerup", up);
+    layoutActive(); // final, proper fit + pty resize + tab refresh
+  };
+  meta.el.addEventListener("pointermove", move);
+  meta.el.addEventListener("pointerup", up);
 }
 function fillWin(p, x, y, w, h) {
   if (!p || !p.floatwin) return;
@@ -1909,6 +2018,20 @@ function spawnFloatCascade() { const o = (cascade++ % 6) * 30; spawnFloat(40 + o
 function moveSessionHere(sessionId) {
   const o = (cascade++ % 6) * 30;
   spawnFloat(40 + o, 30 + o, 760, 480, null, sessionId);
+}
+// On (re)load, re-attach this window's still-alive sessions rather than dropping to one fresh pane: a
+// webview reload tears down the pane views, but the backend sessions keep running (their control channel
+// outlives the reload) tagged with our now-persistent TAB_ID. Returns true if it restored anything.
+// They come back into the one default tiled tab — full multi-tab / geometry restore is a follow-up.
+async function restoreSessions() {
+  let sessions = [];
+  try { sessions = JSON.parse(await invoke("sessions_json")).sessions || []; } catch (_) { return false; }
+  const mine = sessions
+    .filter((s) => s && typeof s.tab === "string" && s.tab.startsWith(TAB_ID + ":"))
+    .sort((a, b) => a.id - b.id);
+  if (!mine.length) return false;
+  for (const s of mine) moveSessionHere(s.id);
+  return true;
 }
 // open a floating pane hosting a WASM-TUI plugin (kedi:app) by name; falls back to a shell pane
 // server-side if the app isn't installed. `x`/`y` optional (cascades if absent).
@@ -2948,7 +3071,11 @@ async function boot() {
   const ws0 = newWorkspace("tiled"); // Tiled is the default experience; Floating stays per-tab optional
   activeWs = ws0.id;
   if (attach) moveSessionHere(Number(attach));
-  else spawnFloatCascade(); // open with one terminal; ⌘T new terminal · + for a new tab
+  else if (!(await restoreSessions())) spawnFloatCascade(); // reattach this window's panes, else one fresh terminal
+  // A reload leaves the previous page's panes orphaned server-side (their sessions were just re-attached
+  // above, superseding the old viewers). Once those re-attaches have landed, reap every pane sender that
+  // isn't one of THIS page's live panes — ending the stale run_pane loops without closing any session.
+  setTimeout(() => { try { invoke("reap_window_panes", { keep: allPanes().map((p) => p.sid) }).catch(() => {}); } catch (_) {} }, 2000);
   _lastCanvas = { w: $("canvas").clientWidth, h: $("canvas").clientHeight };
   // coalesce the rapid resize-event stream to one reflow per frame (avoids spamming pty resizes)
   let _reflowPending = false;
