@@ -1014,7 +1014,9 @@ function startGutterDrag(e, ws, meta) {
 }
 function fillWin(p, x, y, w, h) {
   if (!p || !p.floatwin) return;
-  Object.assign(p.floatwin.style, { left: x + "px", top: y + "px", width: w + "px", height: h + "px", transform: "none", zIndex: "20", display: "flex" });
+  // integer px only: fractional heights (from weight-based splits) desync xterm's scroll range from
+  // its container — the viewport then can't quite reach the last line when scrolling back down.
+  Object.assign(p.floatwin.style, { left: Math.round(x) + "px", top: Math.round(y) + "px", width: Math.round(w) + "px", height: Math.round(h) + "px", transform: "none", zIndex: "20", display: "flex" });
 }
 // remember/restore a pane's free geometry across tiled↔floating switches
 function saveFloat(p) { if (p.floatwin) p._floatStyle = p.floatwin.style.cssText; }
@@ -1815,6 +1817,19 @@ async function makePane(app, attachId) {
   pane.open = () => {
     if (pane.opened) return; pane.opened = true;
     term.open(termEl);
+    // Bottom-snap: xterm's viewport can land one line shy of the bottom on a downward scroll (subpixel
+    // scroll-range drift, or scrollback trimmed while scrolled up) and then refuses to close the gap
+    // until a keystroke forces scrollToBottom. If a wheel-down ends within a line of the bottom, snap.
+    wrapper.addEventListener("wheel", (e) => {
+      if (e.deltaY <= 0) return; // only downward scrolls
+      requestAnimationFrame(() => { // after xterm has applied the scroll
+        try {
+          const b = term.buffer.active;
+          const short = b.baseY - b.viewportY;
+          if (short > 0 && short <= 1) term.scrollToBottom();
+        } catch (_) {}
+      });
+    }, { passive: true });
     // GPU (WebGL) renderer. Backgrounds are opaque (transparency made WebGL flicker) and there's NO
     // desynchronized context (that caused glyph-atlas corruption in WKWebView) — so it's fast and
     // clean. Rebuild the atlas once the vendored Nerd Font is ready so no tofu is cached. (Canvas
